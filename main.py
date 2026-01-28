@@ -1,51 +1,29 @@
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-import openai
+import requests
+import json
 
-# Токен вашего Telegram бота
-TOKEN = "7917601350:AAFG1E7kHKrNzTXIprNADOzLvxpnrUjAcO4"
+OPENAI_API_KEY = "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"
 
-# OpenAI ключ (вставь сюда свой действующий новый ключ)
-openai.api_key = "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"
+def ask_gpt(prompt):
+    url = "https://api.openai.com/v1/chat/completions"
 
-# Команда /start
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Бот работает 👍")
+    headers = {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Content-Type": "application/json"
+    }
 
-# Команда /review
-async def handle_review(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.replace("/review", "").strip()  # убираем команду из текста
-    if not text:
-        await update.message.reply_text("Напишите текст отзыва после команды /review")
-        return
+    data = {
+        "model": "gpt-4.1-mini",
+        "messages": [
+            {"role": "system", "content": "Ты помощник для работы с отзывами автосервиса."},
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0.7
+    }
 
-    # Промпт для GPT
-    prompt = f"""
-Ты ассистент автосервиса. Нужно сделать два текста:
-1) Вежливый ответ клиенту на отзыв: "{text}"
-2) Если отзыв негативный (1-2 звезды), подготовь текст жалобы, который можно вставить на Яндекс/2ГИС.
-Ответь в формате:
-Ответ клиенту:
-<текст ответа>
+    response = requests.post(url, headers=headers, json=data, timeout=30)
 
-Жалоба:
-<текст жалобы, если есть>
-"""
+    if response.status_code != 200:
+        return f"Ошибка GPT: {response.text}"
 
-    try:
-        response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
-            messages=[{"role": "user", "content": prompt}]
-        )
-        answer = response.choices[0].message.content
-        await update.message.reply_text(answer)
-    except Exception as e:
-        await update.message.reply_text(f"Ошибка GPT: {e}")
-
-# Создаём приложение бота
-app = ApplicationBuilder().token(TOKEN).build()
-app.add_handler(CommandHandler("start", start))
-app.add_handler(CommandHandler("review", handle_review))
-
-# Запуск бота
-app.run_polling()
+    result = response.json()
+    return result["choices"][0]["message"]["content"]
