@@ -14,10 +14,10 @@ import openai  # библиотека GPT
 # Переменные окружения
 # ==========================
 TELEGRAM_BOT_TOKEN = os.environ.get("7917601350:AAFG1E7kHKrNzTXIprNADOzLvxpnrUjAcO4")
-OPENAI_API_KEY = os.environ.get("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")
+#OPENAI_API_KEY = os.environ.get("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")
 
 # Настройка OpenAI
-openai.api_key = OPENAI_API_KEY
+#openai.api_key = OPENAI_API_KEY
 
 # ==========================
 # Логирование
@@ -87,3 +87,4 @@ def main():
 # ✅ Важно: правильная проверка главного модуля
 if name == "__main__":
     main()
+
