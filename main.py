@@ -8,7 +8,7 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
-import openai  # библиотека GPT
+#import openai  # библиотека GPT
 
 # ==========================
 # Переменные окружения
@@ -87,4 +87,5 @@ def main():
 # ✅ Важно: правильная проверка главного модуля
 if name == "__main__":
     main()
+
 
