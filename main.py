@@ -53,19 +53,12 @@ async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # -------------------------------
 # Основная функция
-# -------------------------------
 def main():
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("review", review))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
-
-    logging.info("Бот запущен и ожидает сообщений")
+    print("Бот запущен, ожидаем команды /start")
     app.run_polling()
 
-# -------------------------------
-# Запуск бота
-# -------------------------------
+# Запуск
 if name == "__main__":
-
     main()
