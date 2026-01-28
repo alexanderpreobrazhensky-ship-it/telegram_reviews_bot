@@ -1,13 +1,12 @@
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-import os
 import openai
 
 # Токен вашего Telegram бота
 TOKEN = "7917601350:AAFG1E7kHKrNzTXIprNADOzLvxpnrUjAcO4"
 
-# Подключаем OpenAI через переменную среды
-openai.api_key ="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"
+# OpenAI ключ (вставь сюда свой действующий новый ключ)
+openai.api_key = "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"
 
 # Команда /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -49,6 +48,4 @@ app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("review", handle_review))
 
 # Запуск бота
-
 app.run_polling()
-
