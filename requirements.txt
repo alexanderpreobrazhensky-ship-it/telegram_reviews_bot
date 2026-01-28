@@ -1,4 +1,1 @@
 python-telegram-bot==20.7
-transformers==4.38.2
-torch
-sentence-transformers==2.2.2
