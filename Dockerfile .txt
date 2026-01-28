@@ -1,19 +1,9 @@
 FROM python:3.11-slim
-
 WORKDIR /app
-
-# Установка системных зависимостей
-RUN apt-get update && apt-get install -y \
-    gcc \
-    g++ \
-    && rm -rf /var/lib/apt/lists/*
-
-# Копируем зависимости
+# Сначала указываем индекс для установки torch
+RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
+# Затем копируем и устанавливаем остальные зависимости из requirements.txt
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-
-# Копируем код
 COPY . .
-
-# Запускаем бота
 CMD ["python", "main.py"]
