@@ -2,15 +2,30 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# 1. Устанавливаем ТОЛЬКО torch (самый простой способ)
-RUN pip install torch==2.2.0 --index-url https://download.pytorch.org/whl/cpu
+# ОЧИСТКА КЭША после каждой установки для экономии места
+RUN apt-get update && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# 2. Копируем requirements.txt и устанавливаем остальное
+# 1. Устанавливаем torch БЕЗ лишних зависимостей
+RUN pip install --no-cache-dir \
+    torch==1.13.1+cpu \
+    --index-url https://download.pytorch.org/whl/cpu \
+    && rm -rf ~/.cache/pip
+
+# 2. Устанавливаем transformers БЕЗ лишнего
+RUN pip install --no-cache-dir \
+    transformers==4.30.2 \
+    --no-deps \
+    && rm -rf ~/.cache/pip
+
+# 3. Только основные зависимости
 COPY requirements.txt .
-RUN pip install -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt \
+    && rm -rf ~/.cache/pip
 
-# 3. Копируем код
+# 4. Копируем код
 COPY . .
 
-# 4. Запускаем
+# 5. Очищаем ещё раз перед запуском
+RUN apt-get clean && rm -rf /tmp/* /var/tmp/*
+
 CMD ["python", "main.py"]
