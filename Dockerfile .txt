@@ -1,9 +1,30 @@
 FROM python:3.11-slim
+
 WORKDIR /app
-# Сначала указываем индекс для установки torch
-RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
-# Затем копируем и устанавливаем остальные зависимости из requirements.txt
+
+# Устанавливаем системные зависимости для torch
+RUN apt-get update && apt-get install -y \
+    wget \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# 1. Сначала устанавливаем torch с правильным индексом
+RUN pip install --no-cache-dir \
+    torch==2.2.0 \
+    --index-url https://download.pytorch.org/whl/cpu
+
+# 2. Затем устанавливаем transformers и другие ML-библиотеки
+RUN pip install --no-cache-dir \
+    transformers==4.38.2 \
+    sentence-transformers==2.2.2 \
+    scikit-learn==1.3.2
+
+# 3. Копируем requirements.txt и устанавливаем остальное
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+
+# 4. Копируем код
 COPY . .
+
+# 5. Запускаем
 CMD ["python", "main.py"]
