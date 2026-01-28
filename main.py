@@ -24,6 +24,8 @@ def ask_gpt(prompt):
 
     if response.status_code != 200:
         return f"Ошибка GPT: {response.text}"
+        print(ask_gpt("Скажи одним предложением, что ты работаешь"))
 
     result = response.json()
     return result["choices"][0]["message"]["content"]
+
