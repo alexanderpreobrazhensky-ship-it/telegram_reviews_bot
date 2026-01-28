@@ -1,31 +1,80 @@
-import requests
-import json
+import logging
+from telegram import Update
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
+)
 
-OPENAI_API_KEY = "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"
+# =====================
+# НАСТРОЙКИ
+# =====================
 
-def ask_gpt(prompt):
-    url = "https://api.openai.com/v1/chat/completions"
+TELEGRAM_BOT_TOKEN = "7917601350:AAFG1E7kHKrNzTXIprNADOzLvxpnrUjAcO4"
 
-    headers = {
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
-        "Content-Type": "application/json"
-    }
+# =====================
+# ЛОГИ
+# =====================
 
-    data = {
-        "model": "gpt-4.1-mini",
-        "messages": [
-            {"role": "system", "content": "Ты помощник для работы с отзывами автосервиса."},
-            {"role": "user", "content": prompt}
-        ],
-        "temperature": 0.7
-    }
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO
+)
 
-    response = requests.post(url, headers=headers, json=data, timeout=30)
+# =====================
+# КОМАНДЫ
+# =====================
 
-    if response.status_code != 200:
-        return f"Ошибка GPT: {response.text}"
-        print(ask_gpt("Скажи одним предложением, что ты работаешь"))
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Привет 👋\n\n"
+        "Я бот техцентра «Лира».\n\n"
+        "Пока работаю в тестовом режиме.\n"
+        "Команда:\n"
+        "/review <текст отзыва>"
+    )
 
-    result = response.json()
-    return result["choices"][0]["message"]["content"]
+async def review(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text(
+            "❗️ Пришли отзыв так:\n"
+            "/review Диагност не понравился, сервис отвратительный"
+        )
+        return
 
+    review_text = " ".join(context.args)
+
+    # Пока просто эхо-ответ
+    answer = (
+        "📝 Получен отзыв:\n\n"
+        f"{review_text}\n\n"
+        "✅ Бот работает.\n"
+        "GPT подключим позже."
+    )
+
+    await update.message.reply_text(answer)
+
+async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Я понимаю только команды.\n"
+        "Используй /start или /review"
+    )
+
+# =====================
+# ЗАПУСК
+# =====================
+
+def main():
+    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("review", review))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
+
+    logging.info("Бот запущен и ожидает сообщения")
+    app.run_polling()
+
+if name == "__main__":
+    main()
