@@ -1,1 +1,8 @@
 python-telegram-bot==20.7
+transformers==4.38.2
+torch==2.2.0
+sentence-transformers==2.2.2
+aiohttp==3.9.3
+beautifulsoup4==4.12.3
+python-dotenv==1.0.0
+sqlite3
