@@ -1,15 +1,10 @@
 FROM python:3.11-slim
-
 WORKDIR /app
 
-# Bothost ищет эти пакеты - установим их
-RUN pip install python-dotenv==1.0.0
+# Добавить эту строку:
+RUN pip install torch==1.13.1+cpu --index-url https://download.pytorch.org/whl/cpu
 
-# Копируем requirements.txt
 COPY requirements.txt .
 RUN pip install -r requirements.txt
-
-# Копируем код
 COPY . .
-
 CMD ["python", "main.py"]
