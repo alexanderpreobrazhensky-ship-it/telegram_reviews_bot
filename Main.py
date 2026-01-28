@@ -1,22 +1,50 @@
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+import os
+import openai
 
-# Токен твоего бота
+# Токен бота Telegram
 TOKEN = "7917601350:AAFG1E7kHKrNzTXIprNADOzLvxpnrUjAcO4"
 
-# Обработчик команды /start
+# Подключаем OpenAI через переменную среды
+openai.api_key = os.environ["OPENAI_API_KEY"]
+
+# /start команда
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Бот работает 👍")
 
-# Обработчик команды /review
+# /review команда
 async def handle_review(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Тестовый ответ без GPT
-    await update.message.reply_text("Тестовый ответ на отзыв: " + update.message.text)
+    text = update.message.text.replace("/review", "").strip()  # убираем команду из текста
+    if not text:
+        await update.message.reply_text("Напишите текст отзыва после команды /review")
+        return
+
+    # Промпт для GPT
+    prompt = f"""
+    Ты ассистент автосервиса. Нужно сделать два текста:
+    1) Вежливый ответ клиенту на отзыв: "{text}"
+    2) Если отзыв негативный (1-2 звезды), подготовь текст жалобы, который можно вставить на Яндекс/2ГИС.
+    Ответь в формате:
+    Ответ клиенту:
+    <текст ответа>
+
+    Жалоба:
+    <текст жалобы, если есть>
+    """
+
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",
+            messages=[{"role": "user", "content": prompt}]
+        )
+        answer = response.choices[0].message.content
+        await update.message.reply_text(answer)
+    except Exception as e:
+        await update.message.reply_text(f"Ошибка GPT: {e}")
 
 # Создаем приложение бота
 app = ApplicationBuilder().token(TOKEN).build()
-
-# Регистрируем обработчики
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("review", handle_review))
 
