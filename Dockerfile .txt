@@ -2,18 +2,12 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Устанавливаем torch отдельно
-RUN pip install --no-cache-dir \
-    torch==1.13.1+cpu \
-    --index-url https://download.pytorch.org/whl/cpu
+# Bothost ищет эти пакеты - установим их
+RUN pip install python-dotenv==1.0.0
 
-# Устанавливаем transformers
-RUN pip install --no-cache-dir \
-    transformers==4.30.2
-
-# Остальные зависимости
+# Копируем requirements.txt
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install -r requirements.txt
 
 # Копируем код
 COPY . .
