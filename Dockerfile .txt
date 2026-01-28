@@ -1,0 +1,19 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Устанавливаем минимум: torch + transformers
+RUN pip install --no-cache-dir \
+    torch==1.13.1+cpu \
+    --index-url https://download.pytorch.org/whl/cpu
+
+RUN pip install --no-cache-dir \
+    transformers==4.30.2
+
+# Устанавливаем остальное
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+CMD ["python", "main.py"]
