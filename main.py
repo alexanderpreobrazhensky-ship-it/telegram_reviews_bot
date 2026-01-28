@@ -3,12 +3,8 @@ import logging
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
 
-# Токен Telegram
-TELEGRAM_BOT_TOKEN = os.environ.get("7917601350:AAFG1E7kHKrNzTXIprNADOzLvxpnrUjAcO4")
-
-# ✅ Проверка наличия токена при запуске
-if not TELEGRAM_BOT_TOKEN:
-    raise ValueError("Не найден TELEGRAM_BOT_TOKEN в переменных окружения")
+# Токен Telegram - ТОЛЬКО ДЛЯ ТЕСТА!
+TELEGRAM_BOT_TOKEN = "7917601350:AAFG1E7kHKrNzTXIprNADOzLvxpnrUjAcO4"  # Прямо в коде
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -79,18 +75,23 @@ def analyze_sentiment(text: str) -> str:
 
 def main():
     try:
+        print(f"🚀 Запускаю бота с токеном: {TELEGRAM_BOT_TOKEN[:10]}...")  # Для отладки
         app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
         app.add_handler(CommandHandler("start", start))
         app.add_handler(CommandHandler("review", review))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
         
         logger.info("Бот запущен и ожидает сообщений")
+        print("✅ Бот запущен! Ищите в Telegram")
         app.run_polling(drop_pending_updates=True)
         
     except Exception as e:
         logger.error(f"Ошибка запуска бота: {e}")
-        raise
+        print(f"❌ ОШИБКА: {e}")
+        print("\nВозможные причины:")
+        print("1. Токен неверный")
+        print("2. Нет интернет-соединения")
+        print("3. Библиотека не установлена (pip install python-telegram-bot)")
 
-# ✅ ИСПРАВЛЕННАЯ СТРОКА - обратите внимание на ДВА подчеркивания с каждой стороны
 if __name__ == "__main__":
     main()
