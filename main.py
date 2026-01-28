@@ -6,7 +6,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, Messa
 # -------------------------------
 # Переменная окружения Telegram
 # -------------------------------
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+TELEGRAM_BOT_TOKEN = os.environ.get("7917601350:AAFG1E7kHKrNzTXIprNADOzLvxpnrUjAcO4")
 
 # -------------------------------
 # Настройка логирования
@@ -67,4 +67,5 @@ def main():
 # Запуск бота
 # -------------------------------
 if name == "__main__":
+
     main()
