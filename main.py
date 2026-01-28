@@ -1,19 +1,12 @@
 import os
 import logging
 from telegram import Update
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    MessageHandler,
-    ContextTypes,
-    filters,
-)
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
 
 # -------------------------------
-# Настройка переменных окружения
+# Переменная окружения Telegram
 # -------------------------------
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-# OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")  # GPT отключен пока
 
 # -------------------------------
 # Настройка логирования
@@ -29,7 +22,7 @@ logging.basicConfig(
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Привет 👋\n"
-        "Я бот техцентра «Лира».\n"
+        "Я минимальный бот техцентра «Лира».\n"
         "Команды:\n"
         "/review <текст отзыва>"
     )
@@ -43,27 +36,6 @@ async def review(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     review_text = " ".join(context.args)
-
-    # -------------------------------
-    # GPT блок закомментирован
-    # -------------------------------
-    """
-    import openai
-    openai.api_key = OPENAI_API_KEY
-
-    try:
-        response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": "system", "content": "Ты помощник менеджера автосервиса, готовишь ответ на отзывы."},
-                {"role": "user", "content": review_text}
-            ],
-            max_tokens=200
-        )
-        gpt_reply = response.choices[0].message.content
-    except Exception as e:
-        gpt_reply = f"Ошибка GPT: {e}"
-    """
 
     # Заглушка вместо GPT
     gpt_reply = "✅ Бот работает без GPT. Ответ готов позже."
