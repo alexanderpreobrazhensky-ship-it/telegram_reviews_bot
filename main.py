@@ -12,7 +12,7 @@ from telegram.ext import (
 # НАСТРОЙКИ
 # =====================
 
-TELEGRAM_BOT_TOKEN = "7917601350:AAFG1E7kHKrNzTXIprNADOzLvxpnrUjAcO4"
+TELEGRAM_BOT_TOKEN = "ВСТАВЬ_СЮДА_ТОКЕН_ОТ_BOTFATHER"
 
 # =====================
 # ЛОГИ
@@ -31,39 +31,37 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Привет 👋\n\n"
         "Я бот техцентра «Лира».\n\n"
-        "Пока работаю в тестовом режиме.\n"
-        "Команда:\n"
+        "Команды:\n"
         "/review <текст отзыва>"
     )
 
 async def review(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text(
-            "❗️ Пришли отзыв так:\n"
+            "❗ Используй команду так:\n"
             "/review Диагност не понравился, сервис отвратительный"
         )
         return
 
     review_text = " ".join(context.args)
 
-    # Пока просто эхо-ответ
-    answer = (
+    response = (
         "📝 Получен отзыв:\n\n"
         f"{review_text}\n\n"
-        "✅ Бот работает.\n"
+        "✅ Бот работает корректно.\n"
         "GPT подключим позже."
     )
 
-    await update.message.reply_text(answer)
+    await update.message.reply_text(response)
 
 async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Я понимаю только команды.\n"
-        "Используй /start или /review"
+        "Напиши /start или /review"
     )
 
 # =====================
-# ЗАПУСК
+# ЗАПУСК БОТА
 # =====================
 
 def main():
@@ -76,5 +74,6 @@ def main():
     logging.info("Бот запущен и ожидает сообщения")
     app.run_polling()
 
+# 🔴 ВАЖНО: ОБРАТИ ВНИМАНИЕ НА ПОДЧЁРКИВАНИЯ
 if name == "__main__":
     main()
