@@ -7,7 +7,7 @@ import openai
 TOKEN = "7917601350:AAFG1E7kHKrNzTXIprNADOzLvxpnrUjAcO4"
 
 # Подключаем OpenAI через переменную среды
-openai.api_key = "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"
+openai.api_key ="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"
 
 # Команда /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -51,3 +51,4 @@ app.add_handler(CommandHandler("review", handle_review))
 # Запуск бота
 
 app.run_polling()
+
