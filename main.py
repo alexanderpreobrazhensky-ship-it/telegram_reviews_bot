@@ -63,6 +63,12 @@ def init_database():
 # Инициализируем БД при запуске
 init_database()
 
+# Глобальный список получателей отчётов (для динамического добавления)
+if REPORT_CHAT_IDS:
+    report_recipients = [int(cid.strip()) for cid in REPORT_CHAT_IDS.split(',') if cid.strip()]
+else:
+    report_recipients = []
+
 # ================== АНАЛИЗ ОТЗЫВОВ ==================
 class ReviewAnalyzer:
     def __init__(self):
@@ -168,9 +174,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📞 {SERVICE_PHONE}\n\n"
         "*Команды:*\n"
         "▫️ /analyze текст отзыва - анализ отзыва\n"
-        "▫️ /отчет - отчёт за неделю\n"
-        "▫️ /статистика - текущая статистика\n"
-        "▫️ /test - тестовый режим\n\n"
+        "▫️ /report - отчёт за неделю\n"
+        "▫️ /stats - текущая статистика\n"
+        "▫️ /test - тестовый режим\n"
+        "▫️ /myid - узнать ваш chat_id\n"
+        "▫️ /addreport - получать отчёты\n\n"
         "*Пример:*\n"
         "`/analyze Отличный сервис, быстро починили!`",
         parse_mode="Markdown"
@@ -235,7 +243,7 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Ошибка: {str(e)}")
 
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /отчет"""
+    """Команда /report"""
     conn = sqlite3.connect('reviews.db')
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
@@ -295,7 +303,7 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(report, parse_mode="Markdown")
 
 async def statistics_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /статистика"""
+    """Команда /stats"""
     conn = sqlite3.connect('reviews.db')
     cursor = conn.cursor()
     
@@ -329,6 +337,49 @@ async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
+
+async def myid_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /myid - узнать chat_id"""
+    chat_id = update.effective_chat.id
+    user = update.effective_user
+    
+    await update.message.reply_text(
+        f"👤 *Ваши данные в Telegram:*\n\n"
+        f"🆔 *Chat ID:* `{chat_id}`\n"
+        f"👤 *Имя:* {user.first_name or ''} {user.last_name or ''}\n"
+        f"📛 *Username:* @{user.username if user.username else 'нет'}\n\n"
+        f"Этот ID можно использовать в переменной REPORT_CHAT_IDS",
+        parse_mode="Markdown"
+    )
+
+async def add_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /addreport - добавить чат для получения отчётов"""
+    chat_id = update.effective_chat.id
+    
+    if chat_id not in report_recipients:
+        report_recipients.append(chat_id)
+        await update.message.reply_text(
+            f"✅ *Вы добавлены в список получателей отчётов!*\n\n"
+            f"📊 Ваш Chat ID: `{chat_id}`\n"
+            f"⏰ Отчёты будут приходить каждый *понедельник в 8:00 утра*\n\n"
+            f"Чтобы отписаться, используйте команду /stopreport",
+            parse_mode="Markdown"
+        )
+    else:
+        await update.message.reply_text("✅ Вы уже в списке получателей отчётов")
+
+async def stopreport_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /stopreport - отписаться от отчётов"""
+    chat_id = update.effective_chat.id
+    
+    if chat_id in report_recipients:
+        report_recipients.remove(chat_id)
+        await update.message.reply_text(
+            "✅ *Вы отписаны от получения отчётов*\n\n"
+            "Чтобы снова подписаться, используйте /addreport"
+        )
+    else:
+        await update.message.reply_text("❌ Вы не были подписаны на отчёты")
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик кнопок"""
@@ -395,7 +446,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def send_weekly_report(context: ContextTypes.DEFAULT_TYPE):
     """Автоматическая отправка отчёта"""
-    if not REPORT_CHAT_IDS:
+    if not report_recipients:
+        print("📭 Нет получателей для отправки отчёта")
         return
     
     try:
@@ -415,6 +467,7 @@ async def send_weekly_report(context: ContextTypes.DEFAULT_TYPE):
         conn.close()
         
         if stats[0] == 0:
+            print("📭 Нет отзывов за неделю для отчёта")
             return
         
         report = (
@@ -422,24 +475,28 @@ async def send_weekly_report(context: ContextTypes.DEFAULT_TYPE):
             f"Автосервис «{SERVICE_NAME}»\n\n"
             f"📈 Отзывов за неделю: {stats[0]}\n"
             f"⭐ Средний рейтинг: {stats[1]:.1f}/5\n\n"
-            f"Полный отчёт: /отчет\n"
+            f"Полный отчёт: /report\n"
             f"📅 {datetime.now().strftime('%d.%m.%Y %H:%M')}"
         )
         
         # Отправляем всем получателям
-        for chat_id in REPORT_CHAT_IDS.split(','):
-            if chat_id.strip():
-                try:
-                    await context.bot.send_message(
-                        chat_id=int(chat_id.strip()),
-                        text=report,
-                        parse_mode="Markdown"
-                    )
-                except:
-                    pass
+        success_count = 0
+        for chat_id in report_recipients:
+            try:
+                await context.bot.send_message(
+                    chat_id=int(chat_id),
+                    text=report,
+                    parse_mode="Markdown"
+                )
+                success_count += 1
+                print(f"✅ Отчёт отправлен в чат {chat_id}")
+            except Exception as e:
+                print(f"❌ Ошибка отправки в чат {chat_id}: {e}")
+        
+        print(f"📤 Отправлено отчётов: {success_count}/{len(report_recipients)}")
                     
     except Exception as e:
-        print(f"❌ Ошибка отправки отчёта: {e}")
+        print(f"❌ Ошибка генерации отчёта: {e}")
 
 # ================== ЗАПУСК БОТА ==================
 def main():
@@ -447,29 +504,33 @@ def main():
     print("🔄 Создаю приложение Telegram...")
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     
-    # Регистрация команд
+    # Регистрация команд - ТОЛЬКО ЛАТИНИЦА!
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("analyze", analyze_command))
-    app.add_handler(CommandHandler("отчет", report_command))
     app.add_handler(CommandHandler("report", report_command))
-    app.add_handler(CommandHandler("статистика", statistics_command))
-    app.add_handler(CommandHandler("statistics", statistics_command))
+    app.add_handler(CommandHandler("stats", statistics_command))
     app.add_handler(CommandHandler("test", test_command))
+    app.add_handler(CommandHandler("myid", myid_command))
+    app.add_handler(CommandHandler("addreport", add_report_command))
+    app.add_handler(CommandHandler("stopreport", stopreport_command))
     
     # Обработчик кнопок
     app.add_handler(CallbackQueryHandler(button_handler))
     
     # Настройка планировщика для еженедельных отчётов
-    if REPORT_CHAT_IDS:
+    try:
         scheduler = AsyncIOScheduler()
-        # Каждый понедельник в 8:00 утра
+        # Каждый понедельник в 8:00 утра (по Москве)
         scheduler.add_job(
             send_weekly_report,
             CronTrigger(day_of_week='mon', hour=8, minute=0, timezone='Europe/Moscow'),
             args=[app]
         )
         scheduler.start()
-        print("✅ Еженедельные отчёты настроены на понедельник 8:00")
+        print("✅ Еженедельные отчёты настроены на понедельник 8:00 (МСК)")
+        print(f"👥 Получатели отчётов: {len(report_recipients)} чел.")
+    except Exception as e:
+        print(f"⚠️ Не удалось настроить планировщик: {e}")
     
     print("=" * 60)
     print("🚀 БОТ ЗАПУСКАЕТСЯ В BOTHOST...")
