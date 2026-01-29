@@ -30,8 +30,14 @@ def get_env(name: str, default: str = None) -> str:
         raise RuntimeError(f"{name} не установлен")
     return value
 
+# Получаем URL проекта на Railway автоматически
+RAILWAY_URL = get_env("RAILWAY_STATIC_URL") or get_env("RAILWAY_PUBLIC_DOMAIN")
+if not RAILWAY_URL:
+    raise RuntimeError("Railway URL not found in environment")
+WEBHOOK_URL = RAILWAY_URL + "/webhook"
+
 # -------------------------------------------------
-# БАЗА ДАННЫХ
+# ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ
 # -------------------------------------------------
 
 def init_db():
@@ -69,14 +75,12 @@ def save_review(chat_id: int, text: str, rating: int, sentiment: str, categories
 # -------------------------------------------------
 
 def analyze_with_deepseek(text: str) -> Dict:
-    """Анализ через DeepSeek с возвратом структурированных данных"""
     try:
         api_key = get_env("DEEPSEEK_API_KEY", "")
         if not api_key:
             return simple_analyze(text)
-            
-        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
         
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
         prompt = f"""Проанализируй отзыв для автосервиса и верни JSON:
 {{
     "rating": 1-5,
@@ -85,43 +89,37 @@ def analyze_with_deepseek(text: str) -> Dict:
     "violations": ["insults", "fake_info", "spam"] или [],
     "suitable_for_dialogue": true/false
 }}
-
 Отзыв: "{text}"
 """
-        
         payload = {
             "model": "deepseek-chat",
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.3,
         }
-        
         r = requests.post(DEEPSEEK_API_URL, headers=headers, json=payload, timeout=30)
         r.raise_for_status()
         result = r.json()["choices"][0]["message"]["content"]
-        
-        # Парсим JSON ответ
         if "```json" in result:
             result = result.split("```json")[1].split("```")[0]
         elif "```" in result:
             result = result.split("```")[1].split("```")[0]
-            
         return json.loads(result)
-        
+    except requests.exceptions.RequestException as e:
+        logger.error(f"DeepSeek network error: {e}")
+        return simple_analyze(text)
+    except json.JSONDecodeError as e:
+        logger.error(f"DeepSeek JSON error: {e}")
+        return simple_analyze(text)
     except Exception as e:
-        logger.error(f"DeepSeek error: {e}")
+        logger.error(f"DeepSeek unknown error: {e}")
         return simple_analyze(text)
 
 def simple_analyze(text: str) -> Dict:
-    """Простой анализ по ключевым словам"""
     text_lower = text.lower()
-    
-    # Определение рейтинга
     negative = ['плох', 'ужас', 'кошмар', 'отврат', 'не рекоменд']
     positive = ['хорош', 'отличн', 'супер', 'рекоменд', 'спасиб']
-    
     neg = sum(1 for word in negative if word in text_lower)
     pos = sum(1 for word in positive if word in text_lower)
-    
     if neg > pos:
         rating = 1 if neg > 3 else 2
         sentiment = "negative"
@@ -132,7 +130,6 @@ def simple_analyze(text: str) -> Dict:
         rating = 3
         sentiment = "neutral"
     
-    # Категории
     categories = []
     if any(word in text_lower for word in ['ремонт', 'почин', 'диагност']):
         categories.append('quality')
@@ -141,16 +138,10 @@ def simple_analyze(text: str) -> Dict:
     if any(word in text_lower for word in ['время', 'ждал', 'долго']):
         categories.append('time')
     
-    return {
-        "rating": rating,
-        "sentiment": sentiment,
-        "categories": categories,
-        "violations": [],
-        "suitable_for_dialogue": True
-    }
+    return {"rating": rating, "sentiment": sentiment, "categories": categories, "violations": [], "suitable_for_dialogue": True}
 
 # -------------------------------------------------
-# ТЕЛЕГРАМ ОТВЕТЫ
+# TELEGRAM
 # -------------------------------------------------
 
 def telegram_request(method: str, payload: dict):
@@ -162,42 +153,29 @@ def telegram_request(method: str, payload: dict):
     return response.json()
 
 def send_message(chat_id: int, text: str, parse_mode: str = "Markdown"):
-    payload = {
-        "chat_id": chat_id,
-        "text": text,
-        "parse_mode": parse_mode,
-    }
+    payload = {"chat_id": chat_id, "text": text, "parse_mode": parse_mode}
     return telegram_request("sendMessage", payload)
 
 def send_keyboard(chat_id: int, text: str, buttons: List[List[Dict]]):
     keyboard = {"inline_keyboard": buttons}
-    payload = {
-        "chat_id": chat_id,
-        "text": text,
-        "parse_mode": "Markdown",
-        "reply_markup": keyboard
-    }
+    payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown", "reply_markup": keyboard}
     return telegram_request("sendMessage", payload)
 
 # -------------------------------------------------
-# КОМАНДЫ БОТА
+# КОМАНДЫ
 # -------------------------------------------------
 
 def handle_start(chat_id: int):
     text = f"""🤖 *Бот автосервиса «{SERVICE_NAME}»*
-
 📍 {SERVICE_ADDRESS}
 📞 {SERVICE_PHONE}
-
 *Команды:*
 ▫️ /analyze текст - анализ отзыва
 ▫️ /stats - статистика
 ▫️ /myid - ваш chat_id
 ▫️ /report - отчёт за неделю
-
 *Пример:*
 `/analyze Отличный сервис, быстро починили!`"""
-    
     send_message(chat_id, text)
 
 def handle_analyze(chat_id: int, text: str):
@@ -205,33 +183,25 @@ def handle_analyze(chat_id: int, text: str):
         send_message(chat_id, "Напишите: /analyze ваш текст отзыва")
         return
     
-    # Анализируем
     analysis = analyze_with_deepseek(text)
     rating = analysis.get("rating", 3)
     sentiment = analysis.get("sentiment", "neutral")
     categories = analysis.get("categories", [])
     violations = analysis.get("violations", [])
     
-    # Сохраняем
     save_review(chat_id, text, rating, sentiment, categories)
     
-    # Формируем ответ
     stars = "⭐" * rating + "☆" * (5 - rating)
     response = f"""{stars}
 📊 *РЕЗУЛЬТАТ АНАЛИЗА*
-
 📝 Текст: {text[:150]}...
-
 🎯 Оценка: {rating}/5 звезд
 🎭 Тональность: {sentiment}"""
-    
     if categories:
         response += f"\n🏷 Категории: {', '.join(categories)}"
-    
     if violations:
         response += f"\n🚨 Нарушения: {', '.join(violations)}"
     
-    # Кнопки
     buttons = []
     if rating <= 3:
         buttons.append([{"text": "📝 Сформировать ответ", "callback_data": f"response:{rating}"}])
@@ -249,23 +219,42 @@ def handle_stats(chat_id: int):
     c.execute("SELECT COUNT(*), AVG(rating) FROM reviews")
     total, avg = c.fetchone()
     conn.close()
-    
     avg = avg or 0
-    response = f"""📊 *СТАТИСТИКА*
-
-Всего отзывов: {total}
-Средний рейтинг: {avg:.1f}/5
-
-📍 {SERVICE_ADDRESS}"""
-    
+    response = f"📊 *СТАТИСТИКА*\nВсего отзывов: {total}\nСредний рейтинг: {avg:.1f}/5\n📍 {SERVICE_ADDRESS}"
     send_message(chat_id, response)
 
 def handle_myid(chat_id: int):
     send_message(chat_id, f"🆔 *Ваш Chat ID:* `{chat_id}`")
 
+def handle_report(chat_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    week_ago = (datetime.utcnow() - timedelta(days=7)).isoformat()
+    c.execute("SELECT rating, COUNT(*) FROM reviews WHERE created_at >= ? GROUP BY rating", (week_ago,))
+    rows = c.fetchall()
+    conn.close()
+    
+    if not rows:
+        send_message(chat_id, "📊 За последнюю неделю отзывов не было")
+        return
+    
+    response = "📊 *ОТЧЁТ ЗА НЕДЕЛЮ*\n\n"
+    for rating, count in rows:
+        response += f"{rating}★: {'█' * min(count,10)} {count}\n"
+    
+    send_message(chat_id, response)
+
 # -------------------------------------------------
-# WEBHOOK ОБРАБОТЧИК
+# WEBHOOK
 # -------------------------------------------------
+
+@app.on_event("startup")
+async def set_webhook():
+    if WEBHOOK_URL:
+        token = get_env("TELEGRAM_BOT_TOKEN")
+        url = f"{TELEGRAM_API_URL.format(token=token, method='setWebhook')}?url={WEBHOOK_URL}"
+        requests.get(url)
+        logger.info(f"Webhook set to {WEBHOOK_URL}")
 
 @app.post("/webhook")
 async def telegram_webhook(request: Request):
@@ -279,22 +268,21 @@ async def telegram_webhook(request: Request):
         if text.startswith("/start"):
             handle_start(chat_id)
         elif text.startswith("/analyze"):
-            content = text[8:].strip()  # Убираем "/analyze "
-            handle_analyze(chat_id, content)
+            handle_analyze(chat_id, text[8:].strip())
         elif text.startswith("/stats"):
             handle_stats(chat_id)
         elif text.startswith("/myid") or text.startswith("/id"):
             handle_myid(chat_id)
-        elif text.startswith("/"):
+        elif text.startswith("/report"):
+            handle_report(chat_id)
+        else:
             send_message(chat_id, "Неизвестная команда. Используйте /start")
     
     elif "callback_query" in update:
         callback = update["callback_query"]
         chat_id = callback["message"]["chat"]["id"]
         data = callback["data"]
-        
         if data.startswith("response:"):
-            rating = data.split(":")[1]
             response = f"""📝 *ОТВЕТ ДЛЯ ПЛОЩАДКИ*
 
 Благодарим за обратную связь. Для решения вопроса просим предоставить номер и дату заказ-наряда. Готовы связаться с вами для урегулирования ситуации.
@@ -302,9 +290,7 @@ async def telegram_webhook(request: Request):
 С уважением, команда автосервиса «{SERVICE_NAME}»
 📞 {SERVICE_PHONE}
 📍 {SERVICE_ADDRESS}"""
-            
             send_message(chat_id, response)
-        
         elif data.startswith("thanks:"):
             response = f"""🙏 *ОТВЕТ С БЛАГОДАРНОСТЬЮ*
 
@@ -315,7 +301,6 @@ async def telegram_webhook(request: Request):
 
 С наилучшими пожеланиями,
 команда автосервиса «{SERVICE_NAME}»"""
-            
             send_message(chat_id, response)
     
     return {"ok": True}
@@ -327,7 +312,6 @@ def health_check():
 # -------------------------------------------------
 # ЗАПУСК
 # -------------------------------------------------
-
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 8000))
