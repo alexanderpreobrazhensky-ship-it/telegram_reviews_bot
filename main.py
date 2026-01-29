@@ -9,13 +9,11 @@ from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     CallbackQueryHandler,
-    ContextTypes,
-    MessageHandler,
-    filters
+    ContextTypes
 )
 
 print("=" * 70)
-print("🤖 БОТ АВТОСЕРВИСА «ЛИРА» - ПОЛНАЯ ВЕРСИЯ")
+print("🤖 БОТ АВТОСЕРВИСА «ЛИРА» - ИСПРАВЛЕННАЯ ВЕРСИЯ")
 print("=" * 70)
 
 # ================== КОНФИГУРАЦИЯ ==================
@@ -62,10 +60,6 @@ def init_database():
         )
     ''')
     
-    # Индексы для быстрого поиска
-    cursor.execute('CREATE INDEX IF NOT EXISTS idx_created_at ON reviews(created_at)')
-    cursor.execute('CREATE INDEX IF NOT EXISTS idx_rating ON reviews(detected_rating)')
-    
     conn.commit()
     conn.close()
     print("✅ База данных инициализирована")
@@ -85,7 +79,6 @@ class ReviewAnalyzer:
     
     def __init__(self):
         self.use_deepseek = False
-        self.deepseek_client = None
         
         if DEEPSEEK_API_KEY and DEEPSEEK_API_KEY.startswith("sk-"):
             try:
@@ -540,14 +533,6 @@ async def addreport_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Чтобы отписаться: /stopreport",
             parse_mode="Markdown"
         )
-        
-        # Сохраняем в базу или файл для персистентности
-        try:
-            with open('report_recipients.txt', 'w') as f:
-                for rid in report_recipients:
-                    f.write(f"{rid}\n")
-        except:
-            pass
     else:
         await update.message.reply_text("✅ Вы уже подписаны на отчёты")
 
@@ -558,14 +543,6 @@ async def stopreport_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if chat_id in report_recipients:
         report_recipients.remove(chat_id)
         await update.message.reply_text("✅ Вы отписаны от получения отчётов")
-        
-        # Сохраняем изменения
-        try:
-            with open('report_recipients.txt', 'w') as f:
-                for rid in report_recipients:
-                    f.write(f"{rid}\n")
-        except:
-            pass
     else:
         await update.message.reply_text("❌ Вы не были подписаны на отчёты")
 
@@ -669,17 +646,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown"
             )
 
-async def send_weekly_report():
-    """Отправка еженедельного отчёта (упрощённая версия)"""
-    print("📅 Проверка необходимости отправки отчёта...")
-    
-    # В упрощённой версии просто логируем
-    print(f"👥 Получателей отчётов: {len(report_recipients)}")
-    
-    # Можно добавить реальную отправку позже
-    return
-
-# ================== ЗАПУСК БОТА ==================
+# ================== ЗАПУСК БОТА (ИСПРАВЛЕННЫЙ) ==================
 def main():
     """Основная функция запуска"""
     print("🔄 Создаю приложение Telegram...")
@@ -705,24 +672,15 @@ def main():
         print("🚀 Запускаю polling...")
         print("=" * 70)
         
-        # Упрощённый планировщик отчётов (без APScheduler)
-        async def check_reports():
-            """Проверка необходимости отправки отчётов"""
-            while True:
-                now = datetime.now()
-                # Проверяем понедельник 8:00
-                if now.weekday() == 0 and now.hour == 8 and now.minute == 0:
-                    await send_weekly_report()
-                await asyncio.sleep(60)  # Проверяем каждую минуту
+        # ВАЖНО: Убираем сложную async логику для простоты
+        # В Bothost лучше не использовать сложные планировщики
         
-        # Запускаем в фоне
-        asyncio.create_task(check_reports())
-        
-        # Запускаем бота
+        # Просто запускаем бота
         app.run_polling(
             drop_pending_updates=True,
             timeout=30,
-            pool_timeout=30
+            pool_timeout=30,
+            close_loop=False
         )
         
     except Exception as e:
