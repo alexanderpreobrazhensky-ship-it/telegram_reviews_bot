@@ -1,11 +1,10 @@
 import os
-import sys
 import json
 import sqlite3
 import logging
 import re
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime
 from fastapi import FastAPI, Request
 from typing import List, Dict, Optional, Any
 from openai import OpenAI
@@ -24,7 +23,7 @@ SERVICE_ADDRESS = "г. Москва"
 SERVICE_PHONE = "+7 999 000-00-00"
 
 # ========== FASTAPI ==========
-app = FastAPI(title="Review Analyzer Bot", version="1.0")
+app = FastAPI(title="Review Analyzer Bot", version="2.0")
 
 # ========== OpenAI ==========
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -35,7 +34,6 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 REPORT_CHAT_IDS = os.getenv("REPORT_CHAT_IDS", "")
 PORT = int(os.getenv("PORT", "8000"))
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
 
 # ========== БАЗА ДАННЫХ ==========
 def get_db_connection():
@@ -58,10 +56,6 @@ def init_database():
             created_at TEXT NOT NULL,
             UNIQUE(chat_id, text, created_at)
         )
-    """)
-    cursor.execute("""
-        CREATE INDEX IF NOT EXISTS idx_reviews_created_at 
-        ON reviews(created_at)
     """)
     conn.commit()
     conn.close()
@@ -254,7 +248,7 @@ def get_report_chat_ids() -> List[int]:
 # ========== FASTAPI ЭНДПОИНТЫ ==========
 @app.get("/")
 async def root():
-    return {"status":"online","service":"telegram-reviews-bot","version":"1.0"}
+    return {"status":"online","service":"telegram-reviews-bot","version":"2.0"}
 
 @app.get("/health")
 async def health_check():
@@ -270,17 +264,42 @@ async def telegram_webhook(request:Request):
             chat_id = message["chat"]["id"]
             text = message.get("text","").strip()
             if text.startswith("/start"):
-                send_telegram_message(chat_id,f"🤖 Бот {SERVICE_NAME}")
+                keyboard = [[{"text":"📋 Инструкция и команды","callback_data":"help"}]]
+                send_telegram_message(chat_id,f"🤖 Бот {SERVICE_NAME} активирован",keyboard=keyboard)
             elif text.startswith("/myid"):
                 send_telegram_message(chat_id,f"🆔 {chat_id}")
+            elif text.startswith("/stats"):
+                stats = get_review_stats()
+                msg = (
+                    f"📊 *Статистика отзывов*\n"
+                    f"Общее: {stats['total_reviews']}\n"
+                    f"Средний рейтинг: {stats['average_rating']}\n"
+                    f"За неделю: {stats['weekly_reviews']}\n"
+                    f"Распределение по звёздам: {', '.join(f'{r['rating']}⭐={r['count']}' for r in stats['rating_distribution'])}"
+                )
+                send_telegram_message(chat_id,msg)
             elif text.startswith("/analyze"):
                 review_text = text.replace("/analyze","",1).strip()
                 if not review_text: return {"ok":True}
                 analysis = analyze_review_text(review_text)
                 save_review_to_db(chat_id, review_text, analysis)
                 stars = format_stars(analysis.get("rating",3))
-                msg = f"{stars}\n🎭 {analysis.get('sentiment')}\n📍 {SERVICE_NAME}"
+                msg = f"{stars}\n🎭 {analysis.get('sentiment')}\n{generate_response_template(analysis.get('response_type','clarification'))}"
                 send_telegram_message(chat_id,msg)
+        elif "callback_query" in update_data:
+            query = update_data["callback_query"]
+            chat_id = query["message"]["chat"]["id"]
+            data = query.get("data","")
+            if data=="help":
+                help_text = (
+                    "📋 *Команды бота*\n"
+                    "/start - запуск бота\n"
+                    "/myid - ваш Telegram ID\n"
+                    "/analyze <текст> - анализ отзыва\n"
+                    "/stats - статистика отзывов\n"
+                    "Кнопка с инструкцией всегда доступна"
+                )
+                send_telegram_message(chat_id,help_text)
         return {"ok":True}
     except Exception as e:
         logger.error(f"❌ Ошибка webhook chat_id={chat_id}: {e}")
