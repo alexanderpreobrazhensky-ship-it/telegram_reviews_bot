@@ -134,11 +134,8 @@ def telegram_api_request(method: str, data: Dict[str, Any]) -> Optional[Dict[str
     
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/{method}"
-        logger.debug(f"📤 Отправка запроса к Telegram API: {method}")
         
         response = requests.post(url, json=data, timeout=15)
-        logger.debug(f"📥 Ответ Telegram: {response.status_code}")
-        
         response.raise_for_status()
         
         result = response.json()
@@ -146,10 +143,11 @@ def telegram_api_request(method: str, data: Dict[str, Any]) -> Optional[Dict[str
             logger.error(f"❌ Telegram API ошибка {method}: {result}")
             return None
         
-        logger.debug(f"✅ Telegram API успешно: {method}")
         return result
     except requests.exceptions.HTTPError as e:
-        if e.response.status_code == 404:
+        if e.response.status_code == 400:
+            logger.error(f"❌ 400 Bad Request: Проблема с данными запроса: {data.get('text', '')[:100]}")
+        elif e.response.status_code == 404:
             logger.error(f"❌ 404 Not Found: Проверьте TELEGRAM_TOKEN!")
         logger.error(f"❌ HTTP ошибка Telegram API {method}: {e}")
         return None
@@ -158,9 +156,20 @@ def telegram_api_request(method: str, data: Dict[str, Any]) -> Optional[Dict[str
         return None
 
 def send_telegram_message(chat_id: int, text: str, keyboard: List[List[Dict]] = None):
-    data = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown", "disable_web_page_preview": True}
+    """Отправка сообщения в Telegram с HTML форматированием"""
+    # Очищаем текст от HTML-специальных символов
+    safe_text = text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+    
+    data = {
+        "chat_id": chat_id, 
+        "text": safe_text[:4096],
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True
+    }
+    
     if keyboard:
         data["reply_markup"] = {"inline_keyboard": keyboard}
+    
     return telegram_api_request("sendMessage", data)
 
 # ========== DEEPSEEK API ==========
@@ -407,21 +416,22 @@ def format_star_rating(rating: int) -> str:
 def format_analysis_response(analysis: Dict[str, Any], review_text: str) -> str:
     stars = format_star_rating(analysis.get("rating", 3))
     
-    response = f"""{stars} *Рейтинг: {analysis.get('rating', 3)}/5*
-🎭 *Настроение:* {analysis.get('sentiment', 'neutral').replace('_', ' ').upper()}
-🏷️ *Категории:* {', '.join(analysis.get('categories', []))}
-🚨 *Срочность:* {analysis.get('уровень_срочности', 'средний').upper()}
+    # HTML форматирование
+    response = f"""<b>{stars} Рейтинг: {analysis.get('rating', 3)}/5</b>
+<b>Настроение:</b> {analysis.get('sentiment', 'neutral')}
+<b>Категории:</b> {', '.join(analysis.get('categories', []))}
+<b>Срочность:</b> {analysis.get('уровень_срочности', 'средний')}
 
 """
     
     if analysis.get("автомобиль_марка"):
-        response += f"🚗 *Автомобиль:* {analysis.get('автомобиль_марка')}\n"
+        response += f"<b>Автомобиль:</b> {analysis.get('автомобиль_марка')}\n"
     if analysis.get("вид_работ"):
-        response += f"🔧 *Вид работ:* {analysis.get('вид_работ')}\n"
+        response += f"<b>Вид работ:</b> {analysis.get('вид_работ')}\n"
     response += "\n"
     
     if "key_issues" in analysis and analysis["key_issues"]:
-        response += "🔍 *Ключевые проблемы:*\n"
+        response += "<b>Ключевые проблемы:</b>\n"
         for issue in analysis["key_issues"][:5]:
             response += f"• {issue}\n"
         response += "\n"
@@ -429,10 +439,10 @@ def format_analysis_response(analysis: Dict[str, Any], review_text: str) -> str:
     needs_complaint = analysis.get("требуется_жалоба", False) or analysis.get("complain_required", False)
     if needs_complaint:
         reason = analysis.get("причина_жалобы", analysis.get("complain_reason", "нарушение правил"))
-        response += f"""⚠️ *РЕКОМЕНДУЕТСЯ ЖАЛОБА НА ОТЗЫВ*
-📝 Причина: {reason}
+        response += f"""<b>⚠️ РЕКОМЕНДУЕТСЯ ЖАЛОБА НА ОТЗЫВ</b>
+<b>Причина:</b> {reason}
 
-*Для подачи жалобы используйте:*
+<b>Для подачи жалобы используйте:</b>
 /complain_google - пожаловаться в Google
 /complain_yandex - пожаловаться в Яндекс
 /complain_2gis - пожаловаться в 2ГИС
@@ -443,38 +453,39 @@ def format_analysis_response(analysis: Dict[str, Any], review_text: str) -> str:
         rec = analysis["рекомендации_менеджеру"]
         
         if rec.get("срочные_действия"):
-            response += "⚡ *Срочные действия:*\n"
+            response += "<b>⚡ Срочные действия:</b>\n"
             for action in rec["срочные_действия"][:3]:
                 response += f"• {action}\n"
             response += "\n"
         
         if rec.get("долгосрочные_улучшения"):
-            response += "📈 *Долгосрочные улучшения:*\n"
+            response += "<b>📈 Долгосрочные улучшения:</b>\n"
             for action in rec["долгосрочные_улучшения"][:3]:
                 response += f"• {action}\n"
             response += "\n"
     
     if "рекомендации_менеджеру" in analysis and analysis["рекомендации_менеджеру"].get("шаблон_ответа"):
         template = analysis["рекомендации_менеджеру"]["шаблон_ответа"]
-        response += f"💬 *Шаблон ответа:*\n{template[:300]}"
+        response += f"<b>💬 Шаблон ответа:</b>\n{template[:300]}"
         if len(template) > 300:
-            response += "...\n*Используйте /full_response для полного шаблона*"
+            response += "...\n<i>Используйте /full_response для полного шаблона</i>"
         response += "\n\n"
     
-    response += f"""📍 *{SERVICE_NAME}*
-🗺️ {SERVICE_ADDRESS}
-📞 {SERVICE_PHONE}
-📱 {SERVICE_TELEGRAM}
+    response += f"""<b>📍 {SERVICE_NAME}</b>
+<b>Адрес:</b> {SERVICE_ADDRESS}
+<b>Телефон:</b> {SERVICE_PHONE}
+<b>Telegram:</b> {SERVICE_TELEGRAM}
+<b>Сайт:</b> {SERVICE_WEBSITE}
 
 """
     
-    response += "*Быстрые действия:*\n"
+    response += "<b>Быстрые действия:</b>\n"
     if needs_complaint:
         response += "📝 Подать жалобу на отзыв\n"
     if analysis.get("requires_response", False):
         response += "💬 Ответить клиенту\n"
     
-    response += f"\n`Анализ: {analysis.get('source', 'unknown')}`"
+    response += f"\n<i>Анализ: {analysis.get('source', 'unknown')}</i>"
     
     return response
 
@@ -711,7 +722,7 @@ async def auto_set_webhook():
 async def perform_diagnostics(chat_id: int):
     diagnostics = []
     
-    diagnostics.append("🔍 *1. Проверка Telegram токена:*")
+    diagnostics.append("<b>🔍 1. Проверка Telegram токена:</b>")
     if not TELEGRAM_TOKEN:
         diagnostics.append("❌ Токен не установлен")
     else:
@@ -739,7 +750,7 @@ async def perform_diagnostics(chat_id: int):
     
     diagnostics.append("")
     
-    diagnostics.append("🔍 *2. Проверка DeepSeek API:*")
+    diagnostics.append("<b>🔍 2. Проверка DeepSeek API:</b>")
     if not DEEPSEEK_API_KEY:
         diagnostics.append("❌ Ключ не установлен")
     else:
@@ -762,7 +773,7 @@ async def perform_diagnostics(chat_id: int):
     
     diagnostics.append("")
     
-    diagnostics.append("🔍 *3. Проверка вебхука:*")
+    diagnostics.append("<b>🔍 3. Проверка вебхука:</b>")
     if not DOMAIN or DOMAIN == "http://localhost:8000":
         diagnostics.append("❌ Домен не настроен")
     else:
@@ -792,7 +803,7 @@ async def perform_diagnostics(chat_id: int):
     
     diagnostics.append("")
     
-    diagnostics.append("🔍 *4. Проверка базы данных:*")
+    diagnostics.append("<b>🔍 4. Проверка базы данных:</b>")
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -812,13 +823,13 @@ async def perform_diagnostics(chat_id: int):
     
     diagnostics.append("")
     
-    diagnostics.append("🔍 *5. Проверка сервера:*")
+    diagnostics.append("<b>🔍 5. Проверка сервера:</b>")
     diagnostics.append(f"✅ Порт: {PORT}")
     diagnostics.append(f"✅ Сервис: {SERVICE_NAME}")
     diagnostics.append(f"✅ Адрес: {SERVICE_ADDRESS}")
     
     try:
-        health_url = f"{DOMAIN}/health" if DOMAIN else f"http://localhost:{PORT}/health"
+        health_url = f"{DOMAIN}/health"
         response = requests.get(health_url, timeout=5)
         if response.status_code == 200:
             diagnostics.append(f"✅ Health endpoint доступен")
@@ -828,7 +839,7 @@ async def perform_diagnostics(chat_id: int):
         diagnostics.append(f"❌ Сервер недоступен: {str(e)[:50]}")
     
     diagnostics.append("")
-    diagnostics.append("📋 *ИТОГ ДИАГНОСТИКИ:*")
+    diagnostics.append("<b>📋 ИТОГ ДИАГНОСТИКИ:</b>")
     
     error_count = sum(1 for line in diagnostics if "❌" in line)
     warning_count = sum(1 for line in diagnostics if "⚠️" in line)
@@ -952,35 +963,35 @@ async def telegram_webhook(request: Request):
 
     # Обработка команд
     if message_text.startswith("/start"):
-        welcome = f"""🤖 *Бот анализа отзывов {SERVICE_NAME}*
+        welcome = f"""<b>🤖 Бот анализа отзывов {SERVICE_NAME}</b>
 
-📍 *Наш адрес:* {SERVICE_ADDRESS}
-📞 *Телефон:* {SERVICE_PHONE}
-📱 *Telegram:* {SERVICE_TELEGRAM}
-🌐 *Сайт:* {SERVICE_WEBSITE}
+<b>📍 Наш адрес:</b> {SERVICE_ADDRESS}
+<b>📞 Телефон:</b> {SERVICE_PHONE}
+<b>📱 Telegram:</b> {SERVICE_TELEGRAM}
+<b>🌐 Сайт:</b> {SERVICE_WEBSITE}
 
-*📋 ОСНОВНЫЕ КОМАНДЫ:*
+<b>📋 ОСНОВНЫЕ КОМАНДЫ:</b>
 /analyze [текст] - детальный анализ отзыва
 /quick [текст] - быстрый анализ
 /stats - статистика отзывов
 /myid - ваш Chat ID
 
-*🔧 СИСТЕМНЫЕ КОМАНДЫ:*
+<b>🔧 СИСТЕМНЫЕ КОМАНДЫ:</b>
 /diagnostics - полная диагностика системы
 /setup_webhook - настройка вебхука
 /webhook_info - информация о вебхуке
 /delete_webhook - удалить вебхук
 /test - проверка DeepSeek API
 
-*🚨 КОМАНДЫ ДЛЯ ЖАЛОБ:*
+<b>🚨 КОМАНДЫ ДЛЯ ЖАЛОБ:</b>
 /complain_google - жалоба в Google
 /complain_yandex - жалоба в Яндекс  
 /complain_2gis - жалоба в 2ГИС
 /complaint_stats - статистика жалоб
 
-*Просто отправьте текст отзыва для автоматического анализа!*
+<b>Просто отправьте текст отзыва для автоматического анализа!</b>
 
-🚗 *Наша специализация:*
+<b>🚗 Наша специализация:</b>
 • Компьютерная диагностика
 • Ремонт двигателей и КПП
 • Техническое обслуживание
@@ -989,47 +1000,47 @@ async def telegram_webhook(request: Request):
         return {"ok": True}
 
     if message_text.startswith("/contacts"):
-        contacts = f"""📞 *Контакты Автосервиса ЛИРА*
+        contacts = f"""<b>📞 Контакты Автосервиса ЛИРА</b>
 
-📍 *Адрес:* {SERVICE_ADDRESS}
-📞 *Телефон:* {SERVICE_PHONE}
-📱 *Telegram:* {SERVICE_TELEGRAM}
-🌐 *Сайт:* {SERVICE_WEBSITE}
-📧 *Email:* {SERVICE_EMAIL}
+<b>📍 Адрес:</b> {SERVICE_ADDRESS}
+<b>📞 Телефон:</b> {SERVICE_PHONE}
+<b>📱 Telegram:</b> {SERVICE_TELEGRAM}
+<b>🌐 Сайт:</b> {SERVICE_WEBSITE}
+<b>📧 Email:</b> {SERVICE_EMAIL}
 
-*Как проехать:*
+<b>Как проехать:</b>
 🚗 От метро "Автозаводская" - 10 минут
 🚌 Остановка "Ул. Удмуртская"
-🅿️ *Есть собственная парковка*
+🅿️ <b>Есть собственная парковка</b>
 
-*Записывайтесь заранее!*"""
+<b>Записывайтесь заранее!</b>"""
         send_telegram_message(chat_id, contacts)
         return {"ok": True}
 
     if message_text.startswith("/myid"):
-        send_telegram_message(chat_id, f"🆔 *Ваш Chat ID:* `{chat_id}`")
+        send_telegram_message(chat_id, f"<b>🆔 Ваш Chat ID:</b> <code>{chat_id}</code>")
         return {"ok": True}
 
     if message_text.startswith("/test"):
         deepseek_status = test_deepseek_api()
         if deepseek_status.get("available"):
-            send_telegram_message(chat_id, f"✅ *DeepSeek API работает*\nМодель: {deepseek_status.get('model')}\nОтвет: {deepseek_status.get('response')}")
+            send_telegram_message(chat_id, f"<b>✅ DeepSeek API работает</b>\nМодель: {deepseek_status.get('model')}\nОтвет: {deepseek_status.get('response')}")
         else:
-            send_telegram_message(chat_id, f"❌ *DeepSeek API недоступен*\nОшибка: {deepseek_status.get('message')}")
+            send_telegram_message(chat_id, f"<b>❌ DeepSeek API недоступен</b>\nОшибка: {deepseek_status.get('message')}")
         return {"ok": True}
 
     if message_text.startswith("/diagnostics") or message_text.startswith("/diag"):
-        send_telegram_message(chat_id, "🔍 *Запускаю диагностику системы...*")
+        send_telegram_message(chat_id, "<b>🔍 Запускаю диагностику системы...</b>")
         error_count = await perform_diagnostics(chat_id)
         return {"ok": True}
 
     if message_text.startswith("/setup_webhook") or message_text.startswith("/webhook_setup"):
-        send_telegram_message(chat_id, "🔧 *Настраиваю вебхук...*")
+        send_telegram_message(chat_id, "<b>🔧 Настраиваю вебхук...</b>")
         success = await auto_set_webhook()
         if success:
-            send_telegram_message(chat_id, "✅ *Вебхук успешно настроен!*")
+            send_telegram_message(chat_id, "<b>✅ Вебхук успешно настроен!</b>")
         else:
-            send_telegram_message(chat_id, "❌ *Не удалось настроить вебхук*\n\nПроверьте:\n1. Правильность Telegram токена\n2. Доступность домена\n3. Используйте /diagnostics для подробной диагностики")
+            send_telegram_message(chat_id, "<b>❌ Не удалось настроить вебхук</b>\n\nПроверьте:\n1. Правильность Telegram токена\n2. Доступность домена\n3. Используйте /diagnostics для подробной диагностики")
         return {"ok": True}
 
     if message_text.startswith("/webhook_info"):
@@ -1042,13 +1053,13 @@ async def telegram_webhook(request: Request):
                 info = response.json()
                 if info.get("ok"):
                     result = info["result"]
-                    response_text = f"""📊 *Информация о вебхуке:*
+                    response_text = f"""<b>📊 Информация о вебхуке:</b>
 
-✅ Установлен: {"Да" if result.get('url') else "Нет"}
-🔗 URL: {result.get('url', 'не установлен')}
-📈 Ожидает обновлений: {result.get('pending_update_count', 0)}
-❌ Ошибок: {result.get('last_error_message', 'нет')}
-🕐 Последняя ошибка: {result.get('last_error_date', 'никогда')}
+<b>✅ Установлен:</b> {"Да" if result.get('url') else "Нет"}
+<b>🔗 URL:</b> {result.get('url', 'не установлен')}
+<b>📈 Ожидает обновлений:</b> {result.get('pending_update_count', 0)}
+<b>❌ Ошибок:</b> {result.get('last_error_message', 'нет')}
+<b>🕐 Последняя ошибка:</b> {result.get('last_error_date', 'никогда')}
 """
                 else:
                     response_text = "❌ Ошибка получения информации"
@@ -1067,20 +1078,20 @@ async def telegram_webhook(request: Request):
                 timeout=10
             )
             if response.status_code == 200:
-                send_telegram_message(chat_id, "✅ *Вебхук удален!*\n\nБот перестанет получать обновления.")
+                send_telegram_message(chat_id, "<b>✅ Вебхук удален!</b>\n\nБот перестанет получать обновления.")
             else:
-                send_telegram_message(chat_id, f"❌ Ошибка удаления: {response.status_code}")
+                send_telegram_message(chat_id, f"<b>❌ Ошибка удаления:</b> {response.status_code}")
         except Exception as e:
-            send_telegram_message(chat_id, f"❌ Ошибка: {str(e)[:100]}")
+            send_telegram_message(chat_id, f"<b>❌ Ошибка:</b> {str(e)[:100]}")
         return {"ok": True}
 
     if message_text.startswith("/analyze"):
         review_text = message_text.replace("/analyze", "", 1).strip()
         if not review_text:
-            send_telegram_message(chat_id, "✍️ *Введите текст отзыва после команды /analyze*\n\nНапример: /analyze Отличный сервис, быстро починили двигатель!")
+            send_telegram_message(chat_id, "<b>✍️ Введите текст отзыва после команды /analyze</b>\n\nНапример: /analyze Отличный сервис, быстро починили двигатель!")
             return {"ok": True}
         
-        send_telegram_message(chat_id, "🔍 *Анализирую отзыв...*")
+        send_telegram_message(chat_id, "<b>🔍 Анализирую отзыв...</b>")
         
         analysis = analyze_review_text(review_text)
         
@@ -1095,37 +1106,37 @@ async def telegram_webhook(request: Request):
     if message_text.startswith("/quick"):
         review_text = message_text.replace("/quick", "", 1).strip()
         if not review_text:
-            send_telegram_message(chat_id, "✍️ Введите текст отзыва после команды /quick")
+            send_telegram_message(chat_id, "<b>✍️ Введите текст отзыва после команды /quick</b>")
             return {"ok": True}
         
         analysis = simple_text_analysis(review_text)
         save_review_to_db(chat_id, review_text, analysis)
         
-        response = f"""⚡ *Быстрый анализ:*
+        response = f"""<b>⚡ Быстрый анализ:</b>
 {format_star_rating(analysis.get('rating', 3))} Рейтинг: {analysis.get('rating')}/5
-🎭 Настроение: {analysis.get('sentiment')}
-🏷️ Категории: {', '.join(analysis.get('categories', []))}
+<b>🎭 Настроение:</b> {analysis.get('sentiment')}
+<b>🏷️ Категории:</b> {', '.join(analysis.get('categories', []))}
 """
         if analysis.get("автомобиль_марка"):
-            response += f"🚗 Автомобиль: {analysis.get('автомобиль_марка')}\n"
+            response += f"<b>🚗 Автомобиль:</b> {analysis.get('автомобиль_марка')}\n"
         
         send_telegram_message(chat_id, response)
         return {"ok": True}
 
     if message_text.startswith("/stats"):
         stats_data = get_review_stats()
-        response = f"""📊 *Статистика отзывов {SERVICE_NAME}:*
+        response = f"""<b>📊 Статистика отзывов {SERVICE_NAME}:</b>
         
-📈 Всего отзывов: {stats_data['total_reviews']}
-⭐ Средний рейтинг: {stats_data['average_rating']}
-📅 За неделю: {stats_data['weekly_reviews']}
+<b>📈 Всего отзывов:</b> {stats_data['total_reviews']}
+<b>⭐ Средний рейтинг:</b> {stats_data['average_rating']}
+<b>📅 За неделю:</b> {stats_data['weekly_reviews']}
 
-*Распределение по рейтингам:*
+<b>Распределение по рейтингам:</b>
 """
         for dist in stats_data['rating_distribution']:
             response += f"{format_star_rating(dist['rating'])} - {dist['count']} отзывов\n"
         
-        response += f"\n📍 {SERVICE_NAME}\n📞 {SERVICE_PHONE}"
+        response += f"\n<b>📍 {SERVICE_NAME}</b>\n<b>📞 {SERVICE_PHONE}</b>"
         
         send_telegram_message(chat_id, response)
         return {"ok": True}
@@ -1133,17 +1144,17 @@ async def telegram_webhook(request: Request):
     if message_text.startswith("/report"):
         weekly_data = get_weekly_report()
         if not weekly_data:
-            send_telegram_message(chat_id, "📭 *За последнюю неделю отзывов нет*")
+            send_telegram_message(chat_id, "<b>📭 За последнюю неделю отзывов нет</b>")
             return {"ok": True}
         
-        response = f"📋 *Недельный отчет {SERVICE_NAME}:*\n\n"
+        response = f"<b>📋 Недельный отчет {SERVICE_NAME}:</b>\n\n"
         for item in weekly_data:
             response += f"{format_star_rating(item['rating'])} - {item['count']} отзывов\n"
             if item['samples']:
-                response += f"📝 Примеры: {', '.join(item['samples'][:2])}\n"
+                response += f"<b>📝 Примеры:</b> {', '.join(item['samples'][:2])}\n"
             response += "\n"
         
-        response += f"📍 {SERVICE_ADDRESS}\n📞 {SERVICE_PHONE}"
+        response += f"<b>📍 {SERVICE_ADDRESS}</b>\n<b>📞 {SERVICE_PHONE}</b>"
         
         send_telegram_message(chat_id, response)
         return {"ok": True}
@@ -1158,17 +1169,17 @@ async def telegram_webhook(request: Request):
             "Клиент никогда не был в нашем сервисе"
         )
         
-        response = f"""📝 *Жалоба для Google:*
+        response = f"""<b>📝 Жалоба для Google:</b>
 
 {complaint_text[:800]}...
 
-*Дальнейшие действия:*
+<b>Дальнейшие действия:</b>
 1. Скопируйте текст выше
 2. Перейдите по ссылке: {PLATFORM_COMPLAIN_TEMPLATES['google']['url']}
 3. Вставьте текст в форму жалобы
 4. Прикрепите доказательства если есть
 
-*Или используйте:*
+<b>Или используйте:</b>
 /save_complaint - сохранить жалобу в базу"""
         send_telegram_message(chat_id, response)
         return {"ok": True}
@@ -1182,13 +1193,13 @@ async def telegram_webhook(request: Request):
             "Отзыв оставлен конкурентом"
         )
         
-        response = f"""📝 *Жалоба для Яндекс:*
+        response = f"""<b>📝 Жалоба для Яндекс:</b>
 
 {complaint_text[:800]}...
 
-*Ссылка для отправки:* {PLATFORM_COMPLAIN_TEMPLATES['yandex']['url']}
+<b>Ссылка для отправки:</b> {PLATFORM_COMPLAIN_TEMPLATES['yandex']['url']}
 
-*Рекомендации по отправке:*
+<b>Рекомендации по отправке:</b>
 1. Укажите точную ссылку на отзыв
 2. Прикрепите доказательства работы с клиентом
 3. Укажите дату посещения если известна"""
@@ -1204,13 +1215,13 @@ async def telegram_webhook(request: Request):
             "Содержит ненормативную лексику"
         )
         
-        response = f"""📝 *Жалоба для 2ГИС:*
+        response = f"""<b>📝 Жалоба для 2ГИС:</b>
 
 {complaint_text[:800]}...
 
-*Правила модерации 2ГИС:* {PLATFORM_COMPLAIN_TEMPLATES['2gis']['url']}
+<b>Правила модерации 2ГИС:</b> {PLATFORM_COMPLAIN_TEMPLATES['2gis']['url']}
 
-*Важно для 2ГИС:*
+<b>Важно для 2ГИС:</b>
 1. Жалобы обрабатываются 3-5 рабочих дней
 2. Требуют четких доказательств
 3. Часто запрашивают дополнительные данные"""
@@ -1219,36 +1230,36 @@ async def telegram_webhook(request: Request):
 
     if message_text.startswith("/complaint_stats"):
         stats = get_complaint_stats()
-        response = f"""📊 *Статистика жалоб:*
+        response = f"""<b>📊 Статистика жалоб:</b>
 
-Всего жалоб: {stats.get('total_complaints', 0)}
-В ожидании: {stats.get('pending_complaints', 0)}
+<b>Всего жалоб:</b> {stats.get('total_complaints', 0)}
+<b>В ожидании:</b> {stats.get('pending_complaints', 0)}
 
-*По платформам:*
+<b>По платформам:</b>
 """
         for platform, count in stats.get('by_platform', {}).items():
             response += f"{platform}: {count}\n"
         
-        response += f"\n📍 {SERVICE_NAME}"
+        response += f"\n<b>📍 {SERVICE_NAME}</b>"
         send_telegram_message(chat_id, response)
         return {"ok": True}
 
     # Автоматический анализ любого текста
     if len(message_text) > 10 and not message_text.startswith("/"):
-        send_telegram_message(chat_id, "🔍 *Анализирую ваш отзыв...*")
+        send_telegram_message(chat_id, "<b>🔍 Анализирую ваш отзыв...</b>")
         analysis = analyze_review_text(message_text)
         save_review_to_db(chat_id, message_text, analysis)
         response_text = format_analysis_response(analysis, message_text)
         send_telegram_message(chat_id, response_text)
         return {"ok": True}
 
-    send_telegram_message(chat_id, f"""❓ Команда не распознана. 
+    send_telegram_message(chat_id, f"""<b>❓ Команда не распознана.</b> 
 
 Используйте /start для списка команд
 Или отправьте текст отзыва для анализа
 
-📍 *{SERVICE_NAME}*
-📞 {SERVICE_PHONE}""")
+<b>📍 {SERVICE_NAME}</b>
+<b>📞 {SERVICE_PHONE}</b>""")
     return {"ok": True}
 
 # ========== ЗАПУСК ==========
