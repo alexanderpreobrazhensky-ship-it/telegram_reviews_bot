@@ -1,36 +1,62 @@
-# main.py
 import os
 import re
-import logging
+import json
 import sqlite3
+import logging
 import requests
-from flask import Flask, request, jsonify
+from flask import Flask, request
+
+# ----------------------------
+# Настройки
+# ----------------------------
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # https://yourproject.up.railway.app
+AI_ENGINE = os.getenv("AI_ENGINE", "gptfree")  # gptfree / openai / deepseek / gemini
+
+DATABASE = "reviews.db"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ======================
-# ENV & CONFIG
-# ======================
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # public URL Railway + токен
-AI_ENGINE = os.environ.get("AI_ENGINE", "gptfree")  # по умолчанию gptfree
+# ----------------------------
+# Инициализация Flask
+# ----------------------------
+app = Flask(__name__)
 
-# ======================
-# ZERO-WIDTH CLEAN
-# ======================
+# ----------------------------
+# SQLite
+# ----------------------------
+def init_db():
+    conn = sqlite3.connect(DATABASE)
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS reviews (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            review_text TEXT,
+            rating INTEGER,
+            issue_summary TEXT,
+            employees TEXT,
+            response_suggestion TEXT,
+            complaint_suggestion TEXT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+init_db()
+
+# ----------------------------
+# Telegram: безопасная отправка
+# ----------------------------
 ZERO_WIDTH_PATTERN = re.compile(r"[\u200b\u200c\u200d\u200e\u200f\ufeff]")
 
 def clean_text(text: str) -> str:
-    """Удаляем опасные zero-width символы"""
     if not isinstance(text, str):
         text = str(text)
-    text = ZERO_WIDTH_PATTERN.sub("", text)
-    return text
+    return ZERO_WIDTH_PATTERN.sub("", text)
 
-# ======================
-# SPLIT LONG MESSAGE
-# ======================
 def split_long_message(text: str, limit: int = 4000):
     chunks = []
     while len(text) > limit:
@@ -42,118 +68,160 @@ def split_long_message(text: str, limit: int = 4000):
     chunks.append(text)
     return chunks
 
-# ======================
-# TELEGRAM SEND
-# ======================
 def send_telegram_message(chat_id: int, text: str, keyboard=None):
     text = clean_text(text)
     chunks = split_long_message(text)
-
     for chunk in chunks:
         data = {"chat_id": chat_id, "text": chunk, "disable_web_page_preview": True}
         if keyboard:
             data["reply_markup"] = {"inline_keyboard": keyboard}
-        # Markdown attempt
+        # Попытка с Markdown
         data["parse_mode"] = "Markdown"
-        response = requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                                 json=data, timeout=10)
+        response = requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", json=data, timeout=10)
         if response.status_code == 200:
             continue
-        # fallback plain
-        logger.warning(f"Markdown error: {response.text}")
+        # Markdown не прошел — plain text
         data.pop("parse_mode", None)
-        response = requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                                 json=data, timeout=10)
+        response = requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", json=data, timeout=10)
         if response.status_code != 200:
             logger.error(f"Telegram send error: {response.text}")
             raise Exception(f"Telegram error: {response.text}")
     return True
 
-# ======================
-# SQLITE SETUP
-# ======================
-DB_FILE = "reviews.db"
-conn = sqlite3.connect(DB_FILE, check_same_thread=False)
-cursor = conn.cursor()
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS reviews (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER,
-    text TEXT,
-    rating INTEGER
-)
-""")
-conn.commit()
+# ----------------------------
+# AI движки
+# ----------------------------
+def analyze_review_ai(review_text: str) -> dict:
+    """
+    Возвращает JSON:
+    {
+      rating: int,
+      issue_summary: str,
+      employees: [str],
+      response_suggestion: str,
+      complaint_suggestion: str or None
+    }
+    """
+    prompt = f"""
+    Ты аналитик отзывов автосервиса. Проанализируй следующий отзыв:
 
-# ======================
-# AI ANALYSIS
-# ======================
-def analyze_review(text: str) -> int:
-    """Возвращает рейтинг 1-5 с использованием выбранного AI"""
-    text = clean_text(text)
-    if AI_ENGINE.lower() == "gptfree":
-        # GPTFREE PUBLIC API (условный пример)
-        try:
-            payload = {"input": f"Оцени отзыв от 1 до 5: {text}"}
-            resp = requests.post("https://gptfree-api.herokuapp.com/api/v1/predict", json=payload, timeout=10)
-            if resp.status_code == 200:
-                result = resp.json()
-                rating = int(result.get("output", 3))  # default 3
-                rating = max(1, min(rating, 5))
-                return rating
-        except Exception as e:
-            logger.error(f"gptfree error: {e}")
-            return 3
-    # другие движки placeholder
-    return 3
+    {review_text}
 
-# ======================
-# FLASK APP
-# ======================
-app = Flask(__name__)
+    Нужно:
+    1) Определи рейтинг отзыва по шкале 1–5.
+    2) Определи суть проблемы кратко.
+    3) Если упомянут сотрудник, укажи его имя/инициалы.
+    4) Предложи готовый ответ на площадку.
+    5) Если есть основание для жалобы, сформулируй текст жалобы.
 
+    Выводи строго в формате JSON:
+    {{
+      "rating": int,
+      "issue_summary": str,
+      "employees": [str],
+      "response_suggestion": str,
+      "complaint_suggestion": str or null
+    }}
+    """
+
+    if AI_ENGINE == "gptfree":
+        # Простейший бесплатный движок (заглушка)
+        # На практике можно использовать gptfree API / библиотеку
+        rating = 3 if "не понравилось" in review_text.lower() else 5
+        employees = re.findall(r"\b[А-ЯЁ][а-яё]\.", review_text)
+        issue_summary = "Замена фильтра/неправильная установка, задержка ответа" if "фильтр" in review_text else "Общее обращение"
+        response_suggestion = "Спасибо за отзыв. Мы разберёмся с ситуацией и свяжемся с вами."
+        complaint_suggestion = "Жалоба оправдана" if rating <= 2 else None
+        return {
+            "rating": rating,
+            "issue_summary": issue_summary,
+            "employees": employees,
+            "response_suggestion": response_suggestion,
+            "complaint_suggestion": complaint_suggestion
+        }
+    else:
+        # Тут можно вставить OpenAI / DeepSeek / Gemini
+        # Для примера заглушка
+        return {
+            "rating": 4,
+            "issue_summary": "Общее обращение",
+            "employees": [],
+            "response_suggestion": "Спасибо за отзыв",
+            "complaint_suggestion": None
+        }
+
+# ----------------------------
+# Сохранение отзыва
+# ----------------------------
+def save_review(user_id: int, review_text: str, analysis: dict):
+    conn = sqlite3.connect(DATABASE)
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO reviews
+        (user_id, review_text, rating, issue_summary, employees, response_suggestion, complaint_suggestion)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (
+        user_id,
+        review_text,
+        analysis["rating"],
+        analysis["issue_summary"],
+        json.dumps(analysis["employees"], ensure_ascii=False),
+        analysis["response_suggestion"],
+        analysis["complaint_suggestion"]
+    ))
+    conn.commit()
+    conn.close()
+
+# ----------------------------
+# Flask routes
+# ----------------------------
 @app.route(f"/{TELEGRAM_BOT_TOKEN}", methods=["POST"])
-def webhook():
+def telegram_webhook():
     data = request.get_json()
     if "message" not in data:
-        return jsonify({"ok": True})
+        return {"ok": True}
     message = data["message"]
     chat_id = message["chat"]["id"]
     text = message.get("text", "")
 
     if text.startswith("/start"):
-        send_telegram_message(chat_id, "Привет! Я бот для анализа отзывов.")
+        send_telegram_message(chat_id, "Привет! Я бот для анализа отзывов автосервиса. Используй /analyze <текст отзыва>.")
     elif text.startswith("/myid"):
-        send_telegram_message(chat_id, f"Ваш ID: {chat_id}")
+        send_telegram_message(chat_id, f"Твой chat_id: {chat_id}")
     elif text.startswith("/analyze"):
         review_text = text.replace("/analyze", "").strip()
         if not review_text:
             send_telegram_message(chat_id, "Пожалуйста, введите текст отзыва после команды /analyze")
         else:
-            rating = analyze_review(review_text)
-            cursor.execute("INSERT INTO reviews (user_id, text, rating) VALUES (?, ?, ?)",
-                           (chat_id, review_text, rating))
-            conn.commit()
-            send_telegram_message(chat_id, f"Рейтинг: {rating}/5")
-    elif text.startswith("/stats"):
-        cursor.execute("SELECT COUNT(*), AVG(rating) FROM reviews")
-        count, avg = cursor.fetchone()
-        avg = round(avg or 0, 2)
-        send_telegram_message(chat_id, f"Всего отзывов: {count}\nСредний рейтинг: {avg}")
+            analysis = analyze_review_ai(review_text)
+            save_review(chat_id, review_text, analysis)
+            result_text = (
+                f"*Рейтинг:* {analysis['rating']}/5\n"
+                f"*Суть проблемы:* {analysis['issue_summary']}\n"
+                f"*Сотрудники:* {', '.join(analysis['employees']) if analysis['employees'] else 'не указаны'}\n"
+                f"*Ответ клиенту:* {analysis['response_suggestion']}\n"
+            )
+            if analysis['complaint_suggestion']:
+                result_text += f"*Жалоба:* {analysis['complaint_suggestion']}\n"
+            send_telegram_message(chat_id, result_text)
     else:
-        send_telegram_message(chat_id, "Неизвестная команда. Используйте /start, /myid, /analyze, /stats")
-    return jsonify({"ok": True})
+        send_telegram_message(chat_id, "Команда не распознана. Используй /analyze для анализа отзывов.")
+
+    return {"ok": True}
 
 @app.route("/set_webhook", methods=["GET"])
 def set_webhook():
-    url = f"{WEBHOOK_URL}/{TELEGRAM_BOT_TOKEN}"
-    resp = requests.get(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/setWebhook?url={url}")
-    return jsonify(resp.json())
+    webhook_url = f"{WEBHOOK_URL}/{TELEGRAM_BOT_TOKEN}"
+    response = requests.get(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/setWebhook?url={webhook_url}")
+    return response.text
 
 @app.route("/debug", methods=["GET"])
 def debug():
-    return jsonify({"ok": True, "ai_engine": AI_ENGINE})
+    return {"status": "ok"}
 
+# ----------------------------
+# Запуск на Railway
+# ----------------------------
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
+    port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
