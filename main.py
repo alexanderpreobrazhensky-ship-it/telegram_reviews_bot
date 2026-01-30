@@ -5,80 +5,25 @@ import sqlite3
 from datetime import datetime
 from flask import Flask, request
 import requests
+import json
+
+# --- Настройки (ЖЕСТКО ПРОПИСАННЫЕ) ---
+TELEGRAM_BOT_TOKEN = "8415726004:AAGl6ecMF-1Rv9TK6rmYmFYp9cvVPsnesj8"
+WEBHOOK_URL = "https://telegramreviewsbot-production-06e5.up.railway.app/"
+DB_PATH = "reviews.db"
 
 # --- Логирование ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- Настройки ---
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-DB_PATH = "reviews.db"
+# Логируем настройки
+logger.info("=" * 50)
+logger.info("🚀 ЗАПУСК БОТА LIRA_REVIEW_BOT2.0")
+logger.info(f"🤖 Токен: {TELEGRAM_BOT_TOKEN[:10]}...")
+logger.info(f"🌐 Webhook URL: {WEBHOOK_URL}")
+logger.info("=" * 50)
 
-# Проверка обязательных переменных
-if not TELEGRAM_BOT_TOKEN:
-    logger.error("❌ ОШИБКА: TELEGRAM_BOT_TOKEN не задан в переменных окружения!")
-    logger.error("Добавь TELEGRAM_BOT_TOKEN в Railway Variables")
-
-if not WEBHOOK_URL:
-    logger.error("❌ ОШИБКА: WEBHOOK_URL не задан в переменных окружения!")
-    logger.error("Добавь WEBHOOK_URL в Railway Variables")
-else:
-    logger.info(f"Получен WEBHOOK_URL: {WEBHOOK_URL}")
-    # Убедимся, что URL заканчивается на /
-    if not WEBHOOK_URL.endswith("/"):
-        WEBHOOK_URL = WEBHOOK_URL + "/"
-    logger.info(f"Используется WEBHOOK_URL: {WEBHOOK_URL}")
-
-# --- Zero-width очистка ---
-ZERO_WIDTH_PATTERN = re.compile(r"[\u200b\u200c\u200d\u200e\u200f\ufeff]")
-
-def clean_text(text: str) -> str:
-    if not isinstance(text, str):
-        text = str(text)
-    return ZERO_WIDTH_PATTERN.sub("", text)
-
-def split_long_message(text: str, limit: int = 4000):
-    chunks = []
-    while len(text) > limit:
-        split_pos = text.rfind("\n", 0, limit)
-        if split_pos == -1:
-            split_pos = limit
-        chunks.append(text[:split_pos])
-        text = text[split_pos:]
-    chunks.append(text)
-    return chunks
-
-def send_telegram_message(chat_id: int, text: str, keyboard=None):
-    if not TELEGRAM_BOT_TOKEN:
-        logger.error("Не могу отправить сообщение: нет токена бота")
-        return False
-    
-    text = clean_text(text)
-    chunks = split_long_message(text)
-    for chunk in chunks:
-        data = {"chat_id": chat_id, "text": chunk, "disable_web_page_preview": True}
-        if keyboard:
-            data["reply_markup"] = {"inline_keyboard": keyboard}
-        data["parse_mode"] = "Markdown"
-        response = requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json=data,
-            timeout=10
-        )
-        if response.status_code == 200:
-            continue
-        logger.warning(f"Markdown error: {response.text}")
-        data.pop("parse_mode", None)
-        response = requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json=data,
-            timeout=10
-        )
-        if response.status_code != 200:
-            logger.error(f"Telegram send error: {response.text}")
-    return True
-
+# --- База данных ---
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -94,72 +39,37 @@ def init_db():
     """)
     conn.commit()
     conn.close()
+    logger.info("✅ База данных инициализирована")
 
 init_db()
 
-app = Flask(__name__)
+# --- Функции бота ---
+def send_message(chat_id, text):
+    """Отправка сообщения в Telegram"""
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    data = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "HTML"
+    }
+    try:
+        response = requests.post(url, json=data, timeout=10)
+        return response.json()
+    except Exception as e:
+        logger.error(f"Ошибка отправки: {e}")
+        return None
 
-@app.route("/", methods=["POST"])
-def telegram_webhook():
-    if not TELEGRAM_BOT_TOKEN:
-        return "Bot token not configured", 500
-    
-    logger.info("Получен запрос от Telegram")
-    
-    update = request.get_json()
-    if not update:
-        logger.warning("Пустой запрос от Telegram")
-        return "ok"
-
-    message = update.get("message")
-    if not message:
-        logger.warning("Нет сообщения в запросе")
-        return "ok"
-
-    chat_id = message["chat"]["id"]
-    text = message.get("text", "")
-    username = message["from"].get("username", "")
-    user_id = message["from"].get("id", "")
-    
-    logger.info(f"Сообщение от @{username} (ID: {user_id}): {text[:50]}...")
-
-    if text.startswith("/start"):
-        send_telegram_message(chat_id, "Привет! Я бот для анализа отзывов.\n\nДоступные команды:\n/analyze [текст] - анализ отзыва\n/stats - статистика\n/myid - ваш ID")
-    elif text.startswith("/myid"):
-        send_telegram_message(chat_id, f"👤 Ваш ID: {chat_id}\n👤 Username: @{username}")
-    elif text.startswith("/analyze"):
-        review_text = text.replace("/analyze", "").strip()
-        if not review_text:
-            send_telegram_message(chat_id, "Пожалуйста, пришли текст отзыва после команды /analyze")
-        else:
-            rating = analyze_review(review_text)
-            save_review(chat_id, username, review_text, rating)
-            send_telegram_message(chat_id, f"📊 Рейтинг отзыва: {rating}/5\n\nТекст: {review_text[:200]}...")
-    elif text.startswith("/stats"):
-        stats_text = get_stats()
-        send_telegram_message(chat_id, stats_text)
-    elif text.startswith("/report"):
-        send_telegram_message(chat_id, "📈 Отчётная функция в разработке.")
-    else:
-        send_telegram_message(chat_id, "Неизвестная команда. Используйте /start для списка команд.")
-    
-    return "ok"
-
-def analyze_review(text: str) -> int:
-    engine = os.getenv("AI_ENGINE", "gptfree")
-    text_length = len(text)
-    if text_length < 10:
-        return 1
-    elif text_length < 30:
-        return 2
-    elif text_length < 60:
-        return 3
-    elif text_length < 100:
-        return 4
-    else:
-        return 5
+def analyze_review(text):
+    """Простой анализ отзыва (заглушка)"""
+    length = len(text)
+    if length < 20: return 1
+    elif length < 50: return 2
+    elif length < 100: return 3
+    elif length < 150: return 4
+    else: return 5
 
 def save_review(user_id, username, text, rating):
+    """Сохранение отзыва в БД"""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute(
@@ -168,67 +78,143 @@ def save_review(user_id, username, text, rating):
     )
     conn.commit()
     conn.close()
-    logger.info(f"Сохранён отзыв от @{username}, рейтинг: {rating}/5")
+    logger.info(f"💾 Сохранён отзыв от {username}, рейтинг: {rating}")
 
 def get_stats():
+    """Статистика отзывов"""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("SELECT rating, COUNT(*) FROM reviews GROUP BY rating ORDER BY rating")
     rows = c.fetchall()
-    
-    c.execute("SELECT COUNT(*) FROM reviews")
-    total = c.fetchone()[0]
-    
-    c.execute("SELECT AVG(rating) FROM reviews")
-    avg_rating = c.fetchone()[0]
-    
     conn.close()
     
     if not rows:
-        return "📊 Статистика:\nНет данных об отзывах."
+        return "📊 Пока нет отзывов"
     
-    result = ["📊 Статистика отзывов:"]
-    result.append(f"Всего отзывов: {total}")
-    if avg_rating:
-        result.append(f"Средний рейтинг: {avg_rating:.1f}/5")
-    result.append("\nПо рейтингам:")
-    for r, cnt in rows:
-        result.append(f"⭐ {r}/5: {cnt} отзывов")
-    
+    result = ["📊 СТАТИСТИКА ОТЗЫВОВ:"]
+    for rating, count in rows:
+        result.append(f"⭐ {rating}/5: {count} отзывов")
     return "\n".join(result)
 
-def set_webhook():
-    logger.info("Удаляю старый вебхук...")
-    delete_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteWebhook"
-    delete_res = requests.post(delete_url, json={"drop_pending_updates": True})
-    logger.info(f"Удаление вебхука: {delete_res.status_code} - {delete_res.text}")
-    
-    logger.info(f"Устанавливаю новый вебхук на: {WEBHOOK_URL}")
-    set_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/setWebhook"
-    set_res = requests.post(set_url, json={"url": WEBHOOK_URL})
-    
-    logger.info(f"Установка вебхука: {set_res.status_code} - {set_res.text}")
-    
-    if set_res.status_code == 200:
-        logger.info("✅ Webhook успешно установлен!")
-    else:
-        logger.error(f"❌ Ошибка установки webhook: {set_res.text}")
+# --- Flask приложение ---
+app = Flask(__name__)
 
+@app.route("/", methods=["POST"])
+def webhook():
+    """Обработчик вебхука от Telegram"""
+    try:
+        data = request.get_json()
+        logger.info(f"📩 Получен запрос: {json.dumps(data)[:200]}...")
+        
+        if "message" in data:
+            msg = data["message"]
+            chat_id = msg["chat"]["id"]
+            text = msg.get("text", "")
+            user = msg.get("from", {})
+            username = user.get("username", "Неизвестный")
+            
+            logger.info(f"👤 Сообщение от @{username}: {text[:50]}...")
+            
+            # Обработка команд
+            if text.startswith("/start"):
+                send_message(chat_id, 
+                    "🤖 <b>LIRA REVIEW BOT 2.0</b>\n\n"
+                    "Я бот для анализа отзывов!\n\n"
+                    "📝 <b>Команды:</b>\n"
+                    "/analyze [текст] - Анализ отзыва\n"
+                    "/stats - Статистика\n"
+                    "/myid - Ваш ID\n"
+                    "/help - Помощь"
+                )
+                
+            elif text.startswith("/myid"):
+                send_message(chat_id, f"🆔 <b>Ваш ID:</b> {chat_id}\n👤 <b>Username:</b> @{username}")
+                
+            elif text.startswith("/analyze"):
+                review_text = text.replace("/analyze", "", 1).strip()
+                if review_text:
+                    rating = analyze_review(review_text)
+                    save_review(chat_id, username, review_text, rating)
+                    send_message(chat_id, 
+                        f"📊 <b>АНАЛИЗ ОТЗЫВА</b>\n\n"
+                        f"<b>Рейтинг:</b> {rating}/5 ⭐\n\n"
+                        f"<b>Текст:</b>\n{review_text[:300]}"
+                    )
+                else:
+                    send_message(chat_id, "📝 Напиши текст отзыва после команды /analyze")
+                    
+            elif text.startswith("/stats"):
+                stats = get_stats()
+                send_message(chat_id, stats)
+                
+            elif text.startswith("/help"):
+                send_message(chat_id, 
+                    "🆘 <b>ПОМОЩЬ</b>\n\n"
+                    "/analyze [текст] - Проанализировать отзыв\n"
+                    "/stats - Показать статистику\n"
+                    "/myid - Узнать свой ID\n"
+                    "/help - Эта справка"
+                )
+                
+            else:
+                send_message(chat_id, 
+                    "❓ Неизвестная команда\n"
+                    "Используй /help для списка команд"
+                )
+                
+    except Exception as e:
+        logger.error(f"❌ Ошибка обработки: {e}")
+    
+    return "OK"
+
+@app.route("/health", methods=["GET"])
+def health():
+    """Проверка здоровья сервиса"""
+    return {"status": "ok", "bot": "LIRA_REVIEW_BOT2.0"}
+
+@app.route("/set_webhook", methods=["GET"])
+def set_webhook_route():
+    """Ручная установка вебхука"""
+    try:
+        # Удаляем старый
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteWebhook")
+        
+        # Устанавливаем новый
+        response = requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/setWebhook",
+            json={"url": WEBHOOK_URL}
+        )
+        
+        if response.status_code == 200:
+            return {"status": "success", "message": "Webhook установлен!"}
+        else:
+            return {"status": "error", "message": response.text}
+            
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+# --- Запуск ---
 if __name__ == "__main__":
-    logger.info("=== Запуск бота ===")
+    # Автоматически устанавливаем вебхук при запуске
+    try:
+        logger.info("🔄 Устанавливаю вебхук...")
+        delete_res = requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteWebhook")
+        logger.info(f"🗑️ Удаление вебхука: {delete_res.status_code}")
+        
+        set_res = requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/setWebhook",
+            json={"url": WEBHOOK_URL}
+        )
+        
+        if set_res.status_code == 200:
+            logger.info("✅ Вебхук успешно установлен!")
+        else:
+            logger.error(f"❌ Ошибка установки: {set_res.text}")
+            
+    except Exception as e:
+        logger.error(f"⚠️ Ошибка при установке вебхука: {e}")
     
-    if TELEGRAM_BOT_TOKEN:
-        logger.info(f"Токен бота: {TELEGRAM_BOT_TOKEN[:10]}...")
-    else:
-        logger.error("Токен бота не задан!")
-    
-    logger.info(f"Webhook URL: {WEBHOOK_URL}")
-    
-    if TELEGRAM_BOT_TOKEN and WEBHOOK_URL:
-        set_webhook()
-    else:
-        logger.error("❌ Не могу установить вебхук: отсутствуют обязательные переменные!")
-    
-    port = int(os.environ.get("PORT", 5000))
-    logger.info(f"Запускаю Flask сервер на порту {port}")
-    app.run(host="0.0.0.0", port=port)
+    # Запускаем сервер
+    port = int(os.environ.get("PORT", 8000))
+    logger.info(f"🚀 Запускаю сервер на порту {port}")
+    app.run(host="0.0.0.0", port=port, debug=False)
