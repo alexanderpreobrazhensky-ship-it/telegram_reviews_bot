@@ -17,13 +17,13 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ========== ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ ==========
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN") or "ВАШ_ТОКЕН_ЗДЕСЬ"
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY") or ""  # Ключ DeepSeek API
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 DOMAIN = os.getenv("DOMAIN") or os.getenv("RAILWAY_STATIC_URL") or "http://localhost:8000"
 PORT = int(os.getenv("PORT", 8000))
-REPORT_CHAT_IDS = os.getenv("REPORT_CHAT_IDS", "")  # chat_id через запятую для отчетов
+REPORT_CHAT_IDS = os.getenv("REPORT_CHAT_IDS", "")
 
-TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
+TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}" if TELEGRAM_TOKEN else ""
 DB_PATH = "reviews.db"
 
 # ========== ДАННЫЕ АВТОСЕРВИСА "ЛИРА" ==========
@@ -32,11 +32,45 @@ SERVICE_ADDRESS = "г. Н.Новгород, ул. Удмуртская, 10"
 SERVICE_PHONE = "+7 (831) 214-00-50"
 SERVICE_WEBSITE = "https://lira-nn.ru"
 SERVICE_TELEGRAM = "@liraavto"
-SERVICE_EMAIL = "info@lira-nn.ru"  # добавим для полноты
+SERVICE_EMAIL = "info@lira-nn.ru"
 
 # ========== DeepSeek API конфигурация ==========
 DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
-DEEPSEEK_MODEL = "deepseek-chat"  # или "deepseek-coder" для кода
+DEEPSEEK_MODEL = "deepseek-chat"
+
+# ========== КОНСТАНТЫ ДЛЯ ЖАЛОБ ==========
+PLATFORM_COMPLAIN_TEMPLATES = {
+    "google": {
+        "url": "https://support.google.com/business/contact/reviews",
+        "reasons": {
+            "spam": "Отзыв является спамом или рекламой",
+            "fake": "Фальшивый отзыв или конкурентная атака",
+            "offensive": "Оскорбительный или нецензурный контент",
+            "personal": "Раскрытие персональных данных",
+            "irrelevant": "Не относится к нашему бизнесу"
+        }
+    },
+    "yandex": {
+        "url": "https://yandex.ru/support/business-new/reviews/reviews-moderation.html",
+        "reasons": {
+            "spam": "Спам или реклама",
+            "fake": "Написан не клиентом",
+            "offensive": "Ненормативная лексика",
+            "conflict": "Конфликт интересов",
+            "incorrect": "Не соответствует действительности"
+        }
+    },
+    "2gis": {
+        "url": "https://help.2gis.ru/legal/moderation_rules_reviews",
+        "reasons": {
+            "spam": "Коммерческое предложение или спам",
+            "fake": "Отзыв написан не клиентом",
+            "offensive": "Грубость или оскорбления",
+            "private": "Личная информация",
+            "irrelevant": "Не относится к заведению"
+        }
+    }
+}
 
 # ========== FastAPI ==========
 app = FastAPI(title="Telegram Reviews Bot - Автосервис ЛИРА", version="1.0")
@@ -66,6 +100,21 @@ def init_database():
     cursor.execute("""
         CREATE INDEX IF NOT EXISTS idx_reviews_created_at ON reviews(created_at)
     """)
+    
+    # Таблица для жалоб
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS complaints (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER NOT NULL,
+            review_text TEXT NOT NULL,
+            platform TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            complaint_text TEXT NOT NULL,
+            status TEXT DEFAULT 'draft',
+            created_at TEXT NOT NULL
+        )
+    """)
+    
     conn.commit()
     conn.close()
     logger.info("✅ База данных инициализирована")
@@ -74,15 +123,36 @@ init_database()
 
 # ========== TELEGRAM ==========
 def telegram_api_request(method: str, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    if not TELEGRAM_TOKEN:
+        logger.error("❌ TELEGRAM_TOKEN не установлен!")
+        return None
+    
+    # Проверка что токен валидный
+    if len(TELEGRAM_TOKEN) < 30 or "ВАШ_ТОКЕН" in TELEGRAM_TOKEN:
+        logger.error(f"❌ НЕВЕРНЫЙ TELEGRAM_TOKEN: {TELEGRAM_TOKEN[:20]}...")
+        return None
+    
     try:
-        url = f"{TELEGRAM_API}/{method}"
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/{method}"
+        logger.debug(f"📤 Отправка запроса к Telegram API: {method}")
+        
         response = requests.post(url, json=data, timeout=15)
+        logger.debug(f"📥 Ответ Telegram: {response.status_code}")
+        
         response.raise_for_status()
+        
         result = response.json()
         if not result.get("ok"):
-            logger.error(f"❌ Telegram API ошибка: {result}")
+            logger.error(f"❌ Telegram API ошибка {method}: {result}")
             return None
+        
+        logger.debug(f"✅ Telegram API успешно: {method}")
         return result
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 404:
+            logger.error(f"❌ 404 Not Found: Проверьте TELEGRAM_TOKEN!")
+        logger.error(f"❌ HTTP ошибка Telegram API {method}: {e}")
+        return None
     except Exception as e:
         logger.error(f"❌ Ошибка Telegram API {method}: {e}")
         return None
@@ -95,15 +165,11 @@ def send_telegram_message(chat_id: int, text: str, keyboard: List[List[Dict]] = 
 
 # ========== DEEPSEEK API ==========
 def analyze_with_deepseek(text: str) -> Optional[Dict[str, Any]]:
-    """
-    Анализ отзыва с помощью DeepSeek API
-    """
     if not DEEPSEEK_API_KEY:
         logger.warning("⚠️ DEEPSEEK_API_KEY не установлен")
         return None
     
     try:
-        # Улучшенный промпт для глубокого анализа с учетом специфики автосервиса
         prompt = f"""Ты — опытный менеджер автосервиса "ЛИРА" в Нижнем Новгороде. Проанализируй отзыв клиента максимально детально и критично.
         
 Наша информация для контекста:
@@ -182,7 +248,6 @@ def analyze_with_deepseek(text: str) -> Optional[Dict[str, Any]]:
         result = response.json()
         content = result["choices"][0]["message"]["content"]
         
-        # Извлекаем JSON из ответа
         json_match = re.search(r'\{.*\}', content, re.DOTALL)
         if json_match:
             analysis_result = json.loads(json_match.group())
@@ -199,6 +264,7 @@ def analyze_with_deepseek(text: str) -> Optional[Dict[str, Any]]:
             logger.error("❌ Превышен лимит запросов DeepSeek API: проверьте баланс")
         elif e.response.status_code == 402:
             logger.error("❌ Недостаточно средств на счету DeepSeek API: пополните баланс")
+            return None  # Возвращаем None чтобы использовать простой анализ
         else:
             logger.error(f"❌ HTTP ошибка DeepSeek API: {e}")
         return None
@@ -210,9 +276,6 @@ def analyze_with_deepseek(text: str) -> Optional[Dict[str, Any]]:
         return None
 
 def test_deepseek_api() -> Dict[str, Any]:
-    """
-    Тестирование доступности DeepSeek API
-    """
     if not DEEPSEEK_API_KEY:
         return {"status": "error", "available": False, "message": "DEEPSEEK_API_KEY не установлен"}
     
@@ -249,24 +312,18 @@ def test_deepseek_api() -> Dict[str, Any]:
 
 # ========== ПРОСТОЙ АНАЛИЗ (резервный) ==========
 def simple_text_analysis(text: str) -> Dict[str, Any]:
-    """
-    Резервный анализ если DeepSeek API недоступен
-    """
     text_lower = text.lower()
     
-    # Списки ключевых слов для автосервиса
     very_negative_words = ["ужас", "кошмар", "отвратительно", "никогда", "ненавижу", "развод", "воры", "обманщики", "кидалы"]
     negative_words = ["плохо", "не рекомендую", "жалоба", "разочарован", "недоволен", "переплатил", "обман", "сломал", "испортил"]
     positive_words = ["хорошо", "отлично", "спасибо", "доволен", "рекомендую", "качественно", "профессионально", "быстро", "четко"]
     very_positive_words = ["прекрасно", "супер", "великолепно", "лучший", "восхищен", "идеально", "блестяще", "мастера", "спасли"]
     
-    # Подсчет слов
     vneg_count = sum(1 for w in very_negative_words if w in text_lower)
     neg_count = sum(1 for w in negative_words if w in text_lower)
     pos_count = sum(1 for w in positive_words if w in text_lower)
     vpos_count = sum(1 for w in very_positive_words if w in text_lower)
     
-    # Определение рейтинга и настроения
     total_neg = vneg_count * 2 + neg_count
     total_pos = vpos_count * 2 + pos_count
     
@@ -294,7 +351,6 @@ def simple_text_analysis(text: str) -> Dict[str, Any]:
         requires_response = False
         response_type = "уточнение"
     
-    # Определение категорий для автосервиса
     categories = []
     category_keywords = {
         "качество_ремонта": ["ремонт", "почини", "поломк", "брак", "качеств", "гаранти", "работа", "сделал", "исправил"],
@@ -312,7 +368,6 @@ def simple_text_analysis(text: str) -> Dict[str, Any]:
         if any(keyword in text_lower for keyword in keywords):
             categories.append(category)
     
-    # Определение марки автомобиля если упомянута
     car_brands = ["лада", "lada", "ваз", "киа", "kia", "хендай", "hyundai", "тойота", "toyota", 
                   "форд", "ford", "реноН", "renault", "шкода", "skoda", "фольксваген", "volkswagen", 
                   "бмв", "bmw", "мерседес", "mercedes", "ауди", "audi", "ниссан", "nissan", "митсубиси", "mitsubishi"]
@@ -323,7 +378,6 @@ def simple_text_analysis(text: str) -> Dict[str, Any]:
             car_brand = brand.capitalize()
             break
     
-    # Базовая структура для совместимости
     return {
         "rating": rating,
         "sentiment": sentiment,
@@ -338,9 +392,6 @@ def simple_text_analysis(text: str) -> Dict[str, Any]:
     }
 
 def analyze_review_text(text: str) -> Dict[str, Any]:
-    """
-    Основная функция анализа: сначала пробуем DeepSeek, потом резервный анализ
-    """
     result = analyze_with_deepseek(text)
     if result:
         logger.info("✅ Использован DeepSeek анализ")
@@ -351,16 +402,11 @@ def analyze_review_text(text: str) -> Dict[str, Any]:
 
 # ========== ФОРМАТИРОВАНИЕ ОТВЕТА ==========
 def format_star_rating(rating: int) -> str:
-    """Форматирование рейтинга в звезды"""
     return "⭐" * rating + "☆" * (5 - rating)
 
 def format_analysis_response(analysis: Dict[str, Any], review_text: str) -> str:
-    """
-    Форматирование детального ответа для Telegram
-    """
     stars = format_star_rating(analysis.get("rating", 3))
     
-    # Основная информация
     response = f"""{stars} *Рейтинг: {analysis.get('rating', 3)}/5*
 🎭 *Настроение:* {analysis.get('sentiment', 'neutral').replace('_', ' ').upper()}
 🏷️ *Категории:* {', '.join(analysis.get('categories', []))}
@@ -368,32 +414,31 @@ def format_analysis_response(analysis: Dict[str, Any], review_text: str) -> str:
 
 """
     
-    # Информация об автомобиле если есть
     if analysis.get("автомобиль_марка"):
         response += f"🚗 *Автомобиль:* {analysis.get('автомобиль_марка')}\n"
     if analysis.get("вид_работ"):
         response += f"🔧 *Вид работ:* {analysis.get('вид_работ')}\n"
     response += "\n"
     
-    # Ключевые проблемы (если есть)
     if "key_issues" in analysis and analysis["key_issues"]:
         response += "🔍 *Ключевые проблемы:*\n"
-        for issue in analysis["key_issues"][:5]:  # максимум 5 проблем
+        for issue in analysis["key_issues"][:5]:
             response += f"• {issue}\n"
         response += "\n"
     
-    # Детали настроения
-    if "sentiment_details" in analysis:
-        details = analysis["sentiment_details"]
-        response += f"""😠 *Детали настроения:*
-• Основная эмоция: {details.get('основная_эмоция', details.get('main_emotion', 'не определено'))}
-• Интенсивность: {details.get('интенсивность', details.get('intensity', 5))}/10
-• Тон: {details.get('эмоциональный_тон', details.get('emotional_tone', 'нейтральный'))}
-• Сарказм: {'Да' if details.get('есть_сарказм', details.get('is_sarcastic', False)) else 'Нет'}
+    needs_complaint = analysis.get("требуется_жалоба", False) or analysis.get("complain_required", False)
+    if needs_complaint:
+        reason = analysis.get("причина_жалобы", analysis.get("complain_reason", "нарушение правил"))
+        response += f"""⚠️ *РЕКОМЕНДУЕТСЯ ЖАЛОБА НА ОТЗЫВ*
+📝 Причина: {reason}
+
+*Для подачи жалобы используйте:*
+/complain_google - пожаловаться в Google
+/complain_yandex - пожаловаться в Яндекс
+/complain_2gis - пожаловаться в 2ГИС
 
 """
     
-    # Рекомендации менеджеру
     if "рекомендации_менеджеру" in analysis:
         rec = analysis["рекомендации_менеджеру"]
         
@@ -408,42 +453,128 @@ def format_analysis_response(analysis: Dict[str, Any], review_text: str) -> str:
             for action in rec["долгосрочные_улучшения"][:3]:
                 response += f"• {action}\n"
             response += "\n"
-        
-        if rec.get("шаблон_ответа"):
-            response += f"💬 *Шаблон ответа:*\n{rec['шаблон_ответа'][:400]}"
-            if len(rec['шаблон_ответа']) > 400:
-                response += "..."
-            response += "\n\n"
     
-    # Информация о жалобе
-    if analysis.get("требуется_жалоба", False) or analysis.get("complain_required", False):
-        reason = analysis.get("причина_жалобы", analysis.get("complain_reason", "нарушение правил платформы"))
-        response += f"""⚠️ *Рекомендуется подать жалобу на отзыв*
-📝 Причина: {reason}
-
-"""
+    if "рекомендации_менеджеру" in analysis and analysis["рекомендации_менеджеру"].get("шаблон_ответа"):
+        template = analysis["рекомендации_менеджеру"]["шаблон_ответа"]
+        response += f"💬 *Шаблон ответа:*\n{template[:300]}"
+        if len(template) > 300:
+            response += "...\n*Используйте /full_response для полного шаблона*"
+        response += "\n\n"
     
-    # Информация о сервисе ЛИРА
     response += f"""📍 *{SERVICE_NAME}*
 🗺️ {SERVICE_ADDRESS}
 📞 {SERVICE_PHONE}
-📱 Telegram: {SERVICE_TELEGRAM}
-🌐 {SERVICE_WEBSITE}
-📧 {SERVICE_EMAIL}
+📱 {SERVICE_TELEGRAM}
+
 """
     
-    # Дополнительный призыв к действию
-    if analysis.get("requires_response", False) or analysis.get("требуется_ответ", False):
-        response_type = analysis.get("response_type", analysis.get("тип_ответа", ""))
-        if "извин" in response_type.lower():
-            response += f"\n📢 *Срочно свяжитесь с клиентом для урегулирования ситуации!*"
-        elif "благодар" in response_type.lower():
-            response += f"\n💝 *Поблагодарите клиента и предложите скидку на следующее посещение!*"
+    response += "*Быстрые действия:*\n"
+    if needs_complaint:
+        response += "📝 Подать жалобу на отзыв\n"
+    if analysis.get("requires_response", False):
+        response += "💬 Ответить клиенту\n"
     
-    # Источник анализа
     response += f"\n`Анализ: {analysis.get('source', 'unknown')}`"
     
     return response
+
+# ========== ФУНКЦИИ ДЛЯ ЖАЛОБ ==========
+def generate_complaint_text(review_text: str, platform: str, reason_type: str, additional_info: str = "") -> str:
+    platform_info = PLATFORM_COMPLAIN_TEMPLATES.get(platform, PLATFORM_COMPLAIN_TEMPLATES["google"])
+    reason = platform_info["reasons"].get(reason_type, "Нарушение правил платформы")
+    
+    complaint_template = f"""Жалоба на отзыв
+
+Информация о бизнесе:
+- Название: {SERVICE_NAME}
+- Адрес: {SERVICE_ADDRESS}
+- Телефон: {SERVICE_PHONE}
+
+Детали отзыва для проверки:
+{review_text[:500]}
+
+Причина жалобы: {reason}
+
+Обоснование:
+1. Отзыв не соответствует действительности
+2. {additional_info or 'Нарушает правила публикации отзывов на платформе'}
+3. Содержит недостоверную информацию о качестве наших услуг
+
+Прошу:
+1. Проверить отзыв на соответствие правилам платформы
+2. При необходимости удалить отзыв
+3. Принять меры к автору за нарушение правил
+
+Контактная информация для связи:
+- Email: {SERVICE_EMAIL}
+- Телефон: {SERVICE_PHONE}
+
+Дата: {datetime.now().strftime('%d.%m.%Y')}
+Подпись: Представитель {SERVICE_NAME}
+"""
+    return complaint_template
+
+def save_complaint_to_db(chat_id: int, review_text: str, platform: str, reason: str, complaint_text: str) -> int:
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            INSERT INTO complaints (chat_id, review_text, platform, reason, complaint_text, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (
+            chat_id,
+            review_text[:1000],
+            platform,
+            reason,
+            complaint_text,
+            datetime.utcnow().isoformat()
+        ))
+        
+        complaint_id = cursor.lastrowid
+        conn.commit()
+        conn.close()
+        
+        logger.info(f"📝 Жалоба сохранена: ID={complaint_id}, платформа={platform}")
+        return complaint_id
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка сохранения жалобы: {e}")
+        return -1
+
+def get_complaint_stats() -> Dict[str, Any]:
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='complaints'")
+        if not cursor.fetchone():
+            conn.close()
+            return {"total": 0, "by_platform": {}, "by_status": {}}
+        
+        cursor.execute("SELECT COUNT(*) as total FROM complaints")
+        total = cursor.fetchone()["total"]
+        
+        cursor.execute("SELECT platform, COUNT(*) as count FROM complaints GROUP BY platform")
+        by_platform = {row["platform"]: row["count"] for row in cursor.fetchall()}
+        
+        cursor.execute("SELECT status, COUNT(*) as count FROM complaints GROUP BY status")
+        by_status = {row["status"]: row["count"] for row in cursor.fetchall()}
+        
+        cursor.execute("SELECT COUNT(*) as pending FROM complaints WHERE status = 'draft'")
+        pending = cursor.fetchone()["pending"]
+        
+        conn.close()
+        
+        return {
+            "total_complaints": total,
+            "by_platform": by_platform,
+            "by_status": by_status,
+            "pending_complaints": pending
+        }
+    except Exception as e:
+        logger.error(f"❌ Ошибка получения статистики жалоб: {e}")
+        return {"total": 0, "by_platform": {}, "by_status": {}}
 
 # ========== БАЗА ДАННЫХ (операции) ==========
 def save_review_to_db(chat_id: int, text: str, analysis: Dict[str, Any]) -> bool:
@@ -514,31 +645,212 @@ def get_weekly_report() -> List[Dict[str, Any]]:
         logger.error(f"❌ Ошибка недельного отчета: {e}")
         return []
 
-# ========== ВЕБХУК ==========
+# ========== ВЕБХУК АВТОМАТИЧЕСКАЯ НАСТРОЙКА ==========
 async def auto_set_webhook():
-    if not TELEGRAM_TOKEN or not DOMAIN:
-        logger.warning("⚠️ Не могу настроить вебхук: отсутствует токен или домен")
-        return
+    if not TELEGRAM_TOKEN:
+        logger.error("❌ TELEGRAM_TOKEN не установлен, вебхук не настроен")
+        return False
+    
+    if not DOMAIN or DOMAIN == "http://localhost:8000":
+        logger.warning("⚠️ Домен не настроен, вебхук не установлен")
+        return False
     
     webhook_url = f"{DOMAIN}/webhook"
-    try:
-        response = requests.post(
-            f"{TELEGRAM_API}/setWebhook",
-            json={"url": webhook_url, "max_connections": 100},
-            timeout=10
-        )
-        if response.status_code == 200:
-            logger.info(f"✅ Вебхук установлен: {webhook_url}")
-        else:
-            logger.error(f"❌ Ошибка установки вебхука: {response.text}")
-    except Exception as e:
-        logger.error(f"❌ Ошибка при установке вебхука: {e}")
+    
+    if not DOMAIN.startswith("https://"):
+        if DOMAIN.startswith("http://"):
+            secure_domain = DOMAIN.replace("http://", "https://")
+            webhook_url = f"{secure_domain}/webhook"
+            logger.info(f"🔄 Исправляю URL на HTTPS: {webhook_url}")
+    
+    logger.info(f"🔧 Настраиваю вебхук: {webhook_url}")
+    
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            response = requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook",
+                json={
+                    "url": webhook_url,
+                    "max_connections": 100,
+                    "allowed_updates": ["message", "callback_query"]
+                },
+                timeout=10
+            )
+            
+            result = response.json()
+            
+            if response.status_code == 200 and result.get("ok"):
+                logger.info(f"✅ Вебхук успешно установлен (попытка {attempt + 1}/{max_retries})")
+                logger.info(f"ℹ️ Описание: {result.get('description', 'без описания')}")
+                return True
+            else:
+                error_msg = result.get('description', 'неизвестная ошибка')
+                logger.warning(f"⚠️ Попытка {attempt + 1}/{max_retries}: {error_msg}")
+                
+                if "Conflict" in error_msg:
+                    logger.info("🔄 Обнаружен конфликт, удаляю старый вебхук...")
+                    requests.post(
+                        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteWebhook",
+                        timeout=5
+                    )
+        
+        except requests.exceptions.ConnectionError:
+            logger.warning(f"⚠️ Попытка {attempt + 1}/{max_retries}: Ошибка подключения")
+        except Exception as e:
+            logger.error(f"❌ Попытка {attempt + 1}/{max_retries}: {str(e)[:100]}")
+        
+        if attempt < max_retries - 1:
+            import time
+            time.sleep(2)
+    
+    logger.error("❌ Не удалось установить вебхук после всех попыток")
+    return False
 
+# ========== ФУНКЦИИ ДИАГНОСТИКИ ==========
+async def perform_diagnostics(chat_id: int):
+    diagnostics = []
+    
+    diagnostics.append("🔍 *1. Проверка Telegram токена:*")
+    if not TELEGRAM_TOKEN:
+        diagnostics.append("❌ Токен не установлен")
+    else:
+        token_preview = f"{TELEGRAM_TOKEN[:10]}...{TELEGRAM_TOKEN[-5:]}"
+        diagnostics.append(f"✅ Токен установлен ({len(TELEGRAM_TOKEN)} символов)")
+        diagnostics.append(f"📋 Префикс: {token_preview}")
+        
+        try:
+            response = requests.get(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getMe",
+                timeout=10
+            )
+            if response.status_code == 200:
+                bot_info = response.json()
+                if bot_info.get("ok"):
+                    bot_data = bot_info["result"]
+                    diagnostics.append(f"🤖 Бот: @{bot_data.get('username')} ({bot_data.get('first_name')})")
+                    diagnostics.append(f"🆔 ID бота: {bot_data.get('id')}")
+                else:
+                    diagnostics.append("❌ Токен невалидный")
+            else:
+                diagnostics.append(f"❌ Ошибка API: {response.status_code}")
+        except Exception as e:
+            diagnostics.append(f"❌ Ошибка проверки: {str(e)[:50]}")
+    
+    diagnostics.append("")
+    
+    diagnostics.append("🔍 *2. Проверка DeepSeek API:*")
+    if not DEEPSEEK_API_KEY:
+        diagnostics.append("❌ Ключ не установлен")
+    else:
+        key_preview = f"{DEEPSEEK_API_KEY[:8]}...{DEEPSEEK_API_KEY[-4:]}"
+        diagnostics.append(f"✅ Ключ установлен ({len(DEEPSEEK_API_KEY)} символов)")
+        diagnostics.append(f"📋 Префикс: {key_preview}")
+        
+        deepseek_status = test_deepseek_api()
+        if deepseek_status.get("available"):
+            diagnostics.append(f"✅ API доступен (модель: {deepseek_status.get('model')})")
+        else:
+            error_msg = deepseek_status.get("message", "неизвестная ошибка")
+            if "402" in error_msg:
+                diagnostics.append("❌ Недостаточно средств на счету")
+                diagnostics.append("💡 Пополните баланс на platform.deepseek.com")
+            elif "401" in error_msg:
+                diagnostics.append("❌ Неверный API ключ")
+            else:
+                diagnostics.append(f"❌ Ошибка: {error_msg[:80]}")
+    
+    diagnostics.append("")
+    
+    diagnostics.append("🔍 *3. Проверка вебхука:*")
+    if not DOMAIN or DOMAIN == "http://localhost:8000":
+        diagnostics.append("❌ Домен не настроен")
+    else:
+        diagnostics.append(f"✅ Домен: {DOMAIN}")
+        
+        try:
+            response = requests.get(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getWebhookInfo",
+                timeout=10
+            )
+            if response.status_code == 200:
+                webhook_info = response.json()
+                if webhook_info.get("ok"):
+                    wh_data = webhook_info["result"]
+                    if wh_data.get("url"):
+                        diagnostics.append(f"✅ Вебхук установлен: {wh_data.get('url')}")
+                        diagnostics.append(f"📊 Ожидает обновлений: {wh_data.get('pending_update_count', 0)}")
+                    else:
+                        diagnostics.append("❌ Вебхук не установлен")
+                        diagnostics.append("💡 Используйте /setup_webhook для установки")
+                else:
+                    diagnostics.append("❌ Ошибка получения информации о вебхуке")
+            else:
+                diagnostics.append(f"❌ Ошибка API: {response.status_code}")
+        except Exception as e:
+            diagnostics.append(f"❌ Ошибка проверки: {str(e)[:50]}")
+    
+    diagnostics.append("")
+    
+    diagnostics.append("🔍 *4. Проверка базы данных:*")
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='reviews'")
+        if cursor.fetchone():
+            cursor.execute("SELECT COUNT(*) as count FROM reviews")
+            total_reviews = cursor.fetchone()["count"]
+            diagnostics.append(f"✅ База данных работает")
+            diagnostics.append(f"📊 Отзывов в базе: {total_reviews}")
+        else:
+            diagnostics.append("❌ Таблица reviews не найдена")
+        
+        conn.close()
+    except Exception as e:
+        diagnostics.append(f"❌ Ошибка БД: {str(e)[:50]}")
+    
+    diagnostics.append("")
+    
+    diagnostics.append("🔍 *5. Проверка сервера:*")
+    diagnostics.append(f"✅ Порт: {PORT}")
+    diagnostics.append(f"✅ Сервис: {SERVICE_NAME}")
+    diagnostics.append(f"✅ Адрес: {SERVICE_ADDRESS}")
+    
+    try:
+        health_url = f"{DOMAIN}/health" if DOMAIN else f"http://localhost:{PORT}/health"
+        response = requests.get(health_url, timeout=5)
+        if response.status_code == 200:
+            diagnostics.append(f"✅ Health endpoint доступен")
+        else:
+            diagnostics.append(f"❌ Health endpoint: {response.status_code}")
+    except Exception as e:
+        diagnostics.append(f"❌ Сервер недоступен: {str(e)[:50]}")
+    
+    diagnostics.append("")
+    diagnostics.append("📋 *ИТОГ ДИАГНОСТИКИ:*")
+    
+    error_count = sum(1 for line in diagnostics if "❌" in line)
+    warning_count = sum(1 for line in diagnostics if "⚠️" in line)
+    
+    if error_count == 0:
+        diagnostics.append("🎉 Все системы работают нормально!")
+    else:
+        diagnostics.append(f"⚠️ Найдено проблем: {error_count} ошибок, {warning_count} предупреждений")
+        diagnostics.append("💡 Исправьте отмеченные проблемы для полной работоспособности")
+    
+    report_text = "\n".join(diagnostics)
+    send_telegram_message(chat_id, report_text)
+    
+    return error_count
+
+# ========== ЗАПУСК ПРИЛОЖЕНИЯ ==========
 @app.on_event("startup")
 async def startup_event():
     logger.info("=" * 50)
     logger.info("🚀 Запуск Telegram Review Analyzer Bot - Автосервис ЛИРА")
     logger.info("=" * 50)
+    
     logger.info(f"📱 Сервис: {SERVICE_NAME}")
     logger.info(f"📍 Адрес: {SERVICE_ADDRESS}")
     logger.info(f"📞 Телефон: {SERVICE_PHONE}")
@@ -546,16 +858,29 @@ async def startup_event():
     logger.info(f"🌐 Сайт: {SERVICE_WEBSITE}")
     logger.info(f"📧 Email: {SERVICE_EMAIL}")
     logger.info(f"🌐 Домен бота: {DOMAIN}")
-    logger.info(f"🔑 Telegram токен: {'установлен' if TELEGRAM_TOKEN else 'НЕ УСТАНОВЛЕН!'}")
-    logger.info(f"🤖 DeepSeek ключ: {'установлен' if DEEPSEEK_API_KEY else 'НЕ УСТАНОВЛЕН'}")
+    
+    config_ok = True
     
     if not TELEGRAM_TOKEN:
         logger.error("❌ TELEGRAM_TOKEN не установлен! Бот не будет работать.")
+        config_ok = False
+    else:
+        logger.info(f"🔑 Telegram токен: установлен ({len(TELEGRAM_TOKEN)} символов)")
     
     if not DEEPSEEK_API_KEY:
         logger.warning("⚠️ DEEPSEEK_API_KEY не установлен, глубокий анализ недоступен")
+    else:
+        logger.info(f"🤖 DeepSeek ключ: установлен")
     
-    await auto_set_webhook()
+    if config_ok:
+        logger.info("🔄 Настраиваю вебхук...")
+        webhook_success = await auto_set_webhook()
+        if not webhook_success:
+            logger.warning("⚠️ Вебхук не настроен автоматически")
+            logger.info("💡 Используйте команду /setup_webhook в боте для ручной настройки")
+    else:
+        logger.error("❌ Пропускаю настройку вебхука из-за ошибок конфигурации")
+    
     logger.info("=" * 50)
     logger.info("✅ Сервер готов к работе! Автосервис ЛИРА")
     logger.info("=" * 50)
@@ -592,12 +917,10 @@ async def health_check():
 
 @app.get("/test-deepseek")
 async def test_deepseek():
-    """Тест DeepSeek API"""
     return test_deepseek_api()
 
 @app.get("/stats")
 async def stats():
-    """Статистика отзывов"""
     stats_data = get_review_stats()
     return {
         "service": {
@@ -635,25 +958,33 @@ async def telegram_webhook(request: Request):
 📞 *Телефон:* {SERVICE_PHONE}
 📱 *Telegram:* {SERVICE_TELEGRAM}
 🌐 *Сайт:* {SERVICE_WEBSITE}
-📧 *Email:* {SERVICE_EMAIL}
 
-*Доступные команды:*
-/analyze [текст] - детальный анализ отзыва (с DeepSeek)
-/quick [текст] - быстрый анализ (без DeepSeek)
+*📋 ОСНОВНЫЕ КОМАНДЫ:*
+/analyze [текст] - детальный анализ отзыва
+/quick [текст] - быстрый анализ
 /stats - статистика отзывов
 /myid - ваш Chat ID
-/report - недельный отчет
-/test - проверка работы DeepSeek API
-/contacts - наши контакты
+
+*🔧 СИСТЕМНЫЕ КОМАНДЫ:*
+/diagnostics - полная диагностика системы
+/setup_webhook - настройка вебхука
+/webhook_info - информация о вебхуке
+/delete_webhook - удалить вебхук
+/test - проверка DeepSeek API
+
+*🚨 КОМАНДЫ ДЛЯ ЖАЛОБ:*
+/complain_google - жалоба в Google
+/complain_yandex - жалоба в Яндекс  
+/complain_2gis - жалоба в 2ГИС
+/complaint_stats - статистика жалоб
 
 *Просто отправьте текст отзыва для автоматического анализа!*
 
-*Мы специализируемся на:*
-🔧 Ремонт всех марок автомобилей
-🔍 Компьютерная диагностика
-⚙️ Техническое обслуживание
-🛠️ Замена запчастей
-📋 Предпродажная подготовка"""
+🚗 *Наша специализация:*
+• Компьютерная диагностика
+• Ремонт двигателей и КПП
+• Техническое обслуживание
+• Замена запчастей"""
         send_telegram_message(chat_id, welcome)
         return {"ok": True}
 
@@ -661,7 +992,6 @@ async def telegram_webhook(request: Request):
         contacts = f"""📞 *Контакты Автосервиса ЛИРА*
 
 📍 *Адрес:* {SERVICE_ADDRESS}
-🕒 *Режим работы:* Пн-Пт 9:00-19:00, Сб 10:00-16:00
 📞 *Телефон:* {SERVICE_PHONE}
 📱 *Telegram:* {SERVICE_TELEGRAM}
 🌐 *Сайт:* {SERVICE_WEBSITE}
@@ -688,22 +1018,74 @@ async def telegram_webhook(request: Request):
             send_telegram_message(chat_id, f"❌ *DeepSeek API недоступен*\nОшибка: {deepseek_status.get('message')}")
         return {"ok": True}
 
+    if message_text.startswith("/diagnostics") or message_text.startswith("/diag"):
+        send_telegram_message(chat_id, "🔍 *Запускаю диагностику системы...*")
+        error_count = await perform_diagnostics(chat_id)
+        return {"ok": True}
+
+    if message_text.startswith("/setup_webhook") or message_text.startswith("/webhook_setup"):
+        send_telegram_message(chat_id, "🔧 *Настраиваю вебхук...*")
+        success = await auto_set_webhook()
+        if success:
+            send_telegram_message(chat_id, "✅ *Вебхук успешно настроен!*")
+        else:
+            send_telegram_message(chat_id, "❌ *Не удалось настроить вебхук*\n\nПроверьте:\n1. Правильность Telegram токена\n2. Доступность домена\n3. Используйте /diagnostics для подробной диагностики")
+        return {"ok": True}
+
+    if message_text.startswith("/webhook_info"):
+        try:
+            response = requests.get(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getWebhookInfo",
+                timeout=10
+            )
+            if response.status_code == 200:
+                info = response.json()
+                if info.get("ok"):
+                    result = info["result"]
+                    response_text = f"""📊 *Информация о вебхуке:*
+
+✅ Установлен: {"Да" if result.get('url') else "Нет"}
+🔗 URL: {result.get('url', 'не установлен')}
+📈 Ожидает обновлений: {result.get('pending_update_count', 0)}
+❌ Ошибок: {result.get('last_error_message', 'нет')}
+🕐 Последняя ошибка: {result.get('last_error_date', 'никогда')}
+"""
+                else:
+                    response_text = "❌ Ошибка получения информации"
+            else:
+                response_text = f"❌ HTTP ошибка: {response.status_code}"
+        except Exception as e:
+            response_text = f"❌ Ошибка: {str(e)[:100]}"
+        
+        send_telegram_message(chat_id, response_text)
+        return {"ok": True}
+
+    if message_text.startswith("/delete_webhook"):
+        try:
+            response = requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteWebhook",
+                timeout=10
+            )
+            if response.status_code == 200:
+                send_telegram_message(chat_id, "✅ *Вебхук удален!*\n\nБот перестанет получать обновления.")
+            else:
+                send_telegram_message(chat_id, f"❌ Ошибка удаления: {response.status_code}")
+        except Exception as e:
+            send_telegram_message(chat_id, f"❌ Ошибка: {str(e)[:100]}")
+        return {"ok": True}
+
     if message_text.startswith("/analyze"):
         review_text = message_text.replace("/analyze", "", 1).strip()
         if not review_text:
             send_telegram_message(chat_id, "✍️ *Введите текст отзыва после команды /analyze*\n\nНапример: /analyze Отличный сервис, быстро починили двигатель!")
-            return {"ok": True}
+            return {"ok": True"}
         
-        # Отправляем сообщение о начале анализа
         send_telegram_message(chat_id, "🔍 *Анализирую отзыв...*")
         
-        # Анализ с DeepSeek
         analysis = analyze_review_text(review_text)
         
-        # Сохранение в БД
         save_review_to_db(chat_id, review_text, analysis)
         
-        # Форматирование и отправка результата
         response_text = format_analysis_response(analysis, review_text)
         send_telegram_message(chat_id, response_text)
         
@@ -716,7 +1098,6 @@ async def telegram_webhook(request: Request):
             send_telegram_message(chat_id, "✍️ Введите текст отзыва после команды /quick")
             return {"ok": True}
         
-        # Быстрый анализ без DeepSeek
         analysis = simple_text_analysis(review_text)
         save_review_to_db(chat_id, review_text, analysis)
         
@@ -744,14 +1125,12 @@ async def telegram_webhook(request: Request):
         for dist in stats_data['rating_distribution']:
             response += f"{format_star_rating(dist['rating'])} - {dist['count']} отзывов\n"
         
-        # Добавляем информацию о сервисе
         response += f"\n📍 {SERVICE_NAME}\n📞 {SERVICE_PHONE}"
         
         send_telegram_message(chat_id, response)
         return {"ok": True}
 
     if message_text.startswith("/report"):
-        # Проверка прав (можно добавить проверку chat_id в список админов)
         weekly_data = get_weekly_report()
         if not weekly_data:
             send_telegram_message(chat_id, "📭 *За последнюю неделю отзывов нет*")
@@ -769,7 +1148,92 @@ async def telegram_webhook(request: Request):
         send_telegram_message(chat_id, response)
         return {"ok": True}
 
-    # Автоматический анализ любого текста (если это не команда)
+    # Команды для жалоб
+    if message_text.startswith("/complain_google"):
+        review_text = "Предыдущий отзыв"
+        complaint_text = generate_complaint_text(
+            review_text, 
+            "google", 
+            "fake",
+            "Клиент никогда не был в нашем сервисе"
+        )
+        
+        response = f"""📝 *Жалоба для Google:*
+
+{complaint_text[:800]}...
+
+*Дальнейшие действия:*
+1. Скопируйте текст выше
+2. Перейдите по ссылке: {PLATFORM_COMPLAIN_TEMPLATES['google']['url']}
+3. Вставьте текст в форму жалобы
+4. Прикрепите доказательства если есть
+
+*Или используйте:*
+/save_complaint - сохранить жалобу в базу"""
+        send_telegram_message(chat_id, response)
+        return {"ok": True}
+
+    if message_text.startswith("/complain_yandex"):
+        review_text = "Предыдущий отзыв"
+        complaint_text = generate_complaint_text(
+            review_text,
+            "yandex",
+            "fake", 
+            "Отзыв оставлен конкурентом"
+        )
+        
+        response = f"""📝 *Жалоба для Яндекс:*
+
+{complaint_text[:800]}...
+
+*Ссылка для отправки:* {PLATFORM_COMPLAIN_TEMPLATES['yandex']['url']}
+
+*Рекомендации по отправке:*
+1. Укажите точную ссылку на отзыв
+2. Прикрепите доказательства работы с клиентом
+3. Укажите дату посещения если известна"""
+        send_telegram_message(chat_id, response)
+        return {"ok": True}
+
+    if message_text.startswith("/complain_2gis"):
+        review_text = "Предыдущий отзыв"
+        complaint_text = generate_complaint_text(
+            review_text,
+            "2gis",
+            "offensive",
+            "Содержит ненормативную лексику"
+        )
+        
+        response = f"""📝 *Жалоба для 2ГИС:*
+
+{complaint_text[:800]}...
+
+*Правила модерации 2ГИС:* {PLATFORM_COMPLAIN_TEMPLATES['2gis']['url']}
+
+*Важно для 2ГИС:*
+1. Жалобы обрабатываются 3-5 рабочих дней
+2. Требуют четких доказательств
+3. Часто запрашивают дополнительные данные"""
+        send_telegram_message(chat_id, response)
+        return {"ok": True}
+
+    if message_text.startswith("/complaint_stats"):
+        stats = get_complaint_stats()
+        response = f"""📊 *Статистика жалоб:*
+
+Всего жалоб: {stats.get('total_complaints', 0)}
+В ожидании: {stats.get('pending_complaints', 0)}
+
+*По платформам:*
+"""
+        for platform, count in stats.get('by_platform', {}).items():
+            response += f"{platform}: {count}\n"
+        
+        response += f"\n📍 {SERVICE_NAME}"
+        send_telegram_message(chat_id, response)
+        return {"ok": True}
+
+    # Автоматический анализ любого текста
     if len(message_text) > 10 and not message_text.startswith("/"):
         send_telegram_message(chat_id, "🔍 *Анализирую ваш отзыв...*")
         analysis = analyze_review_text(message_text)
