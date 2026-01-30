@@ -3,8 +3,3 @@ builder = "nixpacks"
 
 [deploy]
 startCommand = "python main.py"
-
-[variables]
-TELEGRAM_BOT_TOKEN = "8415726004:AAGl6ecMF-1Rv9TK6rmYmFYp9cvVPsnesj8"
-WEBHOOK_URL = "https://telegramreviewsbot-production-06e5.up.railway.app/"
-AI_ENGINE = "gptfree"
