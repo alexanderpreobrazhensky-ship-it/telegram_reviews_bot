@@ -1,4 +1,4 @@
-.env
-reviews.db
 __pycache__/
 *.pyc
+.env
+reviews.db
