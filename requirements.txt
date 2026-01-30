@@ -1,3 +1,5 @@
-Flask>=2.3.5,<2.4
-requests>=2.31.0,<3
-google-genai>=0.13.0,<1
+Flask==2.3.3
+SQLAlchemy==2.0.23
+requests==2.31.0
+google-genai==0.13.0
+gunicorn==21.2.0
