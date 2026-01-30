@@ -9,9 +9,6 @@ from typing import List, Dict, Any, Optional
 import requests
 from fastapi import FastAPI, Request
 
-# OpenAI новый клиент
-from openai import OpenAI
-
 # ========== ЛОГИРОВАНИЕ ==========
 logging.basicConfig(
     level=logging.INFO,
@@ -21,22 +18,28 @@ logger = logging.getLogger(__name__)
 
 # ========== ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ ==========
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN") or "ВАШ_ТОКЕН_ЗДЕСЬ"
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") or "sk-ВАШ_КЛЮЧ_ЗДЕСЬ"
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY") or ""  # Ключ DeepSeek API
 DOMAIN = os.getenv("DOMAIN") or os.getenv("RAILWAY_STATIC_URL") or "http://localhost:8000"
 PORT = int(os.getenv("PORT", 8000))
 REPORT_CHAT_IDS = os.getenv("REPORT_CHAT_IDS", "")  # chat_id через запятую для отчетов
 
 TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 DB_PATH = "reviews.db"
-SERVICE_NAME = "Автосервис"
-SERVICE_ADDRESS = "г. Москва"
-SERVICE_PHONE = "+7 999 000-00-00"
 
-# ========== OpenAI клиент ==========
-client = OpenAI(api_key=OPENAI_API_KEY)
+# ========== ДАННЫЕ АВТОСЕРВИСА "ЛИРА" ==========
+SERVICE_NAME = "Автосервис 'ЛИРА'"
+SERVICE_ADDRESS = "г. Н.Новгород, ул. Удмуртская, 10"
+SERVICE_PHONE = "+7 (831) 214-00-50"
+SERVICE_WEBSITE = "https://lira-nn.ru"
+SERVICE_TELEGRAM = "@liraavto"
+SERVICE_EMAIL = "info@lira-nn.ru"  # добавим для полноты
+
+# ========== DeepSeek API конфигурация ==========
+DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
+DEEPSEEK_MODEL = "deepseek-chat"  # или "deepseek-coder" для кода
 
 # ========== FastAPI ==========
-app = FastAPI(title="Telegram Reviews Bot", version="1.0")
+app = FastAPI(title="Telegram Reviews Bot - Автосервис ЛИРА", version="1.0")
 
 # ========== БАЗА ДАННЫХ ==========
 def get_db_connection():
@@ -90,93 +93,359 @@ def send_telegram_message(chat_id: int, text: str, keyboard: List[List[Dict]] = 
         data["reply_markup"] = {"inline_keyboard": keyboard}
     return telegram_api_request("sendMessage", data)
 
-# ========== CHATGPT ==========
-def analyze_with_chatgpt(text: str) -> Optional[Dict[str, Any]]:
-    if not OPENAI_API_KEY or OPENAI_API_KEY.startswith("sk-ВАШ_КЛЮЧ"):
+# ========== DEEPSEEK API ==========
+def analyze_with_deepseek(text: str) -> Optional[Dict[str, Any]]:
+    """
+    Анализ отзыва с помощью DeepSeek API
+    """
+    if not DEEPSEEK_API_KEY:
+        logger.warning("⚠️ DEEPSEEK_API_KEY не установлен")
         return None
+    
     try:
-        prompt = f"""Ты — опытный менеджер автосервиса. Проанализируй отзыв клиента и верни только JSON без пояснений.
+        # Улучшенный промпт для глубокого анализа с учетом специфики автосервиса
+        prompt = f"""Ты — опытный менеджер автосервиса "ЛИРА" в Нижнем Новгороде. Проанализируй отзыв клиента максимально детально и критично.
+        
+Наша информация для контекста:
+- Название: Автосервис "ЛИРА"
+- Адрес: г. Н.Новгород, ул. Удмуртская, 10
+- Телефон: +7 (831) 214-00-50
+- Сайт: lira-nn.ru
+- Telegram: @liraavto
+- Специализация: ремонт всех марок автомобилей, диагностика, ТО
 
-JSON структура:
+Верни ТОЛЬКО JSON без пояснений. Структура JSON:
+
 {{
     "rating": 1-5,
-    "sentiment": "negative/neutral/positive/very_negative/very_positive",
-    "categories": ["quality","service","time","price","cleanliness","diagnostics","professionalism"],
+    "sentiment": "very_negative/negative/neutral/positive/very_positive",
+    "categories": ["качество_ремонта","обслуживание","время","цена","чистота","диагностика","профессионализм","коммуникация","запчасти"],
     "requires_response": true/false,
-    "response_type": "apology/thanks/clarification"
+    "response_type": "срочные_извинения/извинения/благодарность/уточнение/дополнительный_контакт",
+    "key_issues": ["список конкретных проблем из отзыва"],
+    "sentiment_details": {{
+        "основная_эмоция": "гнев/разочарование/удовлетворение/радость/безразличие",
+        "интенсивность": 1-10,
+        "есть_сарказм": true/false,
+        "эмоциональный_тон": "агрессивный/жалобный/нейтральный/благодарный"
+    }},
+    "рекомендации_менеджеру": {{
+        "срочные_действия": ["конкретные действия для немедленного реагирования"],
+        "долгосрочные_улучшения": ["предложения для долгосрочного улучшения"],
+        "шаблон_ответа": "детальный шаблон ответа клиенту с извинениями/благодарностью и конкретными решениями",
+        "требуется_доп_контакт": true/false,
+        "инструкции_по_дальнейшему_взаимодействию": "инструкции по дальнейшему взаимодействию"
+    }},
+    "требуется_жалоба": true/false,
+    "причина_жалобы": "обоснование для жалобы на отзыв, если он некорректен или оскорбителен",
+    "уровень_срочности": "низкий/средний/высокий/критический",
+    "автомобиль_марка": "марка автомобиля если упомянута",
+    "вид_работ": "вид выполненных работ если упомянут"
 }}
 
-Отзыв: "{text[:1000]}" """
-        response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=500,
-            temperature=0.3
-        )
-        content = response.choices[0].message.content
+Отзыв клиента: "{text[:1500]}"
+
+Проанализируй глубоко:
+1. Определи реальный рейтинг (1-5) на основе содержания, а не слов
+2. Выдели ВСЕ проблемы, даже если они упомянуты косвенно
+3. Оцени эмоциональный настрой клиента объективно
+4. Предложи КОНКРЕТНЫЕ действия для менеджера автосервиса ЛИРА
+5. Если отзыв негативный, предложи шаблон извинения с КОНКРЕТНЫМИ решениями и контактами нашего сервиса
+6. Если отзыв позитивный, предложи шаблон благодарности с приглашением вернуться и ссылками на наш сайт/Telegram
+7. Определи, нужна ли жалоба на отзыв (если он содержит ложь, оскорбления или явную клевету)
+8. Укажи уровень срочности реакции
+9. Отметь марку автомобиля и вид работ если они упомянуты
+10. Учти наш адрес и контакты при составлении рекомендаций"""
+
+        headers = {
+            "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "model": DEEPSEEK_MODEL,
+            "messages": [
+                {"role": "system", "content": """Ты менеджер автосервиса "ЛИРА" в Нижнем Новгороде. 
+                Твой автосервис находится по адресу: ул. Удмуртская, 10. 
+                Контакты: +7 (831) 214-00-50, сайт lira-nn.ru, Telegram @liraavto.
+                Ты профессионально анализируешь отзывы и предлагаешь конкретные решения."""},
+                {"role": "user", "content": prompt}
+            ],
+            "max_tokens": 2000,
+            "temperature": 0.2,
+            "response_format": {"type": "json_object"}
+        }
+        
+        response = requests.post(DEEPSEEK_API_URL, headers=headers, json=payload, timeout=30)
+        response.raise_for_status()
+        
+        result = response.json()
+        content = result["choices"][0]["message"]["content"]
+        
+        # Извлекаем JSON из ответа
         json_match = re.search(r'\{.*\}', content, re.DOTALL)
         if json_match:
             analysis_result = json.loads(json_match.group())
-            analysis_result["source"] = "chatgpt"
+            analysis_result["source"] = "deepseek"
             return analysis_result
+        
+        logger.error(f"❌ Не удалось извлечь JSON из ответа DeepSeek: {content[:200]}")
+        return None
+        
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 401:
+            logger.error("❌ Ошибка аутентификации DeepSeek API: неверный API ключ")
+        elif e.response.status_code == 429:
+            logger.error("❌ Превышен лимит запросов DeepSeek API: проверьте баланс")
+        elif e.response.status_code == 402:
+            logger.error("❌ Недостаточно средств на счету DeepSeek API: пополните баланс")
+        else:
+            logger.error(f"❌ HTTP ошибка DeepSeek API: {e}")
+        return None
+    except json.JSONDecodeError as e:
+        logger.error(f"❌ Ошибка парсинга JSON от DeepSeek: {e}")
         return None
     except Exception as e:
-        logger.error(f"❌ Ошибка ChatGPT: {e}")
+        logger.error(f"❌ Ошибка DeepSeek API: {e}")
         return None
 
-def test_chatgpt_api() -> Dict[str, Any]:
-    if not OPENAI_API_KEY:
-        return {"status": "error", "available": False, "message": "OPENAI_API_KEY не установлен"}
+def test_deepseek_api() -> Dict[str, Any]:
+    """
+    Тестирование доступности DeepSeek API
+    """
+    if not DEEPSEEK_API_KEY:
+        return {"status": "error", "available": False, "message": "DEEPSEEK_API_KEY не установлен"}
+    
     try:
-        response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[{"role": "user", "content": "Привет"}],
-            max_tokens=5,
-            temperature=0
-        )
-        answer = response.choices[0].message.content.strip()
-        return {"status": "success", "available": True, "response": answer}
+        headers = {
+            "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "model": DEEPSEEK_MODEL,
+            "messages": [{"role": "user", "content": "Привет! Ответь коротко: работает ли API?"}],
+            "max_tokens": 20,
+            "temperature": 0
+        }
+        
+        response = requests.post(DEEPSEEK_API_URL, headers=headers, json=payload, timeout=10)
+        response.raise_for_status()
+        
+        result = response.json()
+        answer = result["choices"][0]["message"]["content"].strip()
+        
+        return {
+            "status": "success", 
+            "available": True, 
+            "response": answer,
+            "model": DEEPSEEK_MODEL
+        }
+    except requests.exceptions.HTTPError as e:
+        error_msg = f"HTTP {e.response.status_code}: {e.response.text[:100]}"
+        return {"status": "error", "available": False, "message": error_msg}
     except Exception as e:
         return {"status": "error", "available": False, "message": str(e)}
 
-# ========== ПРОСТОЙ АНАЛИЗ ==========
+# ========== ПРОСТОЙ АНАЛИЗ (резервный) ==========
 def simple_text_analysis(text: str) -> Dict[str, Any]:
+    """
+    Резервный анализ если DeepSeek API недоступен
+    """
     text_lower = text.lower()
-    negative_words = ["плохо", "ужас", "кошмар", "отврат", "не рекоменд", "никогда", "хуже", "жалоба"]
-    positive_words = ["хорошо", "отлично", "супер", "класс", "спасибо", "рекомендую", "доволен", "прекрасно"]
+    
+    # Списки ключевых слов для автосервиса
+    very_negative_words = ["ужас", "кошмар", "отвратительно", "никогда", "ненавижу", "развод", "воры", "обманщики", "кидалы"]
+    negative_words = ["плохо", "не рекомендую", "жалоба", "разочарован", "недоволен", "переплатил", "обман", "сломал", "испортил"]
+    positive_words = ["хорошо", "отлично", "спасибо", "доволен", "рекомендую", "качественно", "профессионально", "быстро", "четко"]
+    very_positive_words = ["прекрасно", "супер", "великолепно", "лучший", "восхищен", "идеально", "блестяще", "мастера", "спасли"]
+    
+    # Подсчет слов
+    vneg_count = sum(1 for w in very_negative_words if w in text_lower)
     neg_count = sum(1 for w in negative_words if w in text_lower)
     pos_count = sum(1 for w in positive_words if w in text_lower)
-
-    if neg_count > pos_count:
-        rating = 1 if neg_count > 3 else 2
-        sentiment = "negative"
+    vpos_count = sum(1 for w in very_positive_words if w in text_lower)
+    
+    # Определение рейтинга и настроения
+    total_neg = vneg_count * 2 + neg_count
+    total_pos = vpos_count * 2 + pos_count
+    
+    if total_neg > total_pos:
+        if vneg_count > 0:
+            rating = 1
+            sentiment = "very_negative"
+        else:
+            rating = 2
+            sentiment = "negative"
         requires_response = True
-        response_type = "apology"
-    elif pos_count > neg_count:
-        rating = 5 if pos_count > 3 else 4
-        sentiment = "positive"
+        response_type = "срочные_извинения" if vneg_count > 0 else "извинения"
+    elif total_pos > total_neg:
+        if vpos_count > 0:
+            rating = 5
+            sentiment = "very_positive"
+        else:
+            rating = 4
+            sentiment = "positive"
         requires_response = True
-        response_type = "thanks"
+        response_type = "благодарность"
     else:
         rating = 3
         sentiment = "neutral"
         requires_response = False
-        response_type = "clarification"
-
+        response_type = "уточнение"
+    
+    # Определение категорий для автосервиса
     categories = []
-    if any(w in text_lower for w in ["ремонт", "почини", "диагност", "поломк"]): categories.append("quality")
-    if any(w in text_lower for w in ["обслуживан", "прием", "мастер", "менеджер"]): categories.append("service")
-    if any(w in text_lower for w in ["цена", "дорог", "дешев", "стоимость"]): categories.append("price")
-    if any(w in text_lower for w in ["ждал", "долго", "быстро", "время", "срок"]): categories.append("time")
-
-    return {"rating": rating, "sentiment": sentiment, "categories": categories,
-            "requires_response": requires_response, "response_type": response_type, "source": "simple_analysis"}
+    category_keywords = {
+        "качество_ремонта": ["ремонт", "почини", "поломк", "брак", "качеств", "гаранти", "работа", "сделал", "исправил"],
+        "обслуживание": ["обслуживан", "прием", "мастер", "менеджер", "сотрудник", "персонал", "отношение"],
+        "цена": ["цена", "дорог", "дешев", "стоимость", "переплат", "обоснован", "чеков", "оплат"],
+        "время": ["ждал", "долго", "быстро", "время", "срок", "оператив", "задерж", "опоздан"],
+        "чистота": ["чистот", "гряз", "порядок", "уборк", "санитар", "помещен"],
+        "диагностика": ["диагност", "проверк", "ошибк", "компьютер", "сканер", "электроник"],
+        "профессионализм": ["профессионал", "квалификац", "опыт", "знани", "умени", "компетент"],
+        "коммуникация": ["общение", "объясни", "консультац", "информац", "связь", "ответ", "звонк"],
+        "запчасти": ["запчасть", "деталь", "оригинал", "аналог", "комплектующ", "масло", "фильтр"]
+    }
+    
+    for category, keywords in category_keywords.items():
+        if any(keyword in text_lower for keyword in keywords):
+            categories.append(category)
+    
+    # Определение марки автомобиля если упомянута
+    car_brands = ["лада", "lada", "ваз", "киа", "kia", "хендай", "hyundai", "тойота", "toyota", 
+                  "форд", "ford", "реноН", "renault", "шкода", "skoda", "фольксваген", "volkswagen", 
+                  "бмв", "bmw", "мерседес", "mercedes", "ауди", "audi", "ниссан", "nissan", "митсубиси", "mitsubishi"]
+    
+    car_brand = None
+    for brand in car_brands:
+        if brand in text_lower:
+            car_brand = brand.capitalize()
+            break
+    
+    # Базовая структура для совместимости
+    return {
+        "rating": rating,
+        "sentiment": sentiment,
+        "categories": categories,
+        "requires_response": requires_response,
+        "response_type": response_type,
+        "source": "simple_analysis",
+        "key_issues": ["Базовый анализ: используйте DeepSeek API для детального разбора"],
+        "уровень_срочности": "средний",
+        "автомобиль_марка": car_brand,
+        "вид_работ": "ремонт" if any(w in text_lower for w in ["ремонт", "почин", "замен"]) else "диагностика" if "диагност" in text_lower else "ТО"
+    }
 
 def analyze_review_text(text: str) -> Dict[str, Any]:
-    result = analyze_with_chatgpt(text)
-    return result if result else simple_text_analysis(text)
+    """
+    Основная функция анализа: сначала пробуем DeepSeek, потом резервный анализ
+    """
+    result = analyze_with_deepseek(text)
+    if result:
+        logger.info("✅ Использован DeepSeek анализ")
+        return result
+    
+    logger.info("⚠️ Использован простой анализ (DeepSeek недоступен)")
+    return simple_text_analysis(text)
 
-# ========== БАЗА ДАННЫХ ==========
+# ========== ФОРМАТИРОВАНИЕ ОТВЕТА ==========
+def format_star_rating(rating: int) -> str:
+    """Форматирование рейтинга в звезды"""
+    return "⭐" * rating + "☆" * (5 - rating)
+
+def format_analysis_response(analysis: Dict[str, Any], review_text: str) -> str:
+    """
+    Форматирование детального ответа для Telegram
+    """
+    stars = format_star_rating(analysis.get("rating", 3))
+    
+    # Основная информация
+    response = f"""{stars} *Рейтинг: {analysis.get('rating', 3)}/5*
+🎭 *Настроение:* {analysis.get('sentiment', 'neutral').replace('_', ' ').upper()}
+🏷️ *Категории:* {', '.join(analysis.get('categories', []))}
+🚨 *Срочность:* {analysis.get('уровень_срочности', 'средний').upper()}
+
+"""
+    
+    # Информация об автомобиле если есть
+    if analysis.get("автомобиль_марка"):
+        response += f"🚗 *Автомобиль:* {analysis.get('автомобиль_марка')}\n"
+    if analysis.get("вид_работ"):
+        response += f"🔧 *Вид работ:* {analysis.get('вид_работ')}\n"
+    response += "\n"
+    
+    # Ключевые проблемы (если есть)
+    if "key_issues" in analysis and analysis["key_issues"]:
+        response += "🔍 *Ключевые проблемы:*\n"
+        for issue in analysis["key_issues"][:5]:  # максимум 5 проблем
+            response += f"• {issue}\n"
+        response += "\n"
+    
+    # Детали настроения
+    if "sentiment_details" in analysis:
+        details = analysis["sentiment_details"]
+        response += f"""😠 *Детали настроения:*
+• Основная эмоция: {details.get('основная_эмоция', details.get('main_emotion', 'не определено'))}
+• Интенсивность: {details.get('интенсивность', details.get('intensity', 5))}/10
+• Тон: {details.get('эмоциональный_тон', details.get('emotional_tone', 'нейтральный'))}
+• Сарказм: {'Да' if details.get('есть_сарказм', details.get('is_sarcastic', False)) else 'Нет'}
+
+"""
+    
+    # Рекомендации менеджеру
+    if "рекомендации_менеджеру" in analysis:
+        rec = analysis["рекомендации_менеджеру"]
+        
+        if rec.get("срочные_действия"):
+            response += "⚡ *Срочные действия:*\n"
+            for action in rec["срочные_действия"][:3]:
+                response += f"• {action}\n"
+            response += "\n"
+        
+        if rec.get("долгосрочные_улучшения"):
+            response += "📈 *Долгосрочные улучшения:*\n"
+            for action in rec["долгосрочные_улучшения"][:3]:
+                response += f"• {action}\n"
+            response += "\n"
+        
+        if rec.get("шаблон_ответа"):
+            response += f"💬 *Шаблон ответа:*\n{rec['шаблон_ответа'][:400]}"
+            if len(rec['шаблон_ответа']) > 400:
+                response += "..."
+            response += "\n\n"
+    
+    # Информация о жалобе
+    if analysis.get("требуется_жалоба", False) or analysis.get("complain_required", False):
+        reason = analysis.get("причина_жалобы", analysis.get("complain_reason", "нарушение правил платформы"))
+        response += f"""⚠️ *Рекомендуется подать жалобу на отзыв*
+📝 Причина: {reason}
+
+"""
+    
+    # Информация о сервисе ЛИРА
+    response += f"""📍 *{SERVICE_NAME}*
+🗺️ {SERVICE_ADDRESS}
+📞 {SERVICE_PHONE}
+📱 Telegram: {SERVICE_TELEGRAM}
+🌐 {SERVICE_WEBSITE}
+📧 {SERVICE_EMAIL}
+"""
+    
+    # Дополнительный призыв к действию
+    if analysis.get("requires_response", False) or analysis.get("требуется_ответ", False):
+        response_type = analysis.get("response_type", analysis.get("тип_ответа", ""))
+        if "извин" in response_type.lower():
+            response += f"\n📢 *Срочно свяжитесь с клиентом для урегулирования ситуации!*"
+        elif "благодар" in response_type.lower():
+            response += f"\n💝 *Поблагодарите клиента и предложите скидку на следующее посещение!*"
+    
+    # Источник анализа
+    response += f"\n`Анализ: {analysis.get('source', 'unknown')}`"
+    
+    return response
+
+# ========== БАЗА ДАННЫХ (операции) ==========
 def save_review_to_db(chat_id: int, text: str, analysis: Dict[str, Any]) -> bool:
     try:
         conn = get_db_connection()
@@ -184,10 +453,15 @@ def save_review_to_db(chat_id: int, text: str, analysis: Dict[str, Any]) -> bool
         cursor.execute("""
             INSERT INTO reviews (chat_id, text, rating, sentiment, categories, analysis_data, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (chat_id, text, analysis.get("rating", 3), analysis.get("sentiment", "neutral"),
-              json.dumps(analysis.get("categories", []), ensure_ascii=False),
-              json.dumps(analysis, ensure_ascii=False),
-              datetime.utcnow().isoformat()))
+        """, (
+            chat_id, 
+            text, 
+            analysis.get("rating", 3), 
+            analysis.get("sentiment", "neutral"),
+            json.dumps(analysis.get("categories", []), ensure_ascii=False),
+            json.dumps(analysis, ensure_ascii=False),
+            datetime.utcnow().isoformat()
+        ))
         conn.commit()
         conn.close()
         logger.info(f"💾 Отзыв сохранен: {chat_id}, рейтинг {analysis.get('rating')}")
@@ -210,13 +484,15 @@ def get_review_stats() -> Dict[str, Any]:
         cursor.execute("SELECT COUNT(*) as weekly_count FROM reviews WHERE created_at >= datetime('now', '-7 days')")
         weekly_stats = cursor.fetchone()
         conn.close()
-        return {"total_reviews": total_stats["total"] if total_stats else 0,
-                "average_rating": round(total_stats["avg_rating"],2) if total_stats and total_stats["avg_rating"] else 0,
-                "weekly_reviews": weekly_stats["weekly_count"] if weekly_stats else 0,
-                "rating_distribution": [{"rating": r["rating"], "count": r["count"]} for r in rating_stats]}
+        return {
+            "total_reviews": total_stats["total"] if total_stats else 0,
+            "average_rating": round(total_stats["avg_rating"], 2) if total_stats and total_stats["avg_rating"] else 0,
+            "weekly_reviews": weekly_stats["weekly_count"] if weekly_stats else 0,
+            "rating_distribution": [{"rating": r["rating"], "count": r["count"]} for r in rating_stats]
+        }
     except Exception as e:
         logger.error(f"❌ Ошибка получения статистики: {e}")
-        return {"total_reviews": 0,"average_rating": 0,"weekly_reviews":0,"rating_distribution":[]}
+        return {"total_reviews": 0, "average_rating": 0, "weekly_reviews": 0, "rating_distribution": []}
 
 def get_weekly_report() -> List[Dict[str, Any]]:
     try:
@@ -229,7 +505,11 @@ def get_weekly_report() -> List[Dict[str, Any]]:
         """, (week_ago,))
         results = cursor.fetchall()
         conn.close()
-        return [{"rating": r["rating"], "count": r["count"], "samples": r["samples"].split(",") if r["samples"] else []} for r in results]
+        return [{
+            "rating": r["rating"], 
+            "count": r["count"], 
+            "samples": r["samples"].split(",") if r["samples"] else []
+        } for r in results]
     except Exception as e:
         logger.error(f"❌ Ошибка недельного отчета: {e}")
         return []
@@ -237,41 +517,98 @@ def get_weekly_report() -> List[Dict[str, Any]]:
 # ========== ВЕБХУК ==========
 async def auto_set_webhook():
     if not TELEGRAM_TOKEN or not DOMAIN:
+        logger.warning("⚠️ Не могу настроить вебхук: отсутствует токен или домен")
         return
+    
     webhook_url = f"{DOMAIN}/webhook"
     try:
-        response = requests.post(f"{TELEGRAM_API}/setWebhook", json={"url": webhook_url, "max_connections":100})
-        logger.info(f"✅ Вебхук установлен: {webhook_url}")
-    except Exception:
-        logger.warning("⚠️ Не удалось автоматически установить вебхук")
+        response = requests.post(
+            f"{TELEGRAM_API}/setWebhook",
+            json={"url": webhook_url, "max_connections": 100},
+            timeout=10
+        )
+        if response.status_code == 200:
+            logger.info(f"✅ Вебхук установлен: {webhook_url}")
+        else:
+            logger.error(f"❌ Ошибка установки вебхука: {response.text}")
+    except Exception as e:
+        logger.error(f"❌ Ошибка при установке вебхука: {e}")
 
 @app.on_event("startup")
 async def startup_event():
-    logger.info("🚀 Сервер запускается...")
+    logger.info("=" * 50)
+    logger.info("🚀 Запуск Telegram Review Analyzer Bot - Автосервис ЛИРА")
+    logger.info("=" * 50)
+    logger.info(f"📱 Сервис: {SERVICE_NAME}")
+    logger.info(f"📍 Адрес: {SERVICE_ADDRESS}")
+    logger.info(f"📞 Телефон: {SERVICE_PHONE}")
+    logger.info(f"📱 Telegram: {SERVICE_TELEGRAM}")
+    logger.info(f"🌐 Сайт: {SERVICE_WEBSITE}")
+    logger.info(f"📧 Email: {SERVICE_EMAIL}")
+    logger.info(f"🌐 Домен бота: {DOMAIN}")
+    logger.info(f"🔑 Telegram токен: {'установлен' if TELEGRAM_TOKEN else 'НЕ УСТАНОВЛЕН!'}")
+    logger.info(f"🤖 DeepSeek ключ: {'установлен' if DEEPSEEK_API_KEY else 'НЕ УСТАНОВЛЕН'}")
+    
     if not TELEGRAM_TOKEN:
-        logger.error("❌ TELEGRAM_TOKEN не установлен!")
-    if not OPENAI_API_KEY or OPENAI_API_KEY.startswith("sk-ВАШ_КЛЮЧ"):
-        logger.warning("⚠️ OPENAI_API_KEY не установлен, ChatGPT не будет работать")
+        logger.error("❌ TELEGRAM_TOKEN не установлен! Бот не будет работать.")
+    
+    if not DEEPSEEK_API_KEY:
+        logger.warning("⚠️ DEEPSEEK_API_KEY не установлен, глубокий анализ недоступен")
+    
     await auto_set_webhook()
-    logger.info(f"✅ Сервер готов! Домен: {DOMAIN}")
+    logger.info("=" * 50)
+    logger.info("✅ Сервер готов к работе! Автосервис ЛИРА")
+    logger.info("=" * 50)
 
 # ========== FastAPI эндпоинты ==========
 @app.get("/")
 async def root():
-    return {"status":"online","service":"telegram-reviews-bot","timestamp":datetime.utcnow().isoformat()}
+    return {
+        "status": "online",
+        "service": "telegram-reviews-bot-deepseek",
+        "service_name": SERVICE_NAME,
+        "service_phone": SERVICE_PHONE,
+        "service_address": SERVICE_ADDRESS,
+        "timestamp": datetime.utcnow().isoformat(),
+        "deepseek_available": bool(DEEPSEEK_API_KEY)
+    }
 
 @app.get("/health")
 async def health_check():
-    chatgpt_status = test_chatgpt_api()
-    return {"status":"healthy","telegram":bool(TELEGRAM_TOKEN),"chatgpt":chatgpt_status,"database":os.path.exists(DB_PATH),"webhook":DOMAIN}
+    deepseek_status = test_deepseek_api()
+    return {
+        "status": "healthy",
+        "telegram": bool(TELEGRAM_TOKEN),
+        "deepseek": deepseek_status,
+        "database": os.path.exists(DB_PATH),
+        "webhook": DOMAIN,
+        "service": {
+            "name": SERVICE_NAME,
+            "phone": SERVICE_PHONE,
+            "address": SERVICE_ADDRESS,
+            "website": SERVICE_WEBSITE
+        }
+    }
 
-@app.get("/test-chatgpt")
-async def test_chatgpt():
-    return test_chatgpt_api()
+@app.get("/test-deepseek")
+async def test_deepseek():
+    """Тест DeepSeek API"""
+    return test_deepseek_api()
 
 @app.get("/stats")
 async def stats():
-    return {"statistics": get_review_stats(), "weekly_report": get_weekly_report(), "generated_at": datetime.utcnow().isoformat()}
+    """Статистика отзывов"""
+    stats_data = get_review_stats()
+    return {
+        "service": {
+            "name": SERVICE_NAME,
+            "phone": SERVICE_PHONE,
+            "address": SERVICE_ADDRESS
+        },
+        "statistics": stats_data,
+        "weekly_report": get_weekly_report(),
+        "generated_at": datetime.utcnow().isoformat()
+    }
 
 # ========== WEBHOOK Telegram ==========
 @app.post("/webhook")
@@ -290,45 +627,167 @@ async def telegram_webhook(request: Request):
     if not chat_id or not message_text:
         return {"ok": True}
 
-    # Простейшая обработка команд
+    # Обработка команд
     if message_text.startswith("/start"):
-        welcome = f"""🤖 *Бот {SERVICE_NAME}*
-📍 {SERVICE_ADDRESS}
-📞 {SERVICE_PHONE}
+        welcome = f"""🤖 *Бот анализа отзывов {SERVICE_NAME}*
 
-Команды:
-/analyze [текст] - анализ отзыва
+📍 *Наш адрес:* {SERVICE_ADDRESS}
+📞 *Телефон:* {SERVICE_PHONE}
+📱 *Telegram:* {SERVICE_TELEGRAM}
+🌐 *Сайт:* {SERVICE_WEBSITE}
+📧 *Email:* {SERVICE_EMAIL}
+
+*Доступные команды:*
+/analyze [текст] - детальный анализ отзыва (с DeepSeek)
+/quick [текст] - быстрый анализ (без DeepSeek)
 /stats - статистика отзывов
-/myid - ваш ID
-/report - недельный отчет (только для админов)
-"""
+/myid - ваш Chat ID
+/report - недельный отчет
+/test - проверка работы DeepSeek API
+/contacts - наши контакты
+
+*Просто отправьте текст отзыва для автоматического анализа!*
+
+*Мы специализируемся на:*
+🔧 Ремонт всех марок автомобилей
+🔍 Компьютерная диагностика
+⚙️ Техническое обслуживание
+🛠️ Замена запчастей
+📋 Предпродажная подготовка"""
         send_telegram_message(chat_id, welcome)
         return {"ok": True}
 
+    if message_text.startswith("/contacts"):
+        contacts = f"""📞 *Контакты Автосервиса ЛИРА*
+
+📍 *Адрес:* {SERVICE_ADDRESS}
+🕒 *Режим работы:* Пн-Пт 9:00-19:00, Сб 10:00-16:00
+📞 *Телефон:* {SERVICE_PHONE}
+📱 *Telegram:* {SERVICE_TELEGRAM}
+🌐 *Сайт:* {SERVICE_WEBSITE}
+📧 *Email:* {SERVICE_EMAIL}
+
+*Как проехать:*
+🚗 От метро "Автозаводская" - 10 минут
+🚌 Остановка "Ул. Удмуртская"
+🅿️ *Есть собственная парковка*
+
+*Записывайтесь заранее!*"""
+        send_telegram_message(chat_id, contacts)
+        return {"ok": True}
+
     if message_text.startswith("/myid"):
-        send_telegram_message(chat_id, f"🆔 Ваш Chat ID: `{chat_id}`")
+        send_telegram_message(chat_id, f"🆔 *Ваш Chat ID:* `{chat_id}`")
+        return {"ok": True}
+
+    if message_text.startswith("/test"):
+        deepseek_status = test_deepseek_api()
+        if deepseek_status.get("available"):
+            send_telegram_message(chat_id, f"✅ *DeepSeek API работает*\nМодель: {deepseek_status.get('model')}\nОтвет: {deepseek_status.get('response')}")
+        else:
+            send_telegram_message(chat_id, f"❌ *DeepSeek API недоступен*\nОшибка: {deepseek_status.get('message')}")
         return {"ok": True}
 
     if message_text.startswith("/analyze"):
-        review_text = message_text.replace("/analyze","",1).strip()
+        review_text = message_text.replace("/analyze", "", 1).strip()
         if not review_text:
-            send_telegram_message(chat_id, "Введите текст отзыва после команды /analyze")
+            send_telegram_message(chat_id, "✍️ *Введите текст отзыва после команды /analyze*\n\nНапример: /analyze Отличный сервис, быстро починили двигатель!")
             return {"ok": True}
+        
+        # Отправляем сообщение о начале анализа
+        send_telegram_message(chat_id, "🔍 *Анализирую отзыв...*")
+        
+        # Анализ с DeepSeek
         analysis = analyze_review_text(review_text)
+        
+        # Сохранение в БД
         save_review_to_db(chat_id, review_text, analysis)
-        resp = f"⭐ {analysis.get('rating',3)}\nТональность: {analysis.get('sentiment')}\nКатегории: {', '.join(analysis.get('categories',[]))}"
-        send_telegram_message(chat_id, resp)
+        
+        # Форматирование и отправка результата
+        response_text = format_analysis_response(analysis, review_text)
+        send_telegram_message(chat_id, response_text)
+        
+        logger.info(f"✅ Проанализирован отзыв: chat_id={chat_id}, рейтинг={analysis.get('rating')}")
+        return {"ok": True}
+
+    if message_text.startswith("/quick"):
+        review_text = message_text.replace("/quick", "", 1).strip()
+        if not review_text:
+            send_telegram_message(chat_id, "✍️ Введите текст отзыва после команды /quick")
+            return {"ok": True}
+        
+        # Быстрый анализ без DeepSeek
+        analysis = simple_text_analysis(review_text)
+        save_review_to_db(chat_id, review_text, analysis)
+        
+        response = f"""⚡ *Быстрый анализ:*
+{format_star_rating(analysis.get('rating', 3))} Рейтинг: {analysis.get('rating')}/5
+🎭 Настроение: {analysis.get('sentiment')}
+🏷️ Категории: {', '.join(analysis.get('categories', []))}
+"""
+        if analysis.get("автомобиль_марка"):
+            response += f"🚗 Автомобиль: {analysis.get('автомобиль_марка')}\n"
+        
+        send_telegram_message(chat_id, response)
         return {"ok": True}
 
     if message_text.startswith("/stats"):
-        stats = get_review_stats()
-        send_telegram_message(chat_id, f"Всего отзывов: {stats['total_reviews']}\nСредний рейтинг: {stats['average_rating']}")
+        stats_data = get_review_stats()
+        response = f"""📊 *Статистика отзывов {SERVICE_NAME}:*
+        
+📈 Всего отзывов: {stats_data['total_reviews']}
+⭐ Средний рейтинг: {stats_data['average_rating']}
+📅 За неделю: {stats_data['weekly_reviews']}
+
+*Распределение по рейтингам:*
+"""
+        for dist in stats_data['rating_distribution']:
+            response += f"{format_star_rating(dist['rating'])} - {dist['count']} отзывов\n"
+        
+        # Добавляем информацию о сервисе
+        response += f"\n📍 {SERVICE_NAME}\n📞 {SERVICE_PHONE}"
+        
+        send_telegram_message(chat_id, response)
         return {"ok": True}
 
-    send_telegram_message(chat_id, "Команда не распознана. /start для списка команд.")
+    if message_text.startswith("/report"):
+        # Проверка прав (можно добавить проверку chat_id в список админов)
+        weekly_data = get_weekly_report()
+        if not weekly_data:
+            send_telegram_message(chat_id, "📭 *За последнюю неделю отзывов нет*")
+            return {"ok": True}
+        
+        response = f"📋 *Недельный отчет {SERVICE_NAME}:*\n\n"
+        for item in weekly_data:
+            response += f"{format_star_rating(item['rating'])} - {item['count']} отзывов\n"
+            if item['samples']:
+                response += f"📝 Примеры: {', '.join(item['samples'][:2])}\n"
+            response += "\n"
+        
+        response += f"📍 {SERVICE_ADDRESS}\n📞 {SERVICE_PHONE}"
+        
+        send_telegram_message(chat_id, response)
+        return {"ok": True}
+
+    # Автоматический анализ любого текста (если это не команда)
+    if len(message_text) > 10 and not message_text.startswith("/"):
+        send_telegram_message(chat_id, "🔍 *Анализирую ваш отзыв...*")
+        analysis = analyze_review_text(message_text)
+        save_review_to_db(chat_id, message_text, analysis)
+        response_text = format_analysis_response(analysis, message_text)
+        send_telegram_message(chat_id, response_text)
+        return {"ok": True}
+
+    send_telegram_message(chat_id, f"""❓ Команда не распознана. 
+
+Используйте /start для списка команд
+Или отправьте текст отзыва для анализа
+
+📍 *{SERVICE_NAME}*
+📞 {SERVICE_PHONE}""")
     return {"ok": True}
 
 # ========== ЗАПУСК ==========
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=PORT)
+    uvicorn.run("main:app", host="0.0.0.0", port=PORT, reload=False)
