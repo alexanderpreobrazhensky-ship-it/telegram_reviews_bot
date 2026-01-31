@@ -1,479 +1,499 @@
 import os
+import re
 import json
+import time
 import logging
 import threading
-import re
-from datetime import datetime, timedelta
-from typing import Any, Dict, Optional, List, Tuple
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
-from flask import Flask, request
+from flask import Flask, request, jsonify
 
-# -------------------------
+# -----------------------------
 # Logging
-# -------------------------
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger("telegram-reviews-bot")
+# -----------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
+logger = logging.getLogger("telegram_reviews_bot")
 
-# -------------------------
-# Telegram env
-# -------------------------
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-if not BOT_TOKEN:
-    raise ValueError("Missing TELEGRAM_BOT_TOKEN")
+# -----------------------------
+# Optional OpenAI SDK (highly recommended for DeepSeek gateways)
+# -----------------------------
+try:
+    from openai import OpenAI  # type: ignore
+    OPENAI_SDK_AVAILABLE = True
+except Exception:
+    OPENAI_SDK_AVAILABLE = False
+
+# -----------------------------
+# Env / Config
+# -----------------------------
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
+if not TELEGRAM_BOT_TOKEN:
+    raise ValueError("TELEGRAM_BOT_TOKEN (or TELEGRAM_TOKEN) is required")
 
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 if not WEBHOOK_URL:
-    raise ValueError("Missing WEBHOOK_URL")
+    raise ValueError("WEBHOOK_URL is required (e.g. https://xxx.up.railway.app)")
 
-BOT_PATH_SECRET = os.getenv("BOT_PATH_SECRET", "hook")
+# secret part of webhook path (hook123)
+BOT_PATH_SECRET = os.getenv("BOT_PATH_SECRET", "").strip()
+if not BOT_PATH_SECRET:
+    # fallback: last 12 chars of token (not ideal, but prevents 404)
+    BOT_PATH_SECRET = TELEGRAM_BOT_TOKEN[-12:]
+    logger.warning("BOT_PATH_SECRET not set. Using fallback based on token suffix.")
+
 WEBHOOK_PATH = f"/webhook/{BOT_PATH_SECRET}"
+WEBHOOK_FULL_URL = f"{WEBHOOK_URL.rstrip('/')}{WEBHOOK_PATH}"
 
-TG_TIMEOUT = float(os.getenv("TG_TIMEOUT", "10"))
-AI_TIMEOUT = float(os.getenv("AI_TIMEOUT", "15"))
+PORT = int(os.getenv("PORT", "8000"))
 
-# -------------------------
-# Admins
-# -------------------------
-REPORT_CHAT_IDS_RAW = (os.getenv("REPORT_CHAT_IDS") or "").strip()
+AI_ENGINE = (os.getenv("AI_ENGINE") or "deepseek").strip().lower()  # default deepseek
+CX_PROMPT_MODE = (os.getenv("CX_PROMPT_MODE") or "full").strip().lower()  # full|lite
 
-def parse_admin_ids(raw: str) -> List[int]:
-    if not raw:
-        return []
-    out: List[int] = []
-    for part in raw.split(","):
-        part = part.strip()
-        if not part:
-            continue
-        try:
-            out.append(int(part))
-        except Exception:
-            logger.warning("Invalid REPORT_CHAT_IDS entry: %r", part)
-    return out
+# DeepSeek / Artemox
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY") or os.getenv("DEEPSEEK_KEY")
+DEEPSEEK_BASE_URL = (os.getenv("DEEPSEEK_BASE_URL") or "https://api.artemox.com/v1").rstrip("/")
+DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL") or "deepseek-chat"
+DEEPSEEK_URL = f"{DEEPSEEK_BASE_URL}/chat/completions"
 
-ADMIN_CHAT_IDS = parse_admin_ids(REPORT_CHAT_IDS_RAW)
-if not ADMIN_CHAT_IDS:
-    logger.warning("REPORT_CHAT_IDS is empty -> admin commands allowed for everyone (NOT recommended).")
-
-def is_admin(chat_id: int) -> bool:
-    return (not ADMIN_CHAT_IDS) or (chat_id in ADMIN_CHAT_IDS)
-
-# -------------------------
-# Business context (optional)
-# -------------------------
-BUSINESS_CONTEXT = (os.getenv("BUSINESS_CONTEXT") or "").strip() or None
-BRANCH_CITY = (os.getenv("BRANCH_CITY") or "").strip() or None
-
-# -------------------------
-# AI multi-engine env
-# -------------------------
-AI_ENGINE = (os.getenv("AI_ENGINE") or "deepseek").strip().lower()
-
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+# OpenAI (optional)
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
-GROK_API_KEY = os.getenv("GROK_API_KEY") or os.getenv("XAI_API_KEY")
+OPENAI_BASE_URL = (os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1").rstrip("/")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL") or "gpt-4o-mini"
 
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
-GROK_MODEL = os.getenv("GROK_MODEL", "grok-beta")
-
+# Gemini (optional)
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL") or "gemini-2.0-flash"
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
-OPENAI_URL = os.getenv("OPENAI_URL", "https://api.openai.com/v1/chat/completions")
 
-DEEPSEEK_BASE_URL = (os.getenv("DEEPSEEK_BASE_URL") or "").strip()
-if DEEPSEEK_BASE_URL:
-    DEEPSEEK_URL = DEEPSEEK_BASE_URL.rstrip("/") + "/chat/completions"
-else:
-    DEEPSEEK_URL = os.getenv("DEEPSEEK_URL", "https://api.deepseek.com/chat/completions")
+# Grok/xAI placeholder (optional)
+GROK_API_KEY = os.getenv("GROK_API_KEY")
+GROK_BASE_URL = (os.getenv("GROK_BASE_URL") or "").rstrip("/")
+GROK_MODEL = os.getenv("GROK_MODEL") or "grok-beta"
 
-GROK_URL = os.getenv("GROK_URL", "https://api.x.ai/v1/chat/completions")
+# Admin allowlist: comma-separated chat_ids
+REPORT_CHAT_IDS = os.getenv("REPORT_CHAT_IDS", "").strip()
+ADMIN_CHAT_IDS: List[int] = []
+if REPORT_CHAT_IDS:
+    for x in REPORT_CHAT_IDS.split(","):
+        x = x.strip()
+        if x:
+            try:
+                ADMIN_CHAT_IDS.append(int(x))
+            except Exception:
+                pass
 
-# -------------------------
-# Cron (weekly report)
-# -------------------------
-CRON_TOKEN = (os.getenv("CRON_TOKEN") or "").strip()  # required for /cron endpoint security
+ADMIN_MODE = "allowlist" if ADMIN_CHAT_IDS else "open"
 
-# -------------------------
-# DB (Postgres on Railway or SQLite fallback)
-# -------------------------
-DATABASE_URL = (os.getenv("DATABASE_URL") or "").strip()
-USE_POSTGRES = DATABASE_URL.startswith("postgres://") or DATABASE_URL.startswith("postgresql://")
-SQL_PARAM = "%s" if USE_POSTGRES else "?"
+# DB
+DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("DATABASE_PUBLIC_URL") or os.getenv("DATABASE_URL_INTERNAL")
 
-if USE_POSTGRES:
-    try:
-        import psycopg
-        from psycopg.types.json import Json
-    except Exception as e:
-        raise RuntimeError(
-            "Postgres detected (DATABASE_URL set) but psycopg is not available. "
-            "Install psycopg[binary]==3.x in requirements.txt"
-        ) from e
+# Cron token (protect /cron/weekly)
+CRON_TOKEN = os.getenv("CRON_TOKEN", "").strip()
 
-def db_connect():
-    if USE_POSTGRES:
-        return psycopg.connect(DATABASE_URL)
-    else:
-        import sqlite3
-        conn = sqlite3.connect("reviews.db")
-        conn.row_factory = sqlite3.Row
-        return conn
+# Diagnostics token (optional) - if set, /diag/ai requires ?token=
+DIAG_TOKEN = os.getenv("DIAG_TOKEN", "").strip()
 
-def db_init():
-    # reviews table (as before)
-    if USE_POSTGRES:
-        ddl_reviews = """
-        CREATE TABLE IF NOT EXISTS reviews (
-          id               SERIAL PRIMARY KEY,
-          source           TEXT NOT NULL,
-          rating           INTEGER NULL,
-          author           TEXT NULL,
-          url              TEXT NULL,
-          published_at     TIMESTAMP NULL,
-          text             TEXT NOT NULL,
-          added_by_user_id BIGINT NULL,
-          added_by_chat_id BIGINT NULL,
-          created_at       TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-        );
-        """
-        ddl_analyses = """
-        CREATE TABLE IF NOT EXISTS review_analyses (
-          id           SERIAL PRIMARY KEY,
-          review_id    BIGINT NULL,
-          ai_engine    TEXT NOT NULL,
-          input_json   JSONB NOT NULL,
-          result_json  JSONB NOT NULL,
-          created_at   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-        );
-        CREATE INDEX IF NOT EXISTS idx_review_analyses_created_at ON review_analyses(created_at);
-        CREATE INDEX IF NOT EXISTS idx_review_analyses_review_id ON review_analyses(review_id);
-        """
-    else:
-        ddl_reviews = """
-        CREATE TABLE IF NOT EXISTS reviews (
-          id               INTEGER PRIMARY KEY AUTOINCREMENT,
-          source           TEXT NOT NULL,
-          rating           INTEGER NULL,
-          author           TEXT NULL,
-          url              TEXT NULL,
-          published_at     TEXT NULL,
-          text             TEXT NOT NULL,
-          added_by_user_id INTEGER NULL,
-          added_by_chat_id INTEGER NULL,
-          created_at       TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        );
-        """
-        ddl_analyses = """
-        CREATE TABLE IF NOT EXISTS review_analyses (
-          id           INTEGER PRIMARY KEY AUTOINCREMENT,
-          review_id    INTEGER NULL,
-          ai_engine    TEXT NOT NULL,
-          input_json   TEXT NOT NULL,
-          result_json  TEXT NOT NULL,
-          created_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        );
-        """
+# Timeouts
+TG_TIMEOUT = float(os.getenv("TG_TIMEOUT", "10"))
+AI_TIMEOUT = float(os.getenv("AI_TIMEOUT", "40"))
 
-    conn = db_connect()
-    try:
-        cur = conn.cursor()
-        cur.execute(ddl_reviews)
-        if USE_POSTGRES:
-            # ddl_analyses contains multiple statements
-            for stmt in [s.strip() for s in ddl_analyses.split(";") if s.strip()]:
-                cur.execute(stmt + ";")
-        else:
-            cur.execute(ddl_analyses)
-        conn.commit()
-        logger.info("DB init OK (postgres=%s)", USE_POSTGRES)
-    finally:
-        conn.close()
-
-db_init()
-
-# -------------------------
+# -----------------------------
 # Flask
-# -------------------------
+# -----------------------------
 app = Flask(__name__)
 
-# -------------------------
-# Helpers: redact secrets in logs
-# -------------------------
-def _redact(s: str) -> str:
-    if not s:
-        return s
-    for key in [GEMINI_API_KEY, OPENAI_API_KEY, DEEPSEEK_API_KEY, GROK_API_KEY, BOT_TOKEN, CRON_TOKEN]:
-        if key and key in s:
-            s = s.replace(key, "***REDACTED***")
-    return s
+# -----------------------------
+# Telegram helpers
+# -----------------------------
+def tg_api(method: str) -> str:
+    return f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{method}"
 
-# -------------------------
-# Telegram API helpers
-# -------------------------
-def tg_api(method: str, payload: Dict[str, Any]) -> Optional[requests.Response]:
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/{method}"
-    try:
-        return requests.post(url, json=payload, timeout=TG_TIMEOUT)
-    except Exception as e:
-        logger.exception("Telegram API exception %s: %s", method, e)
-        return None
-
-def tg_send_message(chat_id: int, text: str, reply_to: Optional[int] = None,
-                    reply_markup: Optional[Dict[str, Any]] = None) -> None:
-    payload: Dict[str, Any] = {"chat_id": chat_id, "text": text}
-    if reply_to is not None:
-        payload["reply_to_message_id"] = reply_to
-    if reply_markup is not None:
+def send_message(chat_id: int, text: str, reply_markup: Optional[dict] = None) -> None:
+    payload = {"chat_id": chat_id, "text": text}
+    if reply_markup:
         payload["reply_markup"] = reply_markup
-
-    resp = tg_api("sendMessage", payload)
-    if resp is not None and resp.status_code != 200:
-        logger.error("sendMessage failed: %s", _redact(resp.text[:800]))
-
-def tg_answer_callback_query(callback_query_id: str, text: Optional[str] = None, show_alert: bool = False) -> None:
-    payload: Dict[str, Any] = {"callback_query_id": callback_query_id}
-    if text:
-        payload["text"] = text
-    payload["show_alert"] = bool(show_alert)
-
-    resp = tg_api("answerCallbackQuery", payload)
-    if resp is not None and resp.status_code != 200:
-        logger.error("answerCallbackQuery failed: %s", _redact(resp.text[:400]))
-
-def set_webhook() -> None:
-    full_url = WEBHOOK_URL.rstrip("/") + WEBHOOK_PATH
-    logger.info("Setting webhook: %s", full_url)
     try:
-        r = requests.post(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook",
-            json={"url": full_url},
+        r = requests.post(tg_api("sendMessage"), json=payload, timeout=TG_TIMEOUT)
+        if r.status_code != 200:
+            logger.error("sendMessage failed status=%s body=%s", r.status_code, _redact(r.text[:900]))
+    except Exception as e:
+        logger.exception("sendMessage exception: %s", e)
+
+def answer_callback_query(callback_query_id: str, text: str = "", show_alert: bool = False) -> None:
+    payload = {"callback_query_id": callback_query_id, "text": text, "show_alert": show_alert}
+    try:
+        r = requests.post(tg_api("answerCallbackQuery"), json=payload, timeout=TG_TIMEOUT)
+        if r.status_code != 200:
+            logger.error("answerCallbackQuery failed status=%s body=%s", r.status_code, _redact(r.text[:500]))
+    except Exception:
+        logger.exception("answerCallbackQuery exception")
+
+def _is_admin(chat_id: Optional[int]) -> bool:
+    if chat_id is None:
+        return False
+    if not ADMIN_CHAT_IDS:
+        return True  # open mode
+    return chat_id in ADMIN_CHAT_IDS
+
+# -----------------------------
+# Webhook setup (per process)
+# -----------------------------
+_webhook_set_once = False
+_webhook_lock = threading.Lock()
+
+def set_webhook_once() -> None:
+    global _webhook_set_once
+    with _webhook_lock:
+        if _webhook_set_once:
+            return
+        _webhook_set_once = True
+
+    try:
+        logger.info("Setting webhook: %s", WEBHOOK_FULL_URL)
+        r = requests.get(
+            tg_api("setWebhook"),
+            params={"url": WEBHOOK_FULL_URL},
             timeout=TG_TIMEOUT,
         )
-        if r.status_code == 429:
-            logger.warning("setWebhook got 429 (ignored): %s", _redact(r.text[:400]))
-            return
-        if r.status_code != 200:
-            logger.error("setWebhook failed status=%s body=%s", r.status_code, _redact(r.text[:800]))
+        # 429 часто бывает из-за нескольких воркеров — не критично
+        if r.status_code == 200:
+            logger.info("setWebhook OK: %s", _redact(r.text[:500]))
+        elif r.status_code == 429:
+            logger.warning("setWebhook got 429 (ignored): %s", _redact(r.text[:500]))
         else:
-            logger.info("setWebhook OK: %s", _redact(r.text[:400]))
-    except Exception as e:
-        logger.exception("set_webhook exception: %s", e)
-
-if os.getenv("DISABLE_WEBHOOK_SETUP", "0") != "1":
-    set_webhook()
-
-# -------------------------
-# DB operations: reviews (existing)
-# -------------------------
-def parse_kv_args(arg_str: str) -> Tuple[Dict[str, str], str]:
-    tokens = arg_str.strip().split()
-    kv: Dict[str, str] = {}
-    rest_tokens: List[str] = []
-    for t in tokens:
-        if "=" in t and not t.lower().startswith("http"):
-            k, v = t.split("=", 1)
-            k = k.strip().lower()
-            v = v.strip().strip('"').strip("'")
-            if k and v:
-                kv[k] = v
-                continue
-        rest_tokens.append(t)
-    return kv, " ".join(rest_tokens).strip()
-
-def parse_date(s: str) -> Optional[datetime]:
-    s = (s or "").strip()
-    if not s:
-        return None
-    try:
-        return datetime.fromisoformat(s)
+            logger.error("setWebhook failed status=%s body=%s", r.status_code, _redact(r.text[:900]))
     except Exception:
+        logger.exception("setWebhook exception")
+
+# -----------------------------
+# DB layer (psycopg v3 recommended)
+# -----------------------------
+DB_OK = False
+
+def _db_connect():
+    """
+    Returns psycopg connection, or None if not configured.
+    """
+    if not DATABASE_URL:
+        return None
+    try:
+        import psycopg  # type: ignore
+        conn = psycopg.connect(DATABASE_URL, autocommit=True)
+        return conn
+    except Exception as e:
+        logger.error("DB connect failed: %s", e)
         return None
 
-def db_insert_review(source: str, text: str, rating: Optional[int], author: Optional[str],
-                     url: Optional[str], published_at: Optional[datetime],
-                     added_by_user_id: Optional[int], added_by_chat_id: Optional[int]) -> int:
-    conn = db_connect()
+def db_init() -> None:
+    global DB_OK
+    conn = _db_connect()
+    if not conn:
+        DB_OK = False
+        logger.warning("DB init skipped (DATABASE_URL not set or connect failed)")
+        return
     try:
-        cur = conn.cursor()
-        if USE_POSTGRES:
-            cur.execute(
-                f"""
-                INSERT INTO reviews (source, rating, author, url, published_at, text, added_by_user_id, added_by_chat_id)
-                VALUES ({SQL_PARAM},{SQL_PARAM},{SQL_PARAM},{SQL_PARAM},{SQL_PARAM},{SQL_PARAM},{SQL_PARAM},{SQL_PARAM})
-                RETURNING id
-                """,
-                (source, rating, author, url, published_at, text, added_by_user_id, added_by_chat_id),
-            )
-            new_id = cur.fetchone()[0]
-        else:
-            cur.execute(
-                f"""
-                INSERT INTO reviews (source, rating, author, url, published_at, text, added_by_user_id, added_by_chat_id)
-                VALUES ({SQL_PARAM},{SQL_PARAM},{SQL_PARAM},{SQL_PARAM},{SQL_PARAM},{SQL_PARAM},{SQL_PARAM},{SQL_PARAM})
-                """,
-                (source, rating, author, url,
-                 published_at.isoformat() if published_at else None,
-                 text, added_by_user_id, added_by_chat_id),
-            )
-            new_id = cur.lastrowid
-        conn.commit()
-        return int(new_id)
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS reviews (
+                    id BIGSERIAL PRIMARY KEY,
+                    source TEXT NOT NULL DEFAULT 'manual',
+                    rating INT,
+                    review_text TEXT NOT NULL,
+                    meta JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                );
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS review_analyses (
+                    id BIGSERIAL PRIMARY KEY,
+                    review_id BIGINT,
+                    platform TEXT,
+                    rating INT,
+                    review_text TEXT NOT NULL,
+                    result_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    error TEXT,
+                    model TEXT,
+                    engine TEXT,
+                    created_by BIGINT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                );
+            """)
+        DB_OK = True
+        logger.info("DB init OK (postgres=True)")
+    except Exception:
+        DB_OK = False
+        logger.exception("DB init failed")
     finally:
-        conn.close()
-
-def db_get_review(review_id: int) -> Optional[Dict[str, Any]]:
-    conn = db_connect()
-    try:
-        cur = conn.cursor()
-        cur.execute(f"SELECT * FROM reviews WHERE id={SQL_PARAM}", (review_id,))
-        row = cur.fetchone()
-        if not row:
-            return None
-        if USE_POSTGRES:
-            cols = [d[0] for d in cur.description]
-            return {cols[i]: row[i] for i in range(len(cols))}
-        return dict(row)
-    finally:
-        conn.close()
-
-def db_list_reviews(limit: int = 10, source: Optional[str] = None) -> List[Dict[str, Any]]:
-    conn = db_connect()
-    try:
-        cur = conn.cursor()
-        if source:
-            cur.execute(
-                f"SELECT * FROM reviews WHERE source={SQL_PARAM} ORDER BY id DESC LIMIT {int(limit)}",
-                (source,),
-            )
-        else:
-            cur.execute(f"SELECT * FROM reviews ORDER BY id DESC LIMIT {int(limit)}")
-        rows = cur.fetchall()
-        if USE_POSTGRES:
-            cols = [d[0] for d in cur.description]
-            return [{cols[i]: r[i] for i in range(len(cols))} for r in rows]
-        return [dict(r) for r in rows]
-    finally:
-        conn.close()
-
-def db_delete_review(review_id: int) -> bool:
-    conn = db_connect()
-    try:
-        cur = conn.cursor()
-        cur.execute(f"DELETE FROM reviews WHERE id={SQL_PARAM}", (review_id,))
-        conn.commit()
-        return cur.rowcount > 0
-    finally:
-        conn.close()
-
-def review_preview(r: Dict[str, Any], max_len: int = 220) -> str:
-    text = (r.get("text") or "").strip().replace("\n", " ")
-    if len(text) > max_len:
-        text = text[: max_len - 1] + "…"
-    parts = [
-        f"#{r.get('id')} [{r.get('source')}]",
-        f"rating={r.get('rating')}" if r.get("rating") is not None else None,
-        f"url={r.get('url')}" if r.get("url") else None,
-    ]
-    head = " ".join([p for p in parts if p])
-    return f"{head}\n{text}"
-
-# -------------------------
-# DB operations: analyses
-# -------------------------
-def db_insert_analysis(review_id: Optional[int], ai_engine: str,
-                       input_obj: Dict[str, Any], result_obj: Dict[str, Any]) -> int:
-    conn = db_connect()
-    try:
-        cur = conn.cursor()
-        if USE_POSTGRES:
-            cur.execute(
-                f"""
-                INSERT INTO review_analyses (review_id, ai_engine, input_json, result_json)
-                VALUES ({SQL_PARAM},{SQL_PARAM},{SQL_PARAM},{SQL_PARAM})
-                RETURNING id
-                """,
-                (review_id, ai_engine, Json(input_obj), Json(result_obj)),
-            )
-            new_id = cur.fetchone()[0]
-        else:
-            cur.execute(
-                f"""
-                INSERT INTO review_analyses (review_id, ai_engine, input_json, result_json)
-                VALUES ({SQL_PARAM},{SQL_PARAM},{SQL_PARAM},{SQL_PARAM})
-                """,
-                (review_id, ai_engine, json.dumps(input_obj, ensure_ascii=False),
-                 json.dumps(result_obj, ensure_ascii=False)),
-            )
-            new_id = cur.lastrowid
-        conn.commit()
-        return int(new_id)
-    finally:
-        conn.close()
-
-def db_get_analysis(analysis_id: int) -> Optional[Dict[str, Any]]:
-    conn = db_connect()
-    try:
-        cur = conn.cursor()
-        cur.execute(f"SELECT * FROM review_analyses WHERE id={SQL_PARAM}", (analysis_id,))
-        row = cur.fetchone()
-        if not row:
-            return None
-        if USE_POSTGRES:
-            cols = [d[0] for d in cur.description]
-            obj = {cols[i]: row[i] for i in range(len(cols))}
-            return obj
-        obj = dict(row)
-        # sqlite: parse json fields
         try:
-            obj["input_json"] = json.loads(obj.get("input_json") or "{}")
+            conn.close()
         except Exception:
-            obj["input_json"] = {}
-        try:
-            obj["result_json"] = json.loads(obj.get("result_json") or "{}")
-        except Exception:
-            obj["result_json"] = {}
-        return obj
-    finally:
-        conn.close()
+            pass
 
-def db_list_analyses_since(dt: datetime) -> List[Dict[str, Any]]:
-    conn = db_connect()
+def db_insert_review(source: str, rating: Optional[int], review_text: str, meta: dict) -> Optional[int]:
+    conn = _db_connect()
+    if not conn:
+        return None
     try:
-        cur = conn.cursor()
-        if USE_POSTGRES:
+        with conn.cursor() as cur:
             cur.execute(
-                f"SELECT * FROM review_analyses WHERE created_at >= {SQL_PARAM} ORDER BY id DESC",
-                (dt,),
+                "INSERT INTO reviews (source, rating, review_text, meta) VALUES (%s, %s, %s, %s) RETURNING id",
+                (source, rating, review_text, json.dumps(meta, ensure_ascii=False)),
             )
-            rows = cur.fetchall()
-            cols = [d[0] for d in cur.description]
-            return [{cols[i]: r[i] for i in range(len(cols))} for r in rows]
-        else:
-            cur.execute(
-                f"SELECT * FROM review_analyses WHERE created_at >= {SQL_PARAM} ORDER BY id DESC",
-                (dt.isoformat(),),
-            )
-            rows = cur.fetchall()
+            row = cur.fetchone()
+            return int(row[0]) if row else None
+    except Exception:
+        logger.exception("db_insert_review failed")
+        return None
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+def db_get_review(review_id: int) -> Optional[dict]:
+    conn = _db_connect()
+    if not conn:
+        return None
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, source, rating, review_text, meta, created_at FROM reviews WHERE id=%s", (review_id,))
+            row = cur.fetchone()
+            if not row:
+                return None
+            return {
+                "id": int(row[0]),
+                "source": row[1],
+                "rating": row[2],
+                "review_text": row[3],
+                "meta": row[4] if isinstance(row[4], dict) else (json.loads(row[4]) if row[4] else {}),
+                "created_at": str(row[5]),
+            }
+    except Exception:
+        logger.exception("db_get_review failed")
+        return None
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+def db_list_reviews(n: int = 10, source: Optional[str] = None) -> List[dict]:
+    conn = _db_connect()
+    if not conn:
+        return []
+    try:
+        with conn.cursor() as cur:
+            if source:
+                cur.execute(
+                    "SELECT id, source, rating, left(review_text, 140), created_at FROM reviews WHERE source=%s ORDER BY id DESC LIMIT %s",
+                    (source, n),
+                )
+            else:
+                cur.execute(
+                    "SELECT id, source, rating, left(review_text, 140), created_at FROM reviews ORDER BY id DESC LIMIT %s",
+                    (n,),
+                )
+            rows = cur.fetchall() or []
             out = []
             for r in rows:
-                d = dict(r)
-                try:
-                    d["result_json"] = json.loads(d.get("result_json") or "{}")
-                except Exception:
-                    d["result_json"] = {}
-                out.append(d)
+                out.append({
+                    "id": int(r[0]),
+                    "source": r[1],
+                    "rating": r[2],
+                    "preview": r[3],
+                    "created_at": str(r[4]),
+                })
             return out
+    except Exception:
+        logger.exception("db_list_reviews failed")
+        return []
     finally:
-        conn.close()
+        try:
+            conn.close()
+        except Exception:
+            pass
 
-# -------------------------
-# CX System prompt (your contract) - STRICT JSON output
-# -------------------------
-SYSTEM_PROMPT_CX = r"""
-ТЫ — аналитический модуль для Telegram-бота контроля качества сервиса (CX/Service Quality). Бот работает в мессенджере Telegram и получает отзывы клиентов с площадок (сейчас: 2ГИС и Яндекс Карты), с перспективой подключения других источников. Модель ИИ по умолчанию — DeepSeek, но логика должна быть универсальной и независимой от провайдера.
+def db_delete_review(review_id: int) -> bool:
+    conn = _db_connect()
+    if not conn:
+        return False
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM reviews WHERE id=%s", (review_id,))
+        return True
+    except Exception:
+        logger.exception("db_delete_review failed")
+        return False
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+def db_insert_analysis(
+    review_id: Optional[int],
+    platform: Optional[str],
+    rating: Optional[int],
+    review_text: str,
+    result_json: dict,
+    error: Optional[str],
+    model: str,
+    engine: str,
+    created_by: Optional[int],
+) -> Optional[int]:
+    conn = _db_connect()
+    if not conn:
+        return None
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO review_analyses
+                (review_id, platform, rating, review_text, result_json, error, model, engine, created_by)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                RETURNING id
+                """,
+                (
+                    review_id,
+                    platform,
+                    rating,
+                    review_text,
+                    json.dumps(result_json, ensure_ascii=False),
+                    error,
+                    model,
+                    engine,
+                    created_by,
+                ),
+            )
+            row = cur.fetchone()
+            return int(row[0]) if row else None
+    except Exception:
+        logger.exception("db_insert_analysis failed")
+        return None
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+def db_get_analysis(analysis_id: int) -> Optional[dict]:
+    conn = _db_connect()
+    if not conn:
+        return None
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, review_id, platform, rating, review_text, result_json, error, model, engine, created_by, created_at FROM review_analyses WHERE id=%s",
+                (analysis_id,),
+            )
+            r = cur.fetchone()
+            if not r:
+                return None
+            return {
+                "id": int(r[0]),
+                "review_id": r[1],
+                "platform": r[2],
+                "rating": r[3],
+                "review_text": r[4],
+                "result_json": r[5] if isinstance(r[5], dict) else (json.loads(r[5]) if r[5] else {}),
+                "error": r[6],
+                "model": r[7],
+                "engine": r[8],
+                "created_by": r[9],
+                "created_at": str(r[10]),
+            }
+    except Exception:
+        logger.exception("db_get_analysis failed")
+        return None
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+def db_weekly_summary(days: int = 7) -> dict:
+    conn = _db_connect()
+    if not conn:
+        return {"ok": False, "error": "DB not configured"}
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                  count(*) as total,
+                  count(*) FILTER (WHERE error IS NOT NULL) as with_error
+                FROM review_analyses
+                WHERE created_at >= now() - (%s || ' days')::interval
+                """,
+                (days,),
+            )
+            row = cur.fetchone() or (0, 0)
+            total = int(row[0])
+            with_error = int(row[1])
+
+            # sentiment distribution (best-effort from stored json)
+            cur.execute(
+                """
+                SELECT result_json
+                FROM review_analyses
+                WHERE created_at >= now() - (%s || ' days')::interval
+                """,
+                (days,),
+            )
+            rows = cur.fetchall() or []
+            sentiments = {"negative": 0, "mixed": 0, "neutral": 0, "positive": 0, "unknown": 0}
+            complaints_needed = 0
+            aspects_counter: Dict[str, int] = {}
+
+            for (rj,) in rows:
+                obj = rj if isinstance(rj, dict) else (json.loads(rj) if rj else {})
+                s = (obj.get("sentiment") or {}).get("label") or "unknown"
+                if s not in sentiments:
+                    s = "unknown"
+                sentiments[s] += 1
+
+                comp = (obj.get("complaint") or {})
+                if comp.get("needed") is True:
+                    complaints_needed += 1
+
+                aspects = obj.get("aspects") or []
+                if isinstance(aspects, list):
+                    for a in aspects:
+                        name = (a or {}).get("name")
+                        if name and isinstance(name, str):
+                            key = name.strip().lower()
+                            aspects_counter[key] = aspects_counter.get(key, 0) + 1
+
+            top_aspects = sorted(aspects_counter.items(), key=lambda x: x[1], reverse=True)[:10]
+
+            return {
+                "ok": True,
+                "days": days,
+                "total": total,
+                "with_error": with_error,
+                "sentiments": sentiments,
+                "complaints_needed": complaints_needed,
+                "top_aspects": top_aspects,
+            }
+    except Exception:
+        logger.exception("db_weekly_summary failed")
+        return {"ok": False, "error": "db_weekly_summary failed"}
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+# -----------------------------
+# Prompt (FULL + LITE)
+# -----------------------------
+CX_PROMPT_FULL = r"""
+ТЫ — аналитический модуль для Telegram-бота контроля качества сервиса (CX/Service Quality). Бот получает отзывы клиентов с площадок (сейчас: 2ГИС и Яндекс Карты), с перспективой подключения других источников. Модель ИИ по умолчанию — DEEPSEEK, но логика должна быть универсальной и независимой от провайдера.
 
 ТВОЯ ЗАДАЧА (строго):
 1) Определить площадку (2ГИС / Яндекс) если не указана.
@@ -482,7 +502,7 @@ SYSTEM_PROMPT_CX = r"""
 4) Сгенерировать публичный ответ на отзыв (разный стиль для позитивного/негативного/сомнительного).
 5) Если есть нарушения правил площадки ИЛИ рейтинг < 2 (т.е. 1 звезда) — подготовить жалобу на отзыв:
    - Для 2ГИС: текст жалобы строго ≤ 450 символов (включая пробелы).
-   - Для Яндекса: жалоба краткая, по делу (без лимита, но не “простыня”).
+   - Для Яндекса: жалоба краткая, по делу.
 
 ВХОДНЫЕ ДАННЫЕ (используй только то, что передано; НЕ выдумывай факты):
 - platform: "2gis" | "yandex" | "unknown" (может отсутствовать)
@@ -494,7 +514,7 @@ SYSTEM_PROMPT_CX = r"""
 - meta: любые доп. поля (язык, имя автора, ссылка, уже существующий ответ и т.п.)
 
 ОБЩИЕ ПРИНЦИПЫ КАЧЕСТВА:
-- Никаких выдуманных деталей (заказы, даты, суммы, имена сотрудников), если их нет во входе.
+- Никаких выдуманных деталей, если их нет во входе.
 - Если данных мало — формулируй гипотезы + уровень уверенности.
 - Цитаты из отзыва делай короткими: до 12 слов.
 - Пиши на русском, вежливо, без токсичности.
@@ -502,27 +522,64 @@ SYSTEM_PROMPT_CX = r"""
 - Не упоминай публично “мы подадим жалобу” и не угрожай автору.
 
 ШАГ 1. ОПРЕДЕЛЕНИЕ ПЛОЩАДКИ (если platform отсутствует/unknown)
-Верни platform_detected.value: "2gis" | "yandex" | "unknown", confidence 0..1, signals 2–5.
+Верни:
+- platform_detected.value: "2gis" | "yandex" | "unknown"
+- confidence 0..1
+- signals: 2–5 признаков
+Если нет уверенных признаков — "unknown" и confidence ≤0.4.
 
 ШАГ 2. ГЛУБОКИЙ АНАЛИЗ ОТЗЫВА
-Сформируй блоки: review_summary, sentiment, emotions, aspects, facts_vs_opinions, pain_points,
-root_cause_hypotheses, business_process_flags, risks, recommendations, clarifying_questions.
+Сформируй:
+A) review_summary
+B) sentiment.label negative/mixed/neutral/positive + score -100..+100
+C) emotions 1–3
+D) aspects 3–8 (name, weight 0..100, evidence)
+E) facts_vs_opinions
+F) pain_points 1–5
+G) root_cause_hypotheses 1–3 (process_stage)
+H) business_process_flags (этапы)
+I) risks (reputation/ops/finance)
+J) recommendations 4–10 (priority P0/P1/P2, action, expected_effect, effort S/M/L, metric)
+K) clarifying_questions 0–3
 
-ШАГ 3. ПРОВЕРКА ПО ПРАВИЛАМ ПЛОЩАДКИ (policy_check)
-Верни has_possible_violations, possible_violations (confidence+evidence), notes.
+ШАГ 3. CHECK-LIST НАРУШЕНИЙ (policy_check)
+Верни:
+- has_possible_violations
+- possible_violations (category, confidence, evidence)
+- notes
 
-ШАГ 4. ПУБЛИЧНЫЙ ОТВЕТ НА ОТЗЫВ (public_reply)
-2–8 предложений, человечно, без канцелярита, без ПДн, без угроз, нейтрально.
+2ГИС чек-лист:
+1) не личный опыт/со слов/давно >1 года
+2) упоминание конкурентов
+3) дубликаты/копипаст (гипотеза)
+4) ответ на другой отзыв
+5) реклама/накрутка/ссылки
+6) капслок/символы
+7) работодатель/собеседование
+8) мат/оскорбления/угрозы/дискриминация
+9) персональные данные/документы/мед.
 
-ШАГ 5. ЖАЛОБА НА ОТЗЫВ (complaint)
+Яндекс чек-лист:
+1) не личный опыт
+2) неверный объект/дублирование
+3) персональные данные/документы/мед
+4) фото/видео сотрудников без согласия (если упоминается)
+5) отзыв как работника
+6) реклама/спам/ссылки/конкуренты
+7) недостоверный/накрученный (гипотеза)
+8) угрозы/дискриминация/18+
+
+ШАГ 4. public_reply
+2–8 предложений, человечески, без ПДн, без угроз.
+
+ШАГ 5. complaint
 complaint.needed=true если:
-a) rating < 2 (если rating отсутствует — не использовать)
-ИЛИ b) policy_check.has_possible_violations=true и ключевая причина confidence ≥0.6
-ИЛИ c) сильный сигнал “нет признаков реального визита” (как гипотеза)
+a) rating < 2 (если rating есть)
+или b) violations с confidence >=0.6
+или c) сильный сигнал “не было визита” (гипотеза)
+Для 2ГИС: complaint.text <= 450 символов + верни char_count.
 
-Для 2ГИС: complaint.text ≤ 450 символов; верни complaint.char_count.
-
-ВЫХОДНОЙ ФОРМАТ (СТРОГО: вернуть ТОЛЬКО JSON, без markdown, без пояснений вокруг)
+ВЫХОДНОЙ ФОРМАТ (СТРОГО: вернуть ТОЛЬКО JSON)
 {
   "platform_detected": {"value":"2gis|yandex|unknown","confidence":0.0,"signals":["..."]},
   "review_summary":"...",
@@ -537,235 +594,233 @@ a) rating < 2 (если rating отсутствует — не использо�
   "recommendations":[{"priority":"P0|P1|P2","action":"...","expected_effect":"...","effort":"S|M|L","metric":"..."}],
   "clarifying_questions":["..."],
   "policy_check":{
-    "has_possible_violations":true,
+    "has_possible_violations":false,
     "possible_violations":[{"category":"...","confidence":0.0,"evidence":["..."]}],
     "notes":"..."
   },
   "public_reply":{"tone":"...","text":"..."},
   "complaint":{"needed":false,"reasons":["..."],"text":"...","char_count":0}
 }
+"""
 
-ДОП. ТЕХТРЕБОВАНИЯ:
-- JSON валидный: двойные кавычки, без trailing commas.
-- Если блок не применим — верни пустые массивы/false, но структура должна сохраняться.
-""".strip()
+CX_PROMPT_LITE = r"""
+Верни ТОЛЬКО валидный JSON по схеме:
+platform_detected, review_summary, sentiment, emotions, aspects, facts_vs_opinions, pain_points,
+root_cause_hypotheses, business_process_flags, risks, recommendations, clarifying_questions,
+policy_check, public_reply, complaint.
+Никаких markdown, никаких пояснений.
+Если данных мало — гипотезы + confidence.
+"""
 
-# -------------------------
-# AI transport (provider-agnostic)
-# -------------------------
+def get_cx_prompt() -> str:
+    return CX_PROMPT_LITE if CX_PROMPT_MODE == "lite" else CX_PROMPT_FULL
+
+# -----------------------------
+# Redaction
+# -----------------------------
+def _redact(s: str) -> str:
+    if not s:
+        return s
+    # hide bot token and api keys if accidentally appear
+    s = s.replace(TELEGRAM_BOT_TOKEN, "***TG_TOKEN***")
+    if DEEPSEEK_API_KEY:
+        s = s.replace(DEEPSEEK_API_KEY, "***DEEPSEEK_KEY***")
+    if OPENAI_API_KEY:
+        s = s.replace(OPENAI_API_KEY, "***OPENAI_KEY***")
+    if GEMINI_API_KEY:
+        s = s.replace(GEMINI_API_KEY, "***GEMINI_KEY***")
+    if GROK_API_KEY:
+        s = s.replace(GROK_API_KEY, "***GROK_KEY***")
+    return s
+
+# -----------------------------
+# AI clients
+# -----------------------------
+def ai_chat(messages: List[Dict[str, str]]) -> str:
+    engine = (os.getenv("AI_ENGINE") or AI_ENGINE).strip().lower()
+
+    if engine in ("deepseek", "deep-seek", "ds"):
+        return call_deepseek(messages)
+
+    if engine in ("openai", "gpt"):
+        return call_openai(messages)
+
+    if engine in ("gemini", "google"):
+        return call_gemini(messages)
+
+    if engine in ("grok", "xai"):
+        return call_grok(messages)
+
+    raise RuntimeError(f"Unknown AI_ENGINE: {engine}")
+
 def call_deepseek(messages: List[Dict[str, str]]) -> str:
     if not DEEPSEEK_API_KEY:
-        return "❌ DEEPSEEK_API_KEY не задан."
+        raise RuntimeError("DEEPSEEK_API_KEY not set")
+
+    # 1) Prefer OpenAI SDK if available (often helps with gateways/proxies)
+    if OPENAI_SDK_AVAILABLE:
+        try:
+            client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
+            resp = client.chat.completions.create(
+                model=DEEPSEEK_MODEL,
+                messages=messages,
+                temperature=0.2,
+                timeout=AI_TIMEOUT,
+            )
+            text = (resp.choices[0].message.content or "").strip()
+            return text
+        except Exception as e:
+            logger.warning("DeepSeek via OpenAI SDK failed, fallback to requests. err=%s", str(e)[:200])
+
+    # 2) Fallback: requests with browser-like headers
     payload = {
         "model": DEEPSEEK_MODEL,
         "messages": messages,
         "temperature": 0.2,
         "stream": False,
     }
-    headers = {"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"}
+    headers = {
+        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0 (compatible; telegramreviewsbot/1.0; Railway)",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+        "Connection": "keep-alive",
+    }
+
     resp = requests.post(DEEPSEEK_URL, json=payload, headers=headers, timeout=AI_TIMEOUT)
-    logger.info("DeepSeek status=%s body=%s", resp.status_code, _redact(resp.text[:900]))
+
+    body_preview = _redact(resp.text[:900])
+    logger.info("DeepSeek status=%s body=%s", resp.status_code, body_preview)
+
+    # Cloudflare / anti-bot HTML
+    if "<html" in resp.text.lower() or "just a moment" in resp.text.lower():
+        raise RuntimeError(f"DeepSeek gateway returned HTML (likely Cloudflare). status={resp.status_code}")
+
     resp.raise_for_status()
     data = resp.json()
-    choices = data.get("choices", [])
+
+    choices = data.get("choices") or []
     if not choices:
         return ""
-    msg = choices[0].get("message", {}) or {}
+    msg = choices[0].get("message") or {}
     return (msg.get("content") or "").strip()
 
 def call_openai(messages: List[Dict[str, str]]) -> str:
     if not OPENAI_API_KEY:
-        return "❌ OPENAI_API_KEY не задан."
-    payload = {
-        "model": OPENAI_MODEL,
-        "messages": messages,
-        "temperature": 0.2,
-    }
+        raise RuntimeError("OPENAI_API_KEY not set")
+
+    if OPENAI_SDK_AVAILABLE:
+        client = OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_BASE_URL)
+        resp = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=messages,
+            temperature=0.2,
+            timeout=AI_TIMEOUT,
+        )
+        return (resp.choices[0].message.content or "").strip()
+
+    # fallback requests
+    url = f"{OPENAI_BASE_URL}/chat/completions"
+    payload = {"model": OPENAI_MODEL, "messages": messages, "temperature": 0.2}
     headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
-    resp = requests.post(OPENAI_URL, json=payload, headers=headers, timeout=AI_TIMEOUT)
-    logger.info("OpenAI status=%s body=%s", resp.status_code, _redact(resp.text[:900]))
+    resp = requests.post(url, json=payload, headers=headers, timeout=AI_TIMEOUT)
+    logger.info("OpenAI status=%s body=%s", resp.status_code, _redact(resp.text[:700]))
     resp.raise_for_status()
     data = resp.json()
-    choices = data.get("choices", [])
-    if not choices:
-        return ""
-    return ((choices[0].get("message", {}) or {}).get("content") or "").strip()
+    return (data["choices"][0]["message"]["content"] or "").strip()
 
 def call_gemini(messages: List[Dict[str, str]]) -> str:
-    # Gemini expects a single user prompt; we concatenate system+user
     if not GEMINI_API_KEY:
-        return "❌ GEMINI_API_KEY не задан."
-    combined = []
-    for m in messages:
-        role = m.get("role")
-        content = m.get("content", "")
-        if role == "system":
-            combined.append("ИНСТРУКЦИИ:\n" + content)
-        elif role == "user":
-            combined.append("ВХОД:\n" + content)
-        else:
-            combined.append(content)
-    prompt = "\n\n".join(combined).strip()
+        raise RuntimeError("GEMINI_API_KEY not set")
 
+    # Convert messages to Gemini format (simple)
+    joined = "\n".join([f"{m.get('role','user')}: {m.get('content','')}" for m in messages])
     payload = {
-        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.2, "maxOutputTokens": 900},
+        "contents": [{"role": "user", "parts": [{"text": joined}]}]
     }
-    resp = requests.post(
-        GEMINI_URL,
-        params={"key": GEMINI_API_KEY},
-        json=payload,
-        timeout=AI_TIMEOUT,
-    )
-    logger.info("Gemini status=%s body=%s", resp.status_code, _redact(resp.text[:900]))
+    headers = {"Content-Type": "application/json", "X-goog-api-key": GEMINI_API_KEY}
+    resp = requests.post(GEMINI_URL, json=payload, headers=headers, timeout=AI_TIMEOUT)
+    logger.info("Gemini status=%s body=%s", resp.status_code, _redact(resp.text[:700]))
     resp.raise_for_status()
     data = resp.json()
-    candidates = data.get("candidates", [])
+
+    candidates = data.get("candidates") or []
     if not candidates:
         return ""
-    parts = (candidates[0].get("content", {}) or {}).get("parts", []) or []
-    return ((parts[0].get("text") if parts else "") or "").strip()
+    parts = (candidates[0].get("content") or {}).get("parts") or []
+    if not parts:
+        return ""
+    return (parts[0].get("text") or "").strip()
 
 def call_grok(messages: List[Dict[str, str]]) -> str:
-    if not GROK_API_KEY:
-        return "❌ GROK_API_KEY (или XAI_API_KEY) не задан."
-    payload = {
-        "model": GROK_MODEL,
-        "messages": messages,
-        "temperature": 0.2,
-    }
-    headers = {"Authorization": f"Bearer {GROK_API_KEY}", "Content-Type": "application/json"}
-    resp = requests.post(GROK_URL, json=payload, headers=headers, timeout=AI_TIMEOUT)
-    logger.info("Grok status=%s body=%s", resp.status_code, _redact(resp.text[:900]))
-    resp.raise_for_status()
-    data = resp.json()
-    choices = data.get("choices", [])
-    if not choices:
-        return ""
-    return ((choices[0].get("message", {}) or {}).get("content") or "").strip()
+    # Placeholder: implement when you have xAI endpoint details
+    raise RuntimeError("GROK engine not configured yet (set GROK_BASE_URL/GROK_API_KEY)")
 
-def ai_chat(messages: List[Dict[str, str]]) -> str:
-    engine = (AI_ENGINE or "deepseek").lower()
-    if engine in ("deepseek", "deep_seek", "ds"):
-        return call_deepseek(messages)
-    if engine in ("openai", "gpt", "chatgpt"):
-        return call_openai(messages)
-    if engine == "gemini":
-        return call_gemini(messages)
-    if engine in ("grok", "xai"):
-        return call_grok(messages)
-    return ""
-
-# -------------------------
-# JSON extraction + minimal validation
-# -------------------------
-_JSON_OBJ_RE = re.compile(r"\{.*\}", re.DOTALL)
-
-def extract_json_object(text: str) -> Optional[str]:
+# -----------------------------
+# JSON extraction from LLM response
+# -----------------------------
+def extract_first_json(text: str) -> Tuple[Optional[dict], Optional[str]]:
+    """
+    Returns (json_obj, error). Tries to parse JSON even if wrapped in text/code fences.
+    """
     if not text:
-        return None
-    t = text.strip()
-    # Fast path
-    if t.startswith("{") and t.endswith("}"):
-        return t
-    # Try greedy match { ... }
-    m = _JSON_OBJ_RE.search(t)
-    if m:
-        return m.group(0).strip()
-    return None
+        return None, "empty_ai_response"
 
-def ensure_2gis_complaint_limit(obj: Dict[str, Any]) -> Dict[str, Any]:
+    # remove code fences
+    cleaned = text.strip()
+    cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s*```$", "", cleaned)
+
+    # try direct
     try:
-        platform = (((obj.get("platform_detected") or {}).get("value")) or "unknown").lower()
-        complaint = obj.get("complaint") or {}
-        text = (complaint.get("text") or "")
-        if platform == "2gis" and text:
-            if len(text) > 450:
-                complaint["text"] = text[:450].rstrip()
-            complaint["char_count"] = len(complaint.get("text") or "")
-            obj["complaint"] = complaint
+        obj = json.loads(cleaned)
+        if isinstance(obj, dict):
+            return obj, None
+        return None, "json_is_not_object"
     except Exception:
         pass
-    return obj
 
-def minimal_shape_fix(obj: Dict[str, Any]) -> Dict[str, Any]:
-    # Ensure keys exist with sane defaults (to keep downstream stable)
-    def dflt(k, v):
-        if k not in obj or obj[k] is None:
-            obj[k] = v
+    # try find first {...} block
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        candidate = cleaned[start:end+1]
+        try:
+            obj = json.loads(candidate)
+            if isinstance(obj, dict):
+                return obj, None
+            return None, "json_is_not_object"
+        except Exception as e:
+            return None, f"json_parse_failed: {str(e)[:120]}"
 
-    dflt("platform_detected", {"value": "unknown", "confidence": 0.0, "signals": []})
-    dflt("review_summary", "")
-    dflt("sentiment", {"label": "neutral", "score": 0})
-    dflt("emotions", [])
-    dflt("aspects", [])
-    dflt("facts_vs_opinions", {"facts": [], "opinions": []})
-    dflt("pain_points", [])
-    dflt("root_cause_hypotheses", [])
-    dflt("business_process_flags", [])
-    dflt("risks", [])
-    dflt("recommendations", [])
-    dflt("clarifying_questions", [])
-    dflt("policy_check", {"has_possible_violations": False, "possible_violations": [], "notes": ""})
-    dflt("public_reply", {"tone": "", "text": ""})
-    dflt("complaint", {"needed": False, "reasons": [], "text": "", "char_count": 0})
-    return obj
+    return None, "no_json_object_found"
 
-# -------------------------
-# Build CX request
-# -------------------------
-def build_cx_input(
-    review_text: str,
-    platform: str = "unknown",
-    rating: Optional[int] = None,
-    review_date: Optional[str] = None,
-    meta: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    return {
-        "platform": platform or "unknown",
-        "rating": rating,
-        "review_text": review_text,
-        "review_date": review_date,
-        "business_context": BUSINESS_CONTEXT,
-        "branch/city": BRANCH_CITY,
-        "meta": meta or {},
-    }
-
-def cx_analyze(input_obj: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], str]:
+# -----------------------------
+# CX analyze (build prompt -> call ai -> parse json)
+# -----------------------------
+def cx_analyze(input_obj: dict) -> Tuple[Optional[dict], str]:
     """
-    Returns: (parsed_json_or_none, raw_text)
+    Returns (parsed_json_or_none, raw_text)
     """
+    system_prompt = get_cx_prompt()
+
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT_CX},
+        {"role": "system", "content": system_prompt},
         {"role": "user", "content": json.dumps(input_obj, ensure_ascii=False)},
     ]
-    raw = ""
-    try:
-        raw = ai_chat(messages)
-    except Exception as e:
-        logger.exception("AI transport exception: %s", e)
-        return None, raw
 
-    raw = (raw or "").strip()
-    json_text = extract_json_object(raw)
-    if not json_text:
-        return None, raw
+    raw = ai_chat(messages)
+    parsed, err = extract_first_json(raw)
+    if parsed is None:
+        raise RuntimeError(f"AI returned invalid JSON. err={err}")
+    return parsed, raw
 
-    try:
-        obj = json.loads(json_text)
-        if not isinstance(obj, dict):
-            return None, raw
-        obj = minimal_shape_fix(obj)
-        obj = ensure_2gis_complaint_limit(obj)
-        return obj, raw
-    except Exception as e:
-        logger.warning("JSON parse failed: %s", e)
-        return None, raw
-
-# -------------------------
-# Telegram formatting + inline keyboard
-# -------------------------
-def analysis_keyboard(analysis_id: int) -> Dict[str, Any]:
+# -----------------------------
+# Inline keyboard
+# -----------------------------
+def analysis_keyboard(analysis_id: int) -> dict:
     return {
         "inline_keyboard": [
             [
@@ -779,629 +834,489 @@ def analysis_keyboard(analysis_id: int) -> Dict[str, Any]:
         ]
     }
 
-def safe_get(d: Dict[str, Any], path: List[str], default=None):
-    cur: Any = d
-    for p in path:
-        if not isinstance(cur, dict) or p not in cur:
-            return default
-        cur = cur[p]
-    return cur
+# -----------------------------
+# Commands
+# -----------------------------
+HELP_TEXT = (
+    "/start — приветствие\n"
+    "/help — помощь\n"
+    "/myid — user_id/chat_id\n"
+    "/engine — текущий AI_ENGINE\n"
+    "\n"
+    "Админ-команды:\n"
+    "/addreview source=yandex|2gis rating=1..5 <текст>\n"
+    "/listreviews n=10 [source=yandex|2gis]\n"
+    "/review <id>\n"
+    "/deletereview <id>\n"
+    "/analyzereview <id>\n"
+    "/exports csv [n=100]\n"
+    "/weeklyreport days=7\n"
+    "\n"
+    "Анализ:\n"
+    "/analyze <текст>\n"
+)
 
-def format_analysis_summary(obj: Dict[str, Any], analysis_id: int) -> str:
-    platform = safe_get(obj, ["platform_detected", "value"], "unknown")
-    pconf = safe_get(obj, ["platform_detected", "confidence"], 0.0)
-    sentiment = safe_get(obj, ["sentiment", "label"], "neutral")
-    sscore = safe_get(obj, ["sentiment", "score"], 0)
+def parse_kv_args(text: str) -> Tuple[Dict[str, str], str]:
+    """
+    Parses leading key=value tokens.
+    Returns (kv, rest_text)
+    """
+    parts = text.strip().split()
+    kv: Dict[str, str] = {}
+    rest_start = 0
+    for i, p in enumerate(parts):
+        if "=" in p and not p.startswith("http"):
+            k, v = p.split("=", 1)
+            if k and v:
+                kv[k.strip().lower()] = v.strip()
+                rest_start = i + 1
+                continue
+        break
+    rest = " ".join(parts[rest_start:])
+    return kv, rest
 
-    summary = (obj.get("review_summary") or "").strip()
-    if len(summary) > 500:
-        summary = summary[:500] + "…"
+# -----------------------------
+# Background analysis (to keep webhook fast)
+# -----------------------------
+def background_analyze(chat_id: int, user_id: int, review_text: str, platform_hint: str = "unknown", rating: Optional[int] = None, review_id: Optional[int] = None) -> None:
+    engine = (os.getenv("AI_ENGINE") or AI_ENGINE).strip().lower()
+    model_name = ""
+    if engine == "deepseek":
+        model_name = DEEPSEEK_MODEL
+    elif engine == "openai":
+        model_name = OPENAI_MODEL
+    elif engine == "gemini":
+        model_name = GEMINI_MODEL
+    elif engine == "grok":
+        model_name = GROK_MODEL
 
-    # Top aspects
-    aspects = obj.get("aspects") or []
-    top_aspects = []
-    if isinstance(aspects, list):
-        try:
-            aspects_sorted = sorted(
-                [a for a in aspects if isinstance(a, dict)],
-                key=lambda x: int(x.get("weight") or 0),
-                reverse=True,
-            )
-            for a in aspects_sorted[:3]:
-                name = (a.get("name") or "").strip()
-                w = a.get("weight")
-                if name:
-                    top_aspects.append(f"{name}({w})")
-        except Exception:
-            pass
+    input_obj = {
+        "platform": platform_hint,
+        "rating": rating,
+        "review_text": review_text,
+        "review_date": None,
+        "business_context": None,
+        "branch/city": None,
+        "meta": {},
+    }
 
-    complaint_needed = bool(safe_get(obj, ["complaint", "needed"], False))
-    policy_bad = bool(safe_get(obj, ["policy_check", "has_possible_violations"], False))
-
-    flags = []
-    if complaint_needed:
-        flags.append("жалоба: да")
-    if policy_bad:
-        flags.append("возможные нарушения: да")
-
-    head = [
-        f"✅ Анализ готов. ID: {analysis_id}",
-        f"Площадка: {platform} (conf={pconf:.2f})",
-        f"Тональность: {sentiment} ({sscore})",
-    ]
-    if top_aspects:
-        head.append("Топ-аспекты: " + ", ".join(top_aspects))
-    if flags:
-        head.append("Флаги: " + ", ".join(flags))
-
-    return "\n".join(head) + "\n\n" + summary
-
-def format_public_reply(obj: Dict[str, Any]) -> str:
-    txt = (safe_get(obj, ["public_reply", "text"], "") or "").strip()
-    if not txt:
-        return "Не удалось сформировать публичный ответ (пусто)."
-    return "Публичный ответ:\n\n" + txt
-
-def format_complaint(obj: Dict[str, Any]) -> str:
-    needed = bool(safe_get(obj, ["complaint", "needed"], False))
-    text = (safe_get(obj, ["complaint", "text"], "") or "").strip()
-    char_count = int(safe_get(obj, ["complaint", "char_count"], 0) or 0)
-    reasons = safe_get(obj, ["complaint", "reasons"], []) or []
-    if not needed:
-        return "Жалоба не требуется по текущей оценке."
-    out = ["Жалоба (черновик):"]
-    if reasons and isinstance(reasons, list):
-        out.append("Причины: " + "; ".join([str(x) for x in reasons[:3]]))
-    if text:
-        out.append("")
-        out.append(text)
-    if char_count:
-        out.append("")
-        out.append(f"Длина: {char_count} символов")
-    return "\n".join(out).strip()
-
-def format_json_for_chat(obj: Dict[str, Any]) -> str:
-    raw = json.dumps(obj, ensure_ascii=False, separators=(",", ":"), indent=2)
-    if len(raw) > 3500:
-        raw = raw[:3500] + "\n... (обрезано)\n"
-    return raw
-
-# -------------------------
-# Weekly report
-# -------------------------
-def build_weekly_report(days: int = 7) -> str:
-    since = datetime.utcnow() - timedelta(days=days)
-    rows = db_list_analyses_since(since)
-
-    # Normalize rows' result_json for postgres (already dict) / sqlite (dict after parsing)
-    results: List[Dict[str, Any]] = []
-    for r in rows:
-        rj = r.get("result_json")
-        if isinstance(rj, dict):
-            results.append(rj)
-
-    total = len(results)
-    if total == 0:
-        return f"Еженедельный отчёт (за {days} дн.): анализов нет."
-
-    # Sentiment distribution
-    sent_count: Dict[str, int] = {"positive": 0, "neutral": 0, "mixed": 0, "negative": 0}
-    complaint_needed = 0
-    policy_flags = 0
-
-    aspect_sum: Dict[str, int] = {}
-    pain_sum: Dict[str, int] = {}
-    viol_sum: Dict[str, int] = {}
-
-    for obj in results:
-        label = (safe_get(obj, ["sentiment", "label"], "neutral") or "neutral").lower()
-        if label not in sent_count:
-            sent_count[label] = 0
-        sent_count[label] += 1
-
-        if bool(safe_get(obj, ["complaint", "needed"], False)):
-            complaint_needed += 1
-        if bool(safe_get(obj, ["policy_check", "has_possible_violations"], False)):
-            policy_flags += 1
-
-        aspects = obj.get("aspects") or []
-        if isinstance(aspects, list):
-            for a in aspects:
-                if not isinstance(a, dict):
-                    continue
-                name = (a.get("name") or "").strip().lower()
-                if not name:
-                    continue
-                w = int(a.get("weight") or 0)
-                aspect_sum[name] = aspect_sum.get(name, 0) + w
-
-        pains = obj.get("pain_points") or []
-        if isinstance(pains, list):
-            for p in pains:
-                if not isinstance(p, dict):
-                    continue
-                item = (p.get("item") or "").strip().lower()
-                if not item:
-                    continue
-                sev = (p.get("severity") or "low").lower()
-                # weighted severity
-                score = 1 if sev == "low" else 2 if sev == "medium" else 3
-                pain_sum[item] = pain_sum.get(item, 0) + score
-
-        viols = safe_get(obj, ["policy_check", "possible_violations"], []) or []
-        if isinstance(viols, list):
-            for v in viols:
-                if not isinstance(v, dict):
-                    continue
-                cat = (v.get("category") or "").strip().lower()
-                if not cat:
-                    continue
-                conf = float(v.get("confidence") or 0.0)
-                if conf >= 0.6:
-                    viol_sum[cat] = viol_sum.get(cat, 0) + 1
-
-    def top_items(d: Dict[str, int], n: int = 5) -> List[str]:
-        items = sorted(d.items(), key=lambda x: x[1], reverse=True)[:n]
-        return [f"{k} ({v})" for k, v in items]
-
-    lines = []
-    lines.append(f"Еженедельный отчёт (за {days} дн.)")
-    lines.append(f"Всего анализов: {total}")
-    lines.append("")
-    lines.append("Тональность:")
-    lines.append(f"  позитив: {sent_count.get('positive', 0)}")
-    lines.append(f"  нейтр:   {sent_count.get('neutral', 0)}")
-    lines.append(f"  микс:    {sent_count.get('mixed', 0)}")
-    lines.append(f"  негатив: {sent_count.get('negative', 0)}")
-    lines.append("")
-    lines.append(f"Жалоба нужна (complaint.needed=true): {complaint_needed}")
-    lines.append(f"Есть возможные нарушения правил: {policy_flags}")
-    lines.append("")
-    ta = top_items(aspect_sum, 6)
-    if ta:
-        lines.append("Топ-аспекты (сумма весов):")
-        for s in ta:
-            lines.append("  - " + s)
-        lines.append("")
-    tp = top_items(pain_sum, 6)
-    if tp:
-        lines.append("Топ pain-points (вес по severity):")
-        for s in tp:
-            lines.append("  - " + s)
-        lines.append("")
-    tv = top_items(viol_sum, 6)
-    if tv:
-        lines.append("Топ нарушений (confidence≥0.6):")
-        for s in tv:
-            lines.append("  - " + s)
-
-    msg = "\n".join(lines).strip()
-    if len(msg) > 3800:
-        msg = msg[:3800] + "\n... (обрезано)\n"
-    return msg
-
-def send_weekly_report(days: int = 7) -> None:
-    text = build_weekly_report(days=days)
-    # Send to all admins in allowlist mode; if allowlist empty, do nothing to avoid spamming random users
-    if not ADMIN_CHAT_IDS:
-        logger.warning("Weekly report not sent: ADMIN_CHAT_IDS empty.")
-        return
-    for cid in ADMIN_CHAT_IDS:
-        tg_send_message(cid, text)
-
-# -------------------------
-# Background workers
-# -------------------------
-def background_analyze(chat_id: int, reply_to: int,
-                      input_obj: Dict[str, Any], review_id: Optional[int]) -> None:
     try:
         parsed, raw = cx_analyze(input_obj)
-        if not parsed:
-            # store an error result for traceability
-            err_obj = minimal_shape_fix({
-                "platform_detected": {"value": "unknown", "confidence": 0.0, "signals": []},
-                "review_summary": "",
-                "sentiment": {"label": "neutral", "score": 0},
-                "policy_check": {"has_possible_violations": False, "possible_violations": [], "notes": "analysis_failed"},
-                "public_reply": {"tone": "", "text": ""},
-                "complaint": {"needed": False, "reasons": [], "text": "", "char_count": 0},
-                "_error": "AI returned invalid JSON",
-                "_raw": (raw or "")[:2000],
-            })
-            analysis_id = db_insert_analysis(review_id, AI_ENGINE, input_obj, err_obj)
-            tg_send_message(
-                chat_id,
-                f"❌ Не удалось получить валидный JSON от ИИ. Анализ сохранён с ошибкой. ID: {analysis_id}\n"
-                f"Попробуй ещё раз или сменить AI_ENGINE.",
-                reply_to=reply_to,
-                reply_markup=analysis_keyboard(analysis_id),
-            )
-            return
 
-        analysis_id = db_insert_analysis(review_id, AI_ENGINE, input_obj, parsed)
+        analysis_id = db_insert_analysis(
+            review_id=review_id,
+            platform=parsed.get("platform_detected", {}).get("value") if isinstance(parsed.get("platform_detected"), dict) else platform_hint,
+            rating=rating,
+            review_text=review_text,
+            result_json=parsed,
+            error=None,
+            model=model_name,
+            engine=engine,
+            created_by=user_id,
+        ) or 0
 
-        msg = format_analysis_summary(parsed, analysis_id)
-        tg_send_message(chat_id, msg, reply_to=reply_to, reply_markup=analysis_keyboard(analysis_id))
+        send_message(chat_id, f"✅ Анализ готов. ID: {analysis_id}", reply_markup=analysis_keyboard(analysis_id))
 
     except Exception as e:
-        logger.exception("background_analyze failed: %s", e)
-        tg_send_message(chat_id, "❌ Внутренняя ошибка анализа. Попробуй позже.", reply_to=reply_to)
+        err_text = str(e)
+        logger.error("AI exception: %s", err_text)
+        logger.exception("AI exception traceback")
 
-# -------------------------
-# Routes
-# -------------------------
+        # Store error + minimal result_json
+        fallback_json = {
+            "_error": "AI failed or returned invalid JSON (see logs)",
+            "engine": engine,
+        }
+        analysis_id = db_insert_analysis(
+            review_id=review_id,
+            platform=platform_hint,
+            rating=rating,
+            review_text=review_text,
+            result_json=fallback_json,
+            error=err_text[:800],
+            model=model_name,
+            engine=engine,
+            created_by=user_id,
+        ) or 0
+
+        # Human-readable message
+        if "Cloudflare" in err_text or "returned HTML" in err_text or "status=403" in err_text:
+            msg = "❌ AI недоступен: шлюз вернул HTML/403 (похоже Cloudflare/защита). Нужна диагностика /diag/ai и проверка заголовков/доступа."
+        else:
+            msg = "❌ Не удалось получить валидный JSON от ИИ. Анализ сохранён с ошибкой. ID: %d\nПопробуй ещё раз или переключи CX_PROMPT_MODE=lite." % analysis_id
+
+        send_message(chat_id, msg, reply_markup=analysis_keyboard(analysis_id))
+
+# -----------------------------
+# HTTP routes
+# -----------------------------
 @app.get("/")
 def health():
-    return {
+    set_webhook_once()
+    return jsonify({
         "ok": True,
         "status": "running",
         "webhook_path": WEBHOOK_PATH,
-        "ai_engine": AI_ENGINE,
-        "db": "postgres" if USE_POSTGRES else "sqlite",
+        "ai_engine": (os.getenv("AI_ENGINE") or AI_ENGINE).strip().lower(),
+        "prompt_mode": (os.getenv("CX_PROMPT_MODE") or CX_PROMPT_MODE).strip().lower(),
+        "admin_mode": ADMIN_MODE,
+        "db": "postgres" if DB_OK else "disabled",
         "deepseek_url": DEEPSEEK_URL,
-        "admin_mode": "allowlist" if ADMIN_CHAT_IDS else "open",
-        "has_cron_token": bool(CRON_TOKEN),
-    }, 200
+        "openai_sdk": OPENAI_SDK_AVAILABLE,
+    })
+
+@app.get("/diag/ai")
+def diag_ai():
+    # optional protection
+    if DIAG_TOKEN:
+        token = request.args.get("token", "").strip()
+        if token != DIAG_TOKEN:
+            return jsonify({"ok": False, "error": "forbidden"}), 403
+
+    engine = (os.getenv("AI_ENGINE") or AI_ENGINE).strip().lower()
+    prompt_mode = (os.getenv("CX_PROMPT_MODE") or CX_PROMPT_MODE).strip().lower()
+
+    messages = [
+        {"role": "system", "content": "Reply with exactly: OK"},
+        {"role": "user", "content": "ping"},
+    ]
+    try:
+        raw = ai_chat(messages)
+        return jsonify({
+            "ok": True,
+            "engine": engine,
+            "prompt_mode": prompt_mode,
+            "deepseek_url": DEEPSEEK_URL if engine == "deepseek" else None,
+            "raw_preview": raw[:300],
+        })
+    except Exception as e:
+        return jsonify({
+            "ok": False,
+            "engine": engine,
+            "prompt_mode": prompt_mode,
+            "deepseek_url": DEEPSEEK_URL if engine == "deepseek" else None,
+            "error": str(e)[:700],
+        }), 500
 
 @app.get("/cron/weekly")
 def cron_weekly():
-    token = (request.args.get("token") or "").strip()
-    days_s = (request.args.get("days") or "7").strip()
-    if not CRON_TOKEN or token != CRON_TOKEN:
-        return {"ok": False, "error": "unauthorized"}, 401
-    try:
-        days = int(days_s)
-        days = max(1, min(30, days))
-    except Exception:
-        days = 7
-    send_weekly_report(days=days)
-    return {"ok": True, "sent_to": ADMIN_CHAT_IDS, "days": days}, 200
+    if not CRON_TOKEN:
+        return jsonify({"ok": False, "error": "CRON_TOKEN not set"}), 400
+
+    token = request.args.get("token", "").strip()
+    if token != CRON_TOKEN:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+
+    days = int(request.args.get("days", "7"))
+    summary = db_weekly_summary(days=days)
+    if not summary.get("ok"):
+        return jsonify(summary), 500
+
+    # send to all admins
+    sent_to = []
+    text = format_weekly_report(summary)
+    for cid in ADMIN_CHAT_IDS:
+        send_message(cid, text)
+        sent_to.append(cid)
+
+    return jsonify({"ok": True, "days": days, "sent_to": sent_to})
 
 @app.post(WEBHOOK_PATH)
 def telegram_webhook():
     update = request.get_json(silent=True) or {}
-    logger.info("Update: %s", _redact(json.dumps(update)[:1400]))
+    logger.info("Update: %s", _redact(json.dumps(update, ensure_ascii=False)[:1200]))
 
-    # Handle inline button clicks
+    # callback
     if "callback_query" in update:
-        cq = update.get("callback_query") or {}
-        cq_id = cq.get("id")
-        data = (cq.get("data") or "").strip()
+        cq = update["callback_query"]
+        cq_id = cq.get("id", "")
         msg = cq.get("message") or {}
-        chat_id = (msg.get("chat") or {}).get("id")
+        chat = msg.get("chat") or {}
+        chat_id = chat.get("id")
+        data = (cq.get("data") or "").strip()
 
-        if cq_id:
-            tg_answer_callback_query(cq_id)
-
-        if not chat_id or not data:
-            return "ok", 200
-
-        # Expected: action:analysis_id
         try:
-            action, sid = data.split(":", 1)
-            analysis_id = int(sid)
+            handle_callback(chat_id, cq_id, data)
         except Exception:
-            tg_send_message(int(chat_id), "Некорректная кнопка/данные.", reply_to=None)
-            return "ok", 200
+            logger.exception("handle_callback failed")
+            if cq_id:
+                answer_callback_query(cq_id, "Ошибка", show_alert=True)
+        return "ok"
 
-        row = db_get_analysis(analysis_id)
-        if not row:
-            tg_send_message(int(chat_id), f"Анализ #{analysis_id} не найден.", reply_to=None)
-            return "ok", 200
-
-        result_obj = row.get("result_json")
-        # Postgres returns dict for JSONB; SQLite parsed earlier
-        if not isinstance(result_obj, dict):
-            try:
-                result_obj = json.loads(result_obj or "{}")
-            except Exception:
-                result_obj = {}
-
-        if action == "reply":
-            tg_send_message(int(chat_id), format_public_reply(result_obj))
-        elif action == "complaint":
-            tg_send_message(int(chat_id), format_complaint(result_obj))
-        elif action == "both":
-            tg_send_message(int(chat_id), format_public_reply(result_obj))
-            tg_send_message(int(chat_id), format_complaint(result_obj))
-        elif action == "json":
-            tg_send_message(int(chat_id), format_json_for_chat(result_obj))
-        else:
-            tg_send_message(int(chat_id), "Неизвестное действие.", reply_to=None)
-
-        return "ok", 200
-
-    # Handle normal messages
-    message = update.get("message") or update.get("edited_message")
-    if not message:
-        return "ok", 200
-
-    chat_id = message.get("chat", {}).get("id")
-    user_id = message.get("from", {}).get("id")
-    msg_id = message.get("message_id")
+    message = update.get("message") or {}
+    chat = message.get("chat") or {}
+    chat_id = chat.get("id")
+    user = message.get("from") or {}
+    user_id = user.get("id")
     text = (message.get("text") or "").strip()
 
-    if not chat_id:
-        return "ok", 200
+    logger.info("Parsed: chat_id=%s user_id=%s text=%r", chat_id, user_id, text[:220])
 
-    if not text:
-        tg_send_message(int(chat_id), "Я принимаю только текст 🙂", reply_to=msg_id)
-        return "ok", 200
+    if not chat_id or not user_id:
+        return "ok"
 
-    logger.info("Parsed: chat_id=%s user_id=%s text=%r", chat_id, user_id, text)
-
-    # Base commands
+    # commands
     if text.startswith("/start"):
-        tg_send_message(
-            int(chat_id),
-            "Привет! Я бот для хранения и анализа отзывов.\n\n"
-            "Команды:\n"
-            "/help — помощь\n"
-            "/myid — ваш user_id/chat_id\n"
-            "/engine — текущий AI_ENGINE\n"
-            "/analyze <текст> — анализ текста (с кнопками)\n"
-            "/analyzereview <id> — анализ сохранённого отзыва\n"
-            "/weeklyreport [days=7] — отчёт (админы)\n\n"
-            "Отзывы (админы):\n"
-            "/addreview source=yandex|2gis rating=1..5 url=https://... date=YYYY-MM-DD Текст...\n"
-            "/listreviews n=10 [source=yandex|2gis]\n"
-            "/review <id>\n"
-            "/deletereview <id>\n",
-            reply_to=msg_id,
-        )
-        return "ok", 200
+        send_message(chat_id, "Привет! Я бот для анализа отзывов.\nНапиши /help.")
+        return "ok"
 
     if text.startswith("/help"):
-        tg_send_message(
-            int(chat_id),
-            "Анализ:\n"
-            "/analyze <текст>\n"
-            "/analyzereview <id>\n\n"
-            "После анализа будут кнопки: Ответ / Жалоба / Оба / JSON.\n\n"
-            "Отзывы (админы):\n"
-            "/addreview source=yandex rating=5 Отличный сервис!\n"
-            "/listreviews n=10\n"
-            "/review 12\n"
-            "/deletereview 12\n\n"
-            "Отчёт (админы):\n"
-            "/weeklyreport days=7\n\n"
-            f"AI_ENGINE сейчас: {AI_ENGINE}",
-            reply_to=msg_id,
-        )
-        return "ok", 200
+        send_message(chat_id, HELP_TEXT)
+        return "ok"
 
     if text.startswith("/myid"):
-        tg_send_message(int(chat_id), f"user_id: {user_id}\nchat_id: {chat_id}", reply_to=msg_id)
-        return "ok", 200
+        send_message(chat_id, f"Ваш ID: {chat_id}")
+        return "ok"
 
     if text.startswith("/engine"):
-        tg_send_message(
-            int(chat_id),
-            f"Текущий AI_ENGINE: {AI_ENGINE}\nDeepSeek endpoint: {DEEPSEEK_URL}",
-            reply_to=msg_id,
-        )
-        return "ok", 200
+        send_message(chat_id, f"Текущий AI_ENGINE: {(os.getenv('AI_ENGINE') or AI_ENGINE).strip().lower()}")
+        return "ok"
 
-    # Admin gate
-    admin_cmds = ("/addreview", "/listreviews", "/review", "/deletereview", "/weeklyreport")
-    if any(text.startswith(cmd) for cmd in admin_cmds):
-        if not is_admin(int(chat_id)):
-            tg_send_message(int(chat_id), "⛔ Команда доступна только админам.", reply_to=msg_id)
-            return "ok", 200
-
-    # Review commands (admin)
+    # admin commands
     if text.startswith("/addreview"):
-        rest = text.replace("/addreview", "", 1).strip()
-        reply = message.get("reply_to_message") or {}
-        reply_text = (reply.get("text") or "").strip()
+        if not _is_admin(chat_id):
+            send_message(chat_id, "⛔ Команда доступна только админам.")
+            return "ok"
 
-        kv, remaining = parse_kv_args(rest)
-        review_text = remaining or reply_text
+        args = text[len("/addreview"):].strip()
+        kv, rest = parse_kv_args(args)
+
+        source = (kv.get("source") or "manual").strip().lower()
+        rating = kv.get("rating")
+        rating_int = int(rating) if rating and rating.isdigit() else None
+        review_text = rest.strip()
+
         if not review_text:
-            tg_send_message(
-                int(chat_id),
-                "Нужно указать текст.\nПример: /addreview source=yandex rating=5 Отличный сервис!",
-                reply_to=msg_id,
-            )
-            return "ok", 200
+            send_message(chat_id, "Формат: /addreview source=yandex rating=5 <текст>")
+            return "ok"
 
-        source = (kv.get("source") or "manual").lower()
-        author = kv.get("author")
-        url = kv.get("url")
-        published_at = parse_date(kv.get("date") or kv.get("published_at") or "")
+        rid = db_insert_review(source=source, rating=rating_int, review_text=review_text, meta={"added_by": user_id})
+        if not rid:
+            send_message(chat_id, "❌ Не удалось сохранить отзыв (DB?).")
+            return "ok"
 
-        rating: Optional[int] = None
-        if "rating" in kv:
-            try:
-                r = int(kv["rating"])
-                if 1 <= r <= 5:
-                    rating = r
-            except Exception:
-                rating = None
-
-        new_id = db_insert_review(
-            source=source,
-            text=review_text,
-            rating=rating,
-            author=author,
-            url=url,
-            published_at=published_at,
-            added_by_user_id=int(user_id) if user_id else None,
-            added_by_chat_id=int(chat_id) if chat_id else None,
-        )
-        tg_send_message(int(chat_id), f"✅ Отзыв сохранён: #{new_id}\nsource={source}", reply_to=msg_id)
-        return "ok", 200
+        send_message(chat_id, f"✅ Отзыв сохранён: #{rid}\nЧтобы проанализировать: /analyzereview {rid}")
+        return "ok"
 
     if text.startswith("/listreviews"):
-        rest = text.replace("/listreviews", "", 1).strip()
-        kv, _ = parse_kv_args(rest)
+        if not _is_admin(chat_id):
+            send_message(chat_id, "⛔ Команда доступна только админам.")
+            return "ok"
 
-        limit = 10
-        if "n" in kv:
-            try:
-                limit = max(1, min(50, int(kv["n"])))
-            except Exception:
-                limit = 10
+        args = text[len("/listreviews"):].strip()
+        kv, _ = parse_kv_args(args)
+        n = int(kv.get("n", "10"))
+        source = kv.get("source")
+        items = db_list_reviews(n=n, source=source)
 
-        source = (kv.get("source") or "").strip().lower() or None
-        rows = db_list_reviews(limit=limit, source=source)
-        if not rows:
-            tg_send_message(int(chat_id), "Пока нет отзывов в базе.", reply_to=msg_id)
-            return "ok", 200
+        if not items:
+            send_message(chat_id, "Пока нет отзывов.")
+            return "ok"
 
-        lines = [f"Последние отзывы (n={len(rows)})" + (f", source={source}" if source else "") + ":"]
-        for r in rows:
-            lines.append(review_preview(r))
-            lines.append("")
-        tg_send_message(int(chat_id), "\n".join(lines).strip(), reply_to=msg_id)
-        return "ok", 200
+        lines = []
+        for it in items:
+            lines.append(f"#{it['id']} [{it['source']}] ⭐{it['rating'] or '-'} — {it['preview']}")
+        send_message(chat_id, "\n\n".join(lines))
+        return "ok"
 
     if text.startswith("/review"):
-        parts = text.split()
-        if len(parts) < 2:
-            tg_send_message(int(chat_id), "Используй: /review <id>", reply_to=msg_id)
-            return "ok", 200
-        try:
-            rid = int(parts[1])
-        except Exception:
-            tg_send_message(int(chat_id), "id должен быть числом.", reply_to=msg_id)
-            return "ok", 200
+        if not _is_admin(chat_id):
+            send_message(chat_id, "⛔ Команда доступна только админам.")
+            return "ok"
 
+        parts = text.split()
+        if len(parts) < 2 or not parts[1].isdigit():
+            send_message(chat_id, "Формат: /review <id>")
+            return "ok"
+        rid = int(parts[1])
         r = db_get_review(rid)
         if not r:
-            tg_send_message(int(chat_id), f"Отзыв #{rid} не найден.", reply_to=msg_id)
-            return "ok", 200
-
-        full = [
-            f"Отзыв #{r.get('id')}",
-            f"source: {r.get('source')}",
-            f"rating: {r.get('rating')}" if r.get("rating") is not None else "rating: —",
-            f"author: {r.get('author') or '—'}",
-            f"url: {r.get('url') or '—'}",
-            f"published_at: {r.get('published_at') or '—'}",
-            "",
-            (r.get("text") or "").strip(),
-        ]
-        tg_send_message(int(chat_id), "\n".join(full), reply_to=msg_id)
-        return "ok", 200
+            send_message(chat_id, "❌ Отзыв не найден.")
+            return "ok"
+        send_message(chat_id, f"#{r['id']} [{r['source']}] ⭐{r['rating'] or '-'}\n\n{r['review_text']}")
+        return "ok"
 
     if text.startswith("/deletereview"):
+        if not _is_admin(chat_id):
+            send_message(chat_id, "⛔ Команда доступна только админам.")
+            return "ok"
+
         parts = text.split()
-        if len(parts) < 2:
-            tg_send_message(int(chat_id), "Используй: /deletereview <id>", reply_to=msg_id)
-            return "ok", 200
-        try:
-            rid = int(parts[1])
-        except Exception:
-            tg_send_message(int(chat_id), "id должен быть числом.", reply_to=msg_id)
-            return "ok", 200
-
+        if len(parts) < 2 or not parts[1].isdigit():
+            send_message(chat_id, "Формат: /deletereview <id>")
+            return "ok"
+        rid = int(parts[1])
         ok = db_delete_review(rid)
-        tg_send_message(int(chat_id), "✅ Удалено." if ok else "Не найдено.", reply_to=msg_id)
-        return "ok", 200
-
-    # Weekly report (admin)
-    if text.startswith("/weeklyreport"):
-        rest = text.replace("/weeklyreport", "", 1).strip()
-        kv, _ = parse_kv_args(rest)
-        days = 7
-        if "days" in kv:
-            try:
-                days = max(1, min(30, int(kv["days"])))
-            except Exception:
-                days = 7
-        tg_send_message(int(chat_id), build_weekly_report(days=days), reply_to=msg_id)
-        return "ok", 200
-
-    # Analysis commands (anyone)
-    if text.startswith("/analyze"):
-        analyze_text = text.replace("/analyze", "", 1).strip()
-        if not analyze_text:
-            tg_send_message(int(chat_id), "Используй: /analyze <текст>", reply_to=msg_id)
-            return "ok", 200
-
-        tg_send_message(int(chat_id), "Принял ✅ Готовлю анализ…", reply_to=msg_id)
-
-        input_obj = build_cx_input(
-            review_text=analyze_text,
-            platform="unknown",
-            rating=None,
-            review_date=None,
-            meta={"via": "command_analyze"},
-        )
-        threading.Thread(
-            target=background_analyze,
-            args=(int(chat_id), int(msg_id), input_obj, None),
-            daemon=True,
-        ).start()
-        return "ok", 200
+        send_message(chat_id, "✅ Удалено." if ok else "❌ Не удалось удалить.")
+        return "ok"
 
     if text.startswith("/analyzereview"):
-        parts = text.split()
-        if len(parts) < 2:
-            tg_send_message(int(chat_id), "Используй: /analyzereview <id>", reply_to=msg_id)
-            return "ok", 200
-        try:
-            rid = int(parts[1])
-        except Exception:
-            tg_send_message(int(chat_id), "id должен быть числом.", reply_to=msg_id)
-            return "ok", 200
+        if not _is_admin(chat_id):
+            send_message(chat_id, "⛔ Команда доступна только админам.")
+            return "ok"
 
+        parts = text.split()
+        if len(parts) < 2 or not parts[1].isdigit():
+            send_message(chat_id, "Формат: /analyzereview <id>")
+            return "ok"
+
+        rid = int(parts[1])
         r = db_get_review(rid)
         if not r:
-            tg_send_message(int(chat_id), f"Отзыв #{rid} не найден.", reply_to=msg_id)
-            return "ok", 200
+            send_message(chat_id, "❌ Отзыв не найден.")
+            return "ok"
 
-        # map source -> platform if possible
-        source = (r.get("source") or "unknown").lower()
-        platform = "unknown"
-        if "2gis" in source or "2гис" in source:
-            platform = "2gis"
-        elif "yandex" in source or "янд" in source:
-            platform = "yandex"
-
-        rating = r.get("rating")
-        try:
-            rating = int(rating) if rating is not None else None
-        except Exception:
-            rating = None
-
-        published_at = r.get("published_at")
-        review_date = None
-        if published_at:
-            review_date = str(published_at)
-
-        meta = {
-            "via": "saved_review",
-            "author": r.get("author"),
-            "url": r.get("url"),
-            "review_id": rid,
-            "source": source,
-        }
-
-        tg_send_message(int(chat_id), f"Принял ✅ Анализирую отзыв #{rid}…", reply_to=msg_id)
-
-        input_obj = build_cx_input(
-            review_text=(r.get("text") or "").strip(),
-            platform=platform,
-            rating=rating,
-            review_date=review_date,
-            meta=meta,
-        )
+        send_message(chat_id, "Принял ✅ Готовлю анализ...")
         threading.Thread(
             target=background_analyze,
-            args=(int(chat_id), int(msg_id), input_obj, rid),
+            args=(chat_id, user_id, r["review_text"], r.get("source") or "unknown", r.get("rating"), rid),
             daemon=True,
         ).start()
-        return "ok", 200
+        return "ok"
 
-    # default
-    tg_send_message(
-        int(chat_id),
-        "Команды:\n"
-        "/analyze <текст> — анализ (с кнопками)\n"
-        "/analyzereview <id> — анализ сохранённого отзыва\n"
-        "/help — помощь",
-        reply_to=msg_id,
-    )
-    return "ok", 200
+    if text.startswith("/weeklyreport"):
+        if not _is_admin(chat_id):
+            send_message(chat_id, "⛔ Команда доступна только админам.")
+            return "ok"
+
+        args = text[len("/weeklyreport"):].strip()
+        kv, _ = parse_kv_args(args)
+        days = int(kv.get("days", "7"))
+        summary = db_weekly_summary(days=days)
+        if not summary.get("ok"):
+            send_message(chat_id, "❌ Не удалось построить отчёт (DB?).")
+            return "ok"
+        send_message(chat_id, format_weekly_report(summary))
+        return "ok"
+
+    # /analyze - works for everyone
+    if text.startswith("/analyze"):
+        analyze_text = text[len("/analyze"):].strip()
+        if not analyze_text:
+            send_message(chat_id, "Формат: /analyze <текст отзыва>")
+            return "ok"
+
+        send_message(chat_id, "Принял ✅ Готовлю анализ...")
+        threading.Thread(
+            target=background_analyze,
+            args=(chat_id, user_id, analyze_text, "unknown", None, None),
+            daemon=True,
+        ).start()
+        return "ok"
+
+    # If plain text, you can decide to ignore or treat as analyze:
+    # send_message(chat_id, "Напиши /help. Для анализа: /analyze <текст>")
+
+    return "ok"
+
+# -----------------------------
+# Callback handler
+# -----------------------------
+def handle_callback(chat_id: Optional[int], callback_query_id: str, data: str) -> None:
+    if not chat_id:
+        answer_callback_query(callback_query_id, "Нет chat_id", show_alert=True)
+        return
+
+    # data = action:analysis_id
+    if ":" not in data:
+        answer_callback_query(callback_query_id, "Неверная кнопка", show_alert=True)
+        return
+
+    action, sid = data.split(":", 1)
+    if not sid.isdigit():
+        answer_callback_query(callback_query_id, "Неверный ID", show_alert=True)
+        return
+
+    analysis_id = int(sid)
+    a = db_get_analysis(analysis_id)
+    if not a:
+        answer_callback_query(callback_query_id, "Анализ не найден", show_alert=True)
+        return
+
+    obj = a.get("result_json") or {}
+    err = a.get("error")
+
+    if err:
+        answer_callback_query(callback_query_id, "Анализ с ошибкой — смотри сообщение", show_alert=False)
+
+    if action == "json":
+        answer_callback_query(callback_query_id, "Отправляю JSON")
+        send_message(chat_id, json.dumps(obj, ensure_ascii=False)[:3800])
+        return
+
+    public_reply = (obj.get("public_reply") or {}).get("text") if isinstance(obj.get("public_reply"), dict) else None
+    complaint_obj = obj.get("complaint") or {}
+    complaint_needed = bool(complaint_obj.get("needed"))
+    complaint_text = complaint_obj.get("text") if isinstance(complaint_obj, dict) else None
+    complaint_count = complaint_obj.get("char_count") if isinstance(complaint_obj, dict) else None
+
+    if action == "reply":
+        answer_callback_query(callback_query_id, "Готово")
+        if public_reply:
+            send_message(chat_id, f"✍️ Публичный ответ:\n\n{public_reply}")
+        else:
+            send_message(chat_id, "❌ В анализе нет public_reply.text")
+        return
+
+    if action == "complaint":
+        answer_callback_query(callback_query_id, "Готово")
+        if not complaint_needed:
+            send_message(chat_id, "⚠️ Жалоба не требуется по условиям (complaint.needed=false).")
+        else:
+            extra = f"\n\nДлина: {complaint_count}" if complaint_count is not None else ""
+            send_message(chat_id, f"⚠️ Жалоба:\n\n{complaint_text or '(пусто)'}{extra}")
+        return
+
+    if action == "both":
+        answer_callback_query(callback_query_id, "Готово")
+        if public_reply:
+            send_message(chat_id, f"✍️ Публичный ответ:\n\n{public_reply}")
+        else:
+            send_message(chat_id, "❌ В анализе нет public_reply.text")
+
+        if not complaint_needed:
+            send_message(chat_id, "⚠️ Жалоба не требуется по условиям (complaint.needed=false).")
+        else:
+            extra = f"\n\nДлина: {complaint_count}" if complaint_count is not None else ""
+            send_message(chat_id, f"⚠️ Жалоба:\n\n{complaint_text or '(пусто)'}{extra}")
+        return
+
+    answer_callback_query(callback_query_id, "Неизвестное действие", show_alert=True)
+
+# -----------------------------
+# Weekly report formatting
+# -----------------------------
+def format_weekly_report(summary: dict) -> str:
+    days = summary.get("days", 7)
+    total = summary.get("total", 0)
+    with_error = summary.get("with_error", 0)
+    sentiments = summary.get("sentiments", {})
+    complaints_needed = summary.get("complaints_needed", 0)
+    top_aspects = summary.get("top_aspects", [])
+
+    lines = []
+    lines.append(f"📊 Отчёт по анализам за {days} дней")
+    lines.append(f"Всего анализов: {total}")
+    lines.append(f"С ошибками: {with_error}")
+    lines.append(f"Жалоб требуется: {complaints_needed}")
+    lines.append("")
+    lines.append("Тональность:")
+    for k in ["negative", "mixed", "neutral", "positive", "unknown"]:
+        lines.append(f" - {k}: {sentiments.get(k, 0)}")
+
+    if top_aspects:
+        lines.append("")
+        lines.append("Топ аспектов (частота):")
+        for name, cnt in top_aspects[:10]:
+            lines.append(f" - {name}: {cnt}")
+
+    return "\n".join(lines)
+
+# -----------------------------
+# Startup
+# -----------------------------
+db_init()
+set_webhook_once()
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=PORT)
