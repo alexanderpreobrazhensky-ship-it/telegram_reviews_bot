@@ -1,5 +1,5 @@
 [build]
-builder = "nixpacks"
+commands = ["pip install -r requirements.txt"]
 
-[deploy]
-startCommand = "python main.py"
+[start]
+command = "gunicorn main:app"
