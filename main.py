@@ -1,209 +1,169 @@
 import os
-import json
-import logging
 import threading
-import requests
-import ast
-import re
+import logging
+import json
+from flask import Flask, request, jsonify, render_template_string
+from sqlalchemy import create_engine, Column, Integer, String, Text, Boolean
+from sqlalchemy.orm import sessionmaker, declarative_base
 
-from flask import Flask, request, jsonify, redirect
-from sqlalchemy import create_engine, Column, Integer, String, Boolean, Text
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, scoped_session
+# ------------------ CONFIG ------------------
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8415726004:AAGJRwT0P42gCBOCuMqH0uX4D5Eb0yePm6A")
+WEBHOOK_PATH = "/webhook"  # Telegram будет слать POST сюда
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///reviews.db")
+MAX_REVIEW_LENGTH = 3000
 
-# =========================
-# CONFIG
-# =========================
+# ------------------ LOGGING ------------------
+logging.basicConfig(level=logging.INFO)
 
-TELEGRAM_TOKEN = "8415726004:AAGJRwT0P42gCBOCuMqH0uX4D5Eb0yePm6A"
-WEBHOOK_URL = f"https://{os.environ.get('RAILWAY_PUBLIC_DOMAIN')}/webhook"
-
-DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///reviews.db")
-
-# =========================
-# LOGGING
-# =========================
-logging.basicConfig(
-    level=logging.INFO,
-    format="[%(asctime)s] %(levelname)s - %(message)s"
-)
-
-# =========================
-# FLASK
-# =========================
+# ------------------ FLASK APP ------------------
 app = Flask(__name__)
 
-# =========================
-# DATABASE
-# =========================
-engine = create_engine(
-    DATABASE_URL,
-    pool_size=5,
-    max_overflow=10,
-    pool_recycle=300,
-    pool_pre_ping=True
-)
-
+# ------------------ DATABASE ------------------
 Base = declarative_base()
-
 
 class Review(Base):
     __tablename__ = "reviews"
     id = Column(Integer, primary_key=True)
     chat_id = Column(Integer)
     message = Column(Text)
-    rating = Column(Integer)
-    problem = Column(Text)
-    employees = Column(Text)
-    response = Column(Text)
+    rating = Column(Integer, nullable=True)
+    problem = Column(String(500), nullable=True)
+    employees = Column(Text, nullable=True)
+    response = Column(Text, nullable=True)
     complaint = Column(Boolean, default=False)
 
-
+engine = create_engine(
+    DATABASE_URL,
+    connect_args={"check_same_thread": False} if "sqlite" in DATABASE_URL else {}
+)
+SessionLocal = sessionmaker(bind=engine)
 Base.metadata.create_all(engine)
 
-SessionLocal = scoped_session(sessionmaker(bind=engine))
+# ------------------ UTILS ------------------
+def safe_text(text: str) -> str:
+    """Ограничение длины и экранирование"""
+    return text[:MAX_REVIEW_LENGTH]
 
-
-# =========================
-# TELEGRAM SEND
-# =========================
-def tg_send(chat_id, text):
+def send_message(chat_id: int, text: str):
+    """Отправка сообщения Telegram"""
+    import requests
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     data = {"chat_id": chat_id, "text": text}
     try:
-        requests.post(url, json=data, timeout=5)
+        requests.post(url, json=data)
     except Exception as e:
-        logging.error(f"TG SEND ERROR: {e}")
+        logging.error(f"Ошибка отправки сообщения: {e}")
 
-
-# ============================
-# REVIEW ANALYZER (Gemini stub)
-# ============================
-def analyze_review(text: str):
+# ------------------ AI ANALYSIS ------------------
+def analyze_review(text: str) -> dict:
     """
-    БЕЗВРЕДНЫЙ ПАРСИНГ JSON от Gemini
+    Пример анализа через ИИ.
+    Здесь можно подключить Gemini / ChatGPT.
+    Возвращает dict с оценкой, проблемой, сотрудниками, ответом и жалобой.
     """
-
-    fake_ai_response = """{
+    # Для примера заглушка
+    return {
         "rating": 5,
-        "problem": "Отзыв положительный",
-        "employees": ["Иван"],
-        "response": "Спасибо за отзыв!",
-        "complaint": false
-    }"""
+        "problem": "Нет проблем",
+        "employees": ["Иванов И."],
+        "response": f"Спасибо за отзыв: {text[:50]}...",
+        "complaint": False
+    }
 
-    try:
-        # Безопасный разбор
-        data = ast.literal_eval(fake_ai_response)
-        if isinstance(data, dict):
-            return data
-        else:
-            return {}
-    except Exception:
-        return {}
-
-
-# =========================
-# BACKGROUND PROCESSING
-# =========================
-def process_async(update):
+# ------------------ ASYNC PROCESS ------------------
+def process_message_async(update):
     session = None
     try:
         message = update.get("message")
-        if not message:
+        if not message or "chat" not in message:
             return
-
         try:
             chat_id = int(message["chat"]["id"])
-        except Exception:
+        except (ValueError, TypeError, KeyError):
             logging.error("Invalid chat_id")
             return
 
         text = message.get("text", "").strip()
         if not text:
-            tg_send(chat_id, "Пустое сообщение")
+            send_message(chat_id, "Сообщение пустое")
             return
 
+        text = safe_text(text)
         result = analyze_review(text)
 
         session = SessionLocal()
         review = Review(
             chat_id=chat_id,
             message=text,
-            rating=result.get("rating"),
-            problem=result.get("problem", ""),
-            employees=json.dumps(result.get("employees", [])),
-            response=result.get("response", ""),
-            complaint=bool(result.get("complaint"))
+            rating=result.get('rating'),
+            problem=result.get('problem', '')[:500],
+            employees=json.dumps(result.get('employees', [])),
+            response=result.get('response', '')[:1000],
+            complaint=bool(result.get('complaint', False))
         )
-
         session.add(review)
         session.commit()
 
-        tg_send(chat_id, f"Ваш отзыв принят!\n\nАнализ:\n{json.dumps(result, ensure_ascii=False, indent=2)}")
+        send_message(chat_id, result.get("response", "Спасибо за отзыв!"))
 
     except Exception as e:
-        logging.error(f"PROCESS ERROR: {e}")
+        logging.error(f"Ошибка обработки: {e}")
         if session:
             session.rollback()
     finally:
         if session:
             session.close()
 
-
-# =========================
-# WEBHOOK ENDPOINT
-# =========================
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    update = request.get_json(silent=True)
-
-    threading.Thread(target=process_async, args=(update,), daemon=True).start()
-
-    return jsonify({"ok": True})
-
-
-# =========================
-# ADMIN CHECK
-# =========================
-@app.route("/admin")
-def admin():
-    return "<h1>Админка будет здесь</h1>"
-
-
-# =========================
-# HEALTH CHECK
-# =========================
-@app.route("/health")
-def health():
-    return "OK", 200
-
-
-# =========================
-# AUTO SET WEBHOOK
-# =========================
-def setup_webhook():
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook"
-    data = {"url": WEBHOOK_URL}
-
+# ------------------ FLASK ROUTES ------------------
+@app.route(WEBHOOK_PATH, methods=["POST"])
+def telegram_webhook():
     try:
-        r = requests.post(url, json=data, timeout=5)
-        logging.info(f"Webhook setup response: {r.text}")
+        update = request.get_json()
+        if not update:
+            return jsonify({"status": "no data"}), 200
+        threading.Thread(target=process_message_async, args=(update,)).start()
+        return jsonify({"status": "processing"})
     except Exception as e:
-        logging.error(f"Webhook setup error: {e}")
+        logging.error(f"Ошибка вебхука: {e}")
+        return jsonify({"status": "error"}), 500
 
+@app.route("/admin")
+def admin_panel():
+    """Простая админка для просмотра отзывов"""
+    session = SessionLocal()
+    reviews = session.query(Review).order_by(Review.id.desc()).limit(50).all()
+    session.close()
+    template = """
+    <h1>Последние отзывы</h1>
+    <table border="1" cellpadding="5">
+    <tr><th>ID</th><th>Chat ID</th><th>Сообщение</th><th>Оценка</th><th>Ответ</th></tr>
+    {% for r in reviews %}
+    <tr>
+        <td>{{ r.id }}</td>
+        <td>{{ r.chat_id }}</td>
+        <td>{{ r.message|e }}</td>
+        <td>{{ r.rating }}</td>
+        <td>{{ r.response|e }}</td>
+    </tr>
+    {% endfor %}
+    </table>
+    """
+    return render_template_string(template, reviews=reviews)
 
-# =========================
-# ROOT PAGE
-# =========================
+@app.route("/set_webhook")
+def set_webhook():
+    """Авто-установка вебхука Telegram"""
+    import requests
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook"
+    webhook_url = f"https://{os.getenv('RAILWAY_STATIC_URL','YOUR_DOMAIN')}{WEBHOOK_PATH}"
+    r = requests.get(url, params={"url": webhook_url})
+    return jsonify(r.json())
+
 @app.route("/")
-def index():
+def root():
     return "Bot is running!"
 
-
-# =========================
-# APP START
-# =========================
+# ------------------ RUN ------------------
 if __name__ == "__main__":
-    setup_webhook()
-    app.run(host="0.0.0.0", port=8080)
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port)
