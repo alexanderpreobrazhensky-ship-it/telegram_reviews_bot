@@ -1,123 +1,107 @@
 import os
-import json
-import threading
 import logging
+import requests
 from flask import Flask, request, jsonify
 
-import requests
+# ================== Настройка логирования ==================
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger(__name__)
 
-# ===== Настройки и переменные среды =====
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")  # Токен бота
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # Должно быть типа https://<домен>/<token>
-ADMIN_USERNAME = os.getenv("ADMIN_USERNAME")
-ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD")
+# ================== Проверка переменных среды ==================
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
+ADMIN_ID = os.environ.get("ADMIN_ID")
+AI_ENGINE = os.environ.get("AI_ENGINE", "gemini")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-if not TELEGRAM_TOKEN or not WEBHOOK_URL:
+if not TELEGRAM_BOT_TOKEN or not WEBHOOK_URL:
     raise ValueError("TELEGRAM_BOT_TOKEN и WEBHOOK_URL должны быть установлены в переменных среды!")
 
+# ================== Flask App ==================
 app = Flask(__name__)
-logging.basicConfig(level=logging.INFO)
 
-# ===== Декоратор для админки =====
-from functools import wraps
+# ================== Вспомогательные функции ==================
+def tg_send(chat_id, text):
+    """Отправка сообщения в Telegram"""
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    resp = requests.post(url, json={"chat_id": chat_id, "text": text})
+    if not resp.ok:
+        logger.error(f"Ошибка отправки сообщения: {resp.text}")
+    return resp
 
-def admin_required(f):
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        auth = request.authorization
-        if not auth or auth.username != ADMIN_USERNAME or auth.password != ADMIN_PASSWORD:
-            return ('Unauthorized', 401, {'WWW-Authenticate': 'Basic realm="Login Required"'})
-        return f(*args, **kwargs)
-    return decorated
-
-# ===== Простая заглушка анализа отзыва =====
-def analyze_review(text: str) -> dict:
-    """
-    Функция анализа отзыва. Можно заменить на вызов Gemini/AI.
-    """
-    text = text.strip()
-    if not text:
-        return {"response": "Пустой текст!"}
-    return {"response": f"Спасибо за ваш отзыв! Вы написали: {text}"}
-
-# ===== Функция отправки сообщения через Telegram =====
-def tg_send(chat_id: int, text: str):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text}
+def ai_analyze(text):
+    """Обработка текста AI (Gemini)"""
+    if AI_ENGINE.lower() != "gemini":
+        return f"[{AI_ENGINE} AI] Ваш текст: {text}"
+    
+    # Пример запроса к Gemini AI
+    headers = {"Authorization": f"Bearer {GEMINI_API_KEY}"}
+    data = {"prompt": text, "max_tokens": 200}
     try:
-        r = requests.post(url, json=payload, timeout=5)
-        if not r.ok:
-            logging.error(f"Ошибка отправки сообщения: {r.text}")
+        resp = requests.post("https://api.gemini.ai/v1/generate", headers=headers, json=data, timeout=10)
+        resp.raise_for_status()
+        result = resp.json()
+        return result.get("text", "[AI ответ пуст]")
     except Exception as e:
-        logging.error(f"Ошибка запроса к Telegram API: {e}")
+        logger.error(f"Ошибка Gemini AI: {e}")
+        return "[AI недоступен]"
 
-# ===== Асинхронная обработка сообщений =====
-def process_message_async(update: dict):
-    try:
-        message = update.get("message")
-        if not message or "chat" not in message:
-            return
-        try:
-            chat_id = int(message["chat"]["id"])
-        except (ValueError, TypeError):
-            logging.error("Некорректный chat_id")
-            return
-
-        text = message.get("text", "").strip()
-        if not text:
-            tg_send(chat_id, "Пустое сообщение, напишите что-нибудь.")
-            return
-
-        # Анализ текста
-        result = analyze_review(text)
-        tg_send(chat_id, result.get("response", "Ответ отсутствует."))
-
-    except Exception as e:
-        logging.error(f"Ошибка обработки update: {e}")
-
-# ===== Вебхук для Telegram =====
-@app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
-def telegram_webhook():
+# ================== Вебхук ==================
+@app.route(f"/{TELEGRAM_BOT_TOKEN}", methods=["POST"])
+def webhook():
     update = request.get_json()
-    if not update:
-        return jsonify({"status": "no data"}), 200
-    threading.Thread(target=process_message_async, args=(update,)).start()
-    return jsonify({"status": "processing"})
+    logger.info(f"Получен update: {update}")
 
-# ===== Админ-панель =====
-@app.route("/admin")
-@admin_required
-def admin_panel():
-    return "<h2>Админка бота. Всё работает.</h2>"
+    message = update.get("message")
+    if not message:
+        return jsonify({"ok": True})
 
-# ===== Эндпоинт для установки вебхука =====
-@app.route("/set_webhook")
-@admin_required
+    chat_id = message["chat"]["id"]
+    text = message.get("text", "")
+
+    logger.info(f"Сообщение от {chat_id}: {text}")
+
+    # Обработка команд
+    if text.startswith("/"):
+        if text == "/start":
+            reply = "Привет! Я готов обрабатывать ваши отзывы."
+        elif text == "/myid":
+            reply = f"Ваш chat_id: {chat_id}"
+        elif text.startswith("/analyze"):
+            user_text = text[len("/analyze"):].strip()
+            reply = ai_analyze(user_text)
+        else:
+            reply = "Неизвестная команда."
+    else:
+        # Все обычные сообщения обрабатывает AI
+        reply = ai_analyze(text)
+
+    tg_send(chat_id, reply)
+    logger.info(f"Ответ отправлен: {reply}")
+
+    return jsonify({"ok": True})
+
+# ================== Автоматическая настройка вебхука ==================
+@app.route("/set_webhook", methods=["GET"])
 def set_webhook():
-    webhook_url = f"{WEBHOOK_URL}/{TELEGRAM_TOKEN}"
-    r = requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook?url={webhook_url}")
-    return jsonify(r.json())
+    webhook_url = f"{WEBHOOK_URL}/{TELEGRAM_BOT_TOKEN}"
+    resp = requests.get(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/setWebhook?url={webhook_url}")
+    logger.info(f"Установлен вебхук: {resp.text}")
+    return resp.text
 
-# ===== Эндпоинт для удаления вебхука =====
-@app.route("/remove_webhook")
-@admin_required
+@app.route("/remove_webhook", methods=["GET"])
 def remove_webhook():
-    r = requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteWebhook")
-    return jsonify(r.json())
+    resp = requests.get(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteWebhook")
+    logger.info(f"Удалён вебхук: {resp.text}")
+    return resp.text
 
-# ===== Проверка состояния =====
-@app.route("/debug")
-@admin_required
+@app.route("/debug", methods=["GET"])
 def debug():
-    r = requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getWebhookInfo")
-    return jsonify(r.json())
+    """Проверка текущего вебхука"""
+    resp = requests.get(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getWebhookInfo")
+    return resp.text
 
-# ===== Главная =====
-@app.route("/")
-def root():
-    return "Bot is running!"
-
-# ===== Запуск приложения =====
+# ================== Запуск ==================
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
+    logger.info("Бот запущен")
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
