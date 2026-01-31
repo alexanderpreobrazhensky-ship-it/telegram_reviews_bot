@@ -3,117 +3,95 @@ import logging
 import requests
 from flask import Flask, request, jsonify
 
-# ----------------------
 # Настройка логирования
-# ----------------------
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-# ----------------------
-# Проверка переменных среды
-# ----------------------
-TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-WEBHOOK_URL = os.getenv('WEBHOOK_URL')
-AI_ENGINE = os.getenv('AI_ENGINE', 'gemini')
-GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
+BOT_TOKEN = os.environ.get("BOT_TOKEN")  # Токен Telegram бота
+if not BOT_TOKEN:
+    raise ValueError("Не задан BOT_TOKEN в переменных окружения!")
 
-if not TELEGRAM_BOT_TOKEN or not WEBHOOK_URL:
-    raise ValueError("TELEGRAM_BOT_TOKEN и WEBHOOK_URL должны быть установлены в переменных среды!")
-if AI_ENGINE.lower() == 'gemini' and not GEMINI_API_KEY:
-    raise ValueError("GEMINI_API_KEY должна быть установлена для AI_ENGINE=gemini!")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")  # API ключ Gemini
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
 
-# ----------------------
-# Flask и Telegram
-# ----------------------
 app = Flask(__name__)
-BASE_TELEGRAM_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
-# ----------------------
-# Вспомогательные функции
-# ----------------------
-def set_webhook():
-    """Устанавливает вебхук для Telegram автоматически."""
-    url = f"{BASE_TELEGRAM_URL}/setWebhook"
-    data = {"url": WEBHOOK_URL}
-    resp = requests.post(url, data=data)
-    if resp.ok:
-        logging.info("Вебхук установлен автоматически.")
-    else:
-        logging.error(f"Ошибка при установке вебхука: {resp.text}")
-
+# Функция для отправки сообщений
 def send_message(chat_id, text):
-    """Отправка сообщения в Telegram."""
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     data = {"chat_id": chat_id, "text": text}
-    resp = requests.post(f"{BASE_TELEGRAM_URL}/sendMessage", data=data)
-    if resp.ok:
-        logging.info(f"Ответ отправлен: {text}")
+    r = requests.post(url, json=data)
+    if r.status_code != 200:
+        logging.error(f"Ошибка при отправке сообщения: {r.text}")
     else:
-        logging.error(f"Ошибка при отправке сообщения: {resp.text}")
+        logging.info(f"Ответ отправлен: {text}")
 
-def call_gemini(prompt_text):
-    """Запрос к Google Gemini API."""
-    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
-    headers = {"Content-Type": "application/json", "X-goog-api-key": GEMINI_API_KEY}
-    data = {
-        "contents": [
-            {
-                "parts": [{"text": prompt_text}]
-            }
-        ]
+# Функция для обращения к Gemini
+def analyze_with_gemini(text):
+    if not GEMINI_API_KEY:
+        return "[Gemini API не настроен]"
+    payload = {
+        "contents": [{"parts": [{"text": text}]}]
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "X-goog-api-key": GEMINI_API_KEY
     }
     try:
-        resp = requests.post(url, headers=headers, json=data, timeout=15)
+        resp = requests.post(GEMINI_URL, json=payload, headers=headers, timeout=20)
         resp.raise_for_status()
-        result = resp.json()
-        # Gemini возвращает текст в result['candidates'][0]['content'][0]['text'] по стандарту
-        text_out = result['candidates'][0]['content'][0]['text']
-        return text_out
+        data = resp.json()
+        # Здесь предполагается, что ответ лежит в data["candidates"][0]["content"]
+        content = data.get("candidates", [{}])[0].get("content", "")
+        return content if content else "[Gemini вернул пустой ответ]"
     except Exception as e:
         logging.error(f"Ошибка при обращении к Gemini: {e}")
         return "[Ошибка при обращении к Gemini]"
 
-# ----------------------
-# Роут для Telegram Webhook
-# ----------------------
-@app.route(f'/{TELEGRAM_BOT_TOKEN}', methods=['POST'])
-def webhook():
+# Проверка и установка вебхука
+def set_webhook():
+    webhook_url = f"{os.environ.get('WEBHOOK_URL')}/{BOT_TOKEN}"
+    r = requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url={webhook_url}")
+    if r.status_code == 200:
+        logging.info(f"Вебхук установлен автоматически: {webhook_url}")
+    else:
+        logging.error(f"Ошибка установки вебхука: {r.text}")
+
+# Маршрут вебхука Telegram
+@app.route(f"/{BOT_TOKEN}", methods=["POST"])
+def telegram_webhook():
     update = request.get_json()
     logging.info(f"Получено сообщение: {update}")
 
-    if "message" not in update:
-        return jsonify({"ok": True})
-
-    message = update["message"]
-    chat_id = message["chat"]["id"]
+    message = update.get("message", {})
+    chat_id = message.get("chat", {}).get("id")
     text = message.get("text", "")
 
-    # ----------------------
-    # Команды
-    # ----------------------
+    if not chat_id or not text:
+        return "ok"
+
+    response_text = ""
+
     if text.startswith("/start"):
-        send_message(chat_id, "Привет! Я бот для анализа отзывов.")
+        response_text = "Привет! Я бот для анализа отзывов."
     elif text.startswith("/help"):
-        help_text = "/start - запуск\n/myid - ваш ID\n/analyze <текст> - анализ текста через Gemini"
-        send_message(chat_id, help_text)
+        response_text = "/start - запуск\n/myid - ваш ID\n/analyze <текст> - анализ текста через Gemini"
     elif text.startswith("/myid"):
-        send_message(chat_id, f"Ваш ID: {chat_id}")
+        response_text = f"Ваш ID: {chat_id}"
     elif text.startswith("/analyze"):
-        prompt_text = text[len("/analyze"):].strip()
-        if not prompt_text:
-            send_message(chat_id, "Пожалуйста, укажите текст для анализа после команды /analyze")
+        analyze_text = text.replace("/analyze", "", 1).strip()
+        if not analyze_text:
+            response_text = "Введите текст после команды /analyze"
         else:
-            response = call_gemini(prompt_text)
-            send_message(chat_id, f"[Gemini ответ на]: {response}")
+            gemini_response = analyze_with_gemini(analyze_text)
+            response_text = f"[Gemini ответ на]: {gemini_response}"
     else:
-        # Любое другое сообщение
-        response = call_gemini(text)
-        send_message(chat_id, f"[Gemini ответ на]: {response}")
+        # Если просто текст без команды, тоже можно анализировать
+        gemini_response = analyze_with_gemini(text)
+        response_text = f"[Gemini ответ на]: {gemini_response}"
 
-    return jsonify({"ok": True})
+    send_message(chat_id, response_text)
+    return "ok"
 
-# ----------------------
-# Главный запуск
-# ----------------------
 if __name__ == "__main__":
-    logging.info("Проверка вебхука...")
     set_webhook()
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
