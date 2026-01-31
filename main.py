@@ -25,8 +25,12 @@ logger = logging.getLogger("telegram_reviews_bot")
 # -----------------------------
 # OpenAI SDK (required for DeepSeek gateways)
 # -----------------------------
-from openai import OpenAI  # type: ignore
-OPENAI_SDK_AVAILABLE = True
+try:
+    from openai import OpenAI  # type: ignore
+    OPENAI_SDK_AVAILABLE = True
+except Exception:
+    OPENAI_SDK_AVAILABLE = False
+    OpenAI = None  # type: ignore
 
 # -----------------------------
 # Env / Config
@@ -59,6 +63,9 @@ DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY") or os.getenv("DEEPSEEK_KEY")
 DEEPSEEK_BASE_URL = (os.getenv("DEEPSEEK_BASE_URL") or "https://api.artemox.com/v1").rstrip("/")
 DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL") or "deepseek-chat"
 DEEPSEEK_URL = f"{DEEPSEEK_BASE_URL}/chat/completions"
+
+# OPTIONAL: allow requests fallback (Cloudflare sometimes blocks it)
+DEEPSEEK_ALLOW_REQUESTS_FALLBACK = (os.getenv("DEEPSEEK_ALLOW_REQUESTS_FALLBACK") or "0").strip() == "1"
 
 # OpenAI (optional)
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -108,6 +115,23 @@ AI_TIMEOUT = float(os.getenv("AI_TIMEOUT", "40"))
 app = Flask(__name__)
 
 # -----------------------------
+# Redaction
+# -----------------------------
+def _redact(s: str) -> str:
+    if not s:
+        return s
+    s = s.replace(TELEGRAM_BOT_TOKEN, "***TG_TOKEN***")
+    if DEEPSEEK_API_KEY:
+        s = s.replace(DEEPSEEK_API_KEY, "***DEEPSEEK_KEY***")
+    if OPENAI_API_KEY:
+        s = s.replace(OPENAI_API_KEY, "***OPENAI_KEY***")
+    if GEMINI_API_KEY:
+        s = s.replace(GEMINI_API_KEY, "***GEMINI_KEY***")
+    if GROK_API_KEY:
+        s = s.replace(GROK_API_KEY, "***GROK_KEY***")
+    return s
+
+# -----------------------------
 # Telegram helpers
 # -----------------------------
 def tg_api(method: str) -> str:
@@ -145,12 +169,18 @@ def send_document(chat_id: int, filename: str, content: bytes) -> None:
     except Exception:
         logger.exception("sendDocument exception")
 
-def _is_admin(chat_id: Optional[int]) -> bool:
-    if chat_id is None:
-        return False
+def _is_admin(user_id: Optional[int], chat_id: Optional[int] = None) -> bool:
+    """
+    Admin allowlist contains IDs. In private chats user_id==chat_id, but in groups they differ.
+    So we allow either match.
+    """
     if not ADMIN_CHAT_IDS:
         return False  # strict admin-only
-    return chat_id in ADMIN_CHAT_IDS
+    if user_id is not None and user_id in ADMIN_CHAT_IDS:
+        return True
+    if chat_id is not None and chat_id in ADMIN_CHAT_IDS:
+        return True
+    return False
 
 def _display_name(user: dict) -> str:
     username = (user.get("username") or "").strip()
@@ -181,7 +211,6 @@ def set_webhook_once() -> None:
             params={"url": WEBHOOK_FULL_URL},
             timeout=TG_TIMEOUT,
         )
-        # 429 часто бывает из-за нескольких воркеров — не критично
         if r.status_code == 200:
             logger.info("setWebhook OK: %s", _redact(r.text[:500]))
         elif r.status_code == 429:
@@ -211,47 +240,22 @@ def _db_connect():
         return None
 
 def db_init() -> None:
+    """
+    IMPORTANT: Do NOT rely on CREATE TABLE IF NOT EXISTS for schema changes.
+    Existing DB may have old schema. We do safe migrations via ADD COLUMN IF NOT EXISTS.
+    """
     global DB_OK
     conn = _db_connect()
     if not conn:
         DB_OK = False
         logger.warning("DB init skipped (DATABASE_URL not set or connect failed)")
         return
+
     try:
         with conn.cursor() as cur:
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS reviews (
-                    id BIGSERIAL PRIMARY KEY,
-                    platform TEXT,
-                    source TEXT NOT NULL DEFAULT 'manual',
-                    rating INT,
-                    review_text TEXT NOT NULL,
-                    review_hash TEXT,
-                    meta JSONB NOT NULL DEFAULT '{}'::jsonb,
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-                );
-            """)
-            cur.execute("ALTER TABLE reviews ADD COLUMN IF NOT EXISTS platform TEXT;")
-            cur.execute("ALTER TABLE reviews ADD COLUMN IF NOT EXISTS review_hash TEXT;")
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS review_analyses (
-                    id BIGSERIAL PRIMARY KEY,
-                    review_id BIGINT UNIQUE,
-                    platform TEXT,
-                    rating INT,
-                    review_text TEXT NOT NULL,
-                    result_json JSONB NOT NULL DEFAULT '{}'::jsonb,
-                    error TEXT,
-                    model TEXT,
-                    engine TEXT,
-                    created_by BIGINT,
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-                );
-            """)
-            try:
-                cur.execute("ALTER TABLE review_analyses ADD CONSTRAINT review_analyses_review_id_key UNIQUE (review_id);")
-            except Exception:
-                pass
+            # Baseline tables (minimal)
+            cur.execute("CREATE TABLE IF NOT EXISTS reviews (id BIGSERIAL PRIMARY KEY);")
+            cur.execute("CREATE TABLE IF NOT EXISTS review_analyses (id BIGSERIAL PRIMARY KEY);")
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS settings (
                     key TEXT PRIMARY KEY,
@@ -267,6 +271,48 @@ def db_init() -> None:
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
                 );
             """)
+
+            # Migrate reviews
+            cur.execute("ALTER TABLE reviews ADD COLUMN IF NOT EXISTS platform TEXT;")
+            cur.execute("ALTER TABLE reviews ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'manual';")
+            cur.execute("ALTER TABLE reviews ADD COLUMN IF NOT EXISTS rating INT;")
+            # FIX: this column was missing in your production DB
+            cur.execute("ALTER TABLE reviews ADD COLUMN IF NOT EXISTS review_text TEXT;")
+            cur.execute("ALTER TABLE reviews ADD COLUMN IF NOT EXISTS review_hash TEXT;")
+            cur.execute("ALTER TABLE reviews ADD COLUMN IF NOT EXISTS meta JSONB NOT NULL DEFAULT '{}'::jsonb;")
+            cur.execute("ALTER TABLE reviews ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT now();")
+
+            # Migrate review_analyses
+            cur.execute("ALTER TABLE review_analyses ADD COLUMN IF NOT EXISTS review_id BIGINT;")
+            cur.execute("ALTER TABLE review_analyses ADD COLUMN IF NOT EXISTS platform TEXT;")
+            cur.execute("ALTER TABLE review_analyses ADD COLUMN IF NOT EXISTS rating INT;")
+            cur.execute("ALTER TABLE review_analyses ADD COLUMN IF NOT EXISTS review_text TEXT;")
+            cur.execute("ALTER TABLE review_analyses ADD COLUMN IF NOT EXISTS result_json JSONB NOT NULL DEFAULT '{}'::jsonb;")
+            cur.execute("ALTER TABLE review_analyses ADD COLUMN IF NOT EXISTS error TEXT;")
+            cur.execute("ALTER TABLE review_analyses ADD COLUMN IF NOT EXISTS model TEXT;")
+            cur.execute("ALTER TABLE review_analyses ADD COLUMN IF NOT EXISTS engine TEXT;")
+            cur.execute("ALTER TABLE review_analyses ADD COLUMN IF NOT EXISTS created_by BIGINT;")
+            cur.execute("ALTER TABLE review_analyses ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT now();")
+
+            # Ensure unique index on review_id (best-effort)
+            try:
+                cur.execute("""
+                    DO $$
+                    BEGIN
+                        IF NOT EXISTS (
+                            SELECT 1
+                            FROM pg_indexes
+                            WHERE schemaname = 'public'
+                              AND tablename = 'review_analyses'
+                              AND indexname = 'review_analyses_review_id_uniq'
+                        ) THEN
+                            CREATE UNIQUE INDEX review_analyses_review_id_uniq ON review_analyses (review_id);
+                        END IF;
+                    END$$;
+                """)
+            except Exception:
+                pass
+
         DB_OK = True
         logger.info("DB init OK (postgres=True)")
     except Exception:
@@ -278,14 +324,19 @@ def db_init() -> None:
         except Exception:
             pass
 
-def db_insert_review(source: str, rating: Optional[int], review_text: str, meta: dict, platform: Optional[str] = None, review_hash: Optional[str] = None) -> Optional[int]:
+def db_insert_review(source: str, rating: Optional[int], review_text: str, meta: dict,
+                     platform: Optional[str] = None, review_hash: Optional[str] = None) -> Optional[int]:
     conn = _db_connect()
     if not conn:
         return None
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO reviews (source, rating, review_text, meta, platform, review_hash) VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
+                """
+                INSERT INTO reviews (source, rating, review_text, meta, platform, review_hash)
+                VALUES (%s, %s, %s, %s::jsonb, %s, %s)
+                RETURNING id
+                """,
                 (source, rating, review_text, json.dumps(meta, ensure_ascii=False), platform, review_hash),
             )
             row = cur.fetchone()
@@ -403,7 +454,7 @@ def db_insert_analysis(
                     """
                     INSERT INTO review_analyses
                     (review_id, platform, rating, review_text, result_json, error, model, engine, created_by)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    VALUES (%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s)
                     ON CONFLICT (review_id)
                     DO UPDATE SET
                         platform=EXCLUDED.platform,
@@ -434,7 +485,7 @@ def db_insert_analysis(
                     """
                     INSERT INTO review_analyses
                     (review_id, platform, rating, review_text, result_json, error, model, engine, created_by)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    VALUES (%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s)
                     RETURNING id
                     """,
                     (
@@ -690,7 +741,7 @@ def db_set_setting(key: str, value: dict) -> None:
             cur.execute(
                 """
                 INSERT INTO settings (key, value)
-                VALUES (%s, %s)
+                VALUES (%s, %s::jsonb)
                 ON CONFLICT (key)
                 DO UPDATE SET value=EXCLUDED.value, updated_at=now()
                 """,
@@ -734,7 +785,7 @@ def db_set_session(chat_id: int, state: str, payload: dict) -> None:
             cur.execute(
                 """
                 INSERT INTO user_sessions (chat_id, state, payload)
-                VALUES (%s, %s, %s)
+                VALUES (%s, %s, %s::jsonb)
                 ON CONFLICT (chat_id)
                 DO UPDATE SET state=EXCLUDED.state, payload=EXCLUDED.payload, updated_at=now()
                 """,
@@ -785,7 +836,6 @@ def db_weekly_summary(days: int = 7) -> dict:
             with_error = int(row[1])
             avg_rating = float(row[2]) if row[2] is not None else None
 
-            # sentiment distribution (best-effort from stored json)
             cur.execute(
                 """
                 SELECT result_json
@@ -988,24 +1038,6 @@ def get_cx_prompt() -> str:
     return CX_PROMPT_LITE if CX_PROMPT_MODE == "lite" else CX_PROMPT_FULL
 
 # -----------------------------
-# Redaction
-# -----------------------------
-def _redact(s: str) -> str:
-    if not s:
-        return s
-    # hide bot token and api keys if accidentally appear
-    s = s.replace(TELEGRAM_BOT_TOKEN, "***TG_TOKEN***")
-    if DEEPSEEK_API_KEY:
-        s = s.replace(DEEPSEEK_API_KEY, "***DEEPSEEK_KEY***")
-    if OPENAI_API_KEY:
-        s = s.replace(OPENAI_API_KEY, "***OPENAI_KEY***")
-    if GEMINI_API_KEY:
-        s = s.replace(GEMINI_API_KEY, "***GEMINI_KEY***")
-    if GROK_API_KEY:
-        s = s.replace(GROK_API_KEY, "***GROK_KEY***")
-    return s
-
-# -----------------------------
 # Settings / Sessions
 # -----------------------------
 SESSION_TTL_MINUTES = 15
@@ -1061,8 +1093,8 @@ def call_deepseek(messages: List[Dict[str, str]]) -> str:
     if not DEEPSEEK_API_KEY:
         raise RuntimeError("DEEPSEEK_API_KEY not set")
 
-    # 1) Prefer OpenAI SDK if available (often helps with gateways/proxies)
-    if OPENAI_SDK_AVAILABLE:
+    # 1) Prefer OpenAI SDK if available
+    if OPENAI_SDK_AVAILABLE and OpenAI is not None:
         try:
             client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
             resp = client.chat.completions.create(
@@ -1074,9 +1106,14 @@ def call_deepseek(messages: List[Dict[str, str]]) -> str:
             text = (resp.choices[0].message.content or "").strip()
             return text
         except Exception as e:
-            logger.warning("DeepSeek via OpenAI SDK failed, fallback to requests. err=%s", str(e)[:200])
+            logger.warning("DeepSeek via OpenAI SDK failed. err=%s", str(e)[:200])
+            if not DEEPSEEK_ALLOW_REQUESTS_FALLBACK:
+                raise RuntimeError("DeepSeek gateway blocked or SDK failed (requests fallback disabled).")
 
-    # 2) Fallback: requests with browser-like headers
+    if not DEEPSEEK_ALLOW_REQUESTS_FALLBACK:
+        raise RuntimeError("DeepSeek requests fallback disabled (set DEEPSEEK_ALLOW_REQUESTS_FALLBACK=1 to enable).")
+
+    # 2) Fallback: requests (can be blocked by Cloudflare)
     payload = {
         "model": DEEPSEEK_MODEL,
         "messages": messages,
@@ -1094,11 +1131,9 @@ def call_deepseek(messages: List[Dict[str, str]]) -> str:
     }
 
     resp = requests.post(DEEPSEEK_URL, json=payload, headers=headers, timeout=AI_TIMEOUT)
-
     body_preview = _redact(resp.text[:900])
     logger.info("DeepSeek status=%s body=%s", resp.status_code, body_preview)
 
-    # Cloudflare / anti-bot HTML
     if "<html" in resp.text.lower() or "just a moment" in resp.text.lower():
         logger.error("DeepSeek gateway returned HTML (cloudflare_block=true) status=%s", resp.status_code)
         raise RuntimeError(f"DeepSeek gateway returned HTML (likely Cloudflare). status={resp.status_code}")
@@ -1120,7 +1155,7 @@ def call_openai(messages: List[Dict[str, str]]) -> str:
     if not OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY not set")
 
-    if OPENAI_SDK_AVAILABLE:
+    if OPENAI_SDK_AVAILABLE and OpenAI is not None:
         client = OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_BASE_URL)
         resp = client.chat.completions.create(
             model=OPENAI_MODEL,
@@ -1130,7 +1165,6 @@ def call_openai(messages: List[Dict[str, str]]) -> str:
         )
         return (resp.choices[0].message.content or "").strip()
 
-    # fallback requests
     url = f"{OPENAI_BASE_URL}/chat/completions"
     payload = {"model": OPENAI_MODEL, "messages": messages, "temperature": 0.2}
     headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
@@ -1144,11 +1178,8 @@ def call_gemini(messages: List[Dict[str, str]]) -> str:
     if not GEMINI_API_KEY:
         raise RuntimeError("GEMINI_API_KEY not set")
 
-    # Convert messages to Gemini format (simple)
     joined = "\n".join([f"{m.get('role','user')}: {m.get('content','')}" for m in messages])
-    payload = {
-        "contents": [{"role": "user", "parts": [{"text": joined}]}]
-    }
+    payload = {"contents": [{"role": "user", "parts": [{"text": joined}]}]}
     headers = {"Content-Type": "application/json", "X-goog-api-key": GEMINI_API_KEY}
     resp = requests.post(GEMINI_URL, json=payload, headers=headers, timeout=AI_TIMEOUT)
     logger.info("Gemini status=%s body=%s", resp.status_code, _redact(resp.text[:700]))
@@ -1164,25 +1195,19 @@ def call_gemini(messages: List[Dict[str, str]]) -> str:
     return (parts[0].get("text") or "").strip()
 
 def call_grok(messages: List[Dict[str, str]]) -> str:
-    # Placeholder: implement when you have xAI endpoint details
     raise RuntimeError("GROK engine not configured yet (set GROK_BASE_URL/GROK_API_KEY)")
 
 # -----------------------------
 # JSON extraction from LLM response
 # -----------------------------
 def extract_first_json(text: str) -> Tuple[Optional[dict], Optional[str]]:
-    """
-    Returns (json_obj, error). Tries to parse JSON even if wrapped in text/code fences.
-    """
     if not text:
         return None, "empty_ai_response"
 
-    # remove code fences
     cleaned = text.strip()
     cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\s*```$", "", cleaned)
 
-    # try direct
     try:
         obj = json.loads(cleaned)
         if isinstance(obj, dict):
@@ -1191,11 +1216,10 @@ def extract_first_json(text: str) -> Tuple[Optional[dict], Optional[str]]:
     except Exception:
         pass
 
-    # try find first {...} block
     start = cleaned.find("{")
     end = cleaned.rfind("}")
     if start != -1 and end != -1 and end > start:
-        candidate = cleaned[start:end+1]
+        candidate = cleaned[start:end + 1]
         try:
             obj = json.loads(candidate)
             if isinstance(obj, dict):
@@ -1207,19 +1231,14 @@ def extract_first_json(text: str) -> Tuple[Optional[dict], Optional[str]]:
     return None, "no_json_object_found"
 
 # -----------------------------
-# CX analyze (build prompt -> call ai -> parse json)
+# CX analyze
 # -----------------------------
 def cx_analyze(input_obj: dict) -> Tuple[Optional[dict], str]:
-    """
-    Returns (parsed_json_or_none, raw_text)
-    """
     system_prompt = get_cx_prompt()
-
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": json.dumps(input_obj, ensure_ascii=False)},
     ]
-
     raw = ai_chat(messages)
     parsed, err = extract_first_json(raw)
     if parsed is None:
@@ -1314,10 +1333,6 @@ def _reset_state(chat_id: int) -> None:
     db_clear_session(chat_id)
 
 def parse_kv_args(text: str) -> Tuple[Dict[str, str], str]:
-    """
-    Parses leading key=value tokens.
-    Returns (kv, rest_text)
-    """
     parts = text.strip().split()
     kv: Dict[str, str] = {}
     rest_start = 0
@@ -1333,9 +1348,10 @@ def parse_kv_args(text: str) -> Tuple[Dict[str, str], str]:
     return kv, rest
 
 # -----------------------------
-# Background analysis (to keep webhook fast)
+# Background analysis
 # -----------------------------
-def background_analyze(chat_id: int, user_id: int, review_text: str, platform_hint: str = "unknown", rating: Optional[int] = None, review_id: Optional[int] = None) -> None:
+def background_analyze(chat_id: int, user_id: int, review_text: str, platform_hint: str = "unknown",
+                      rating: Optional[int] = None, review_id: Optional[int] = None) -> None:
     engine = _current_engine()
     model_name = ""
     if engine == "deepseek":
@@ -1358,7 +1374,7 @@ def background_analyze(chat_id: int, user_id: int, review_text: str, platform_hi
     }
 
     try:
-        parsed, raw = cx_analyze(input_obj)
+        parsed, _raw = cx_analyze(input_obj)
 
         analysis_id = db_insert_analysis(
             review_id=review_id,
@@ -1384,11 +1400,7 @@ def background_analyze(chat_id: int, user_id: int, review_text: str, platform_hi
         logger.error("AI exception: %s", err_text)
         logger.exception("AI exception traceback")
 
-        # Store error + minimal result_json
-        fallback_json = {
-            "_error": "AI failed or returned invalid JSON (see logs)",
-            "engine": engine,
-        }
+        fallback_json = {"_error": "AI failed or returned invalid JSON (see logs)", "engine": engine}
         analysis_id = db_insert_analysis(
             review_id=review_id,
             platform=platform_hint,
@@ -1401,7 +1413,6 @@ def background_analyze(chat_id: int, user_id: int, review_text: str, platform_hi
             created_by=user_id,
         ) or 0
 
-        # Human-readable message
         error_type = "unknown"
         if "Cloudflare" in err_text or "returned HTML" in err_text or "just a moment" in err_text.lower():
             error_type = "cloudflare_block"
@@ -1447,7 +1458,6 @@ def health():
 
 @app.get("/diag/ai")
 def diag_ai():
-    # optional protection
     if DIAG_TOKEN:
         token = request.args.get("token", "").strip()
         if token != DIAG_TOKEN:
@@ -1492,7 +1502,6 @@ def cron_weekly():
     if not summary.get("ok"):
         return jsonify(summary), 500
 
-    # send to all admins
     sent_to = []
     text = format_weekly_report(summary)
     for cid in ADMIN_CHAT_IDS:
@@ -1517,7 +1526,7 @@ def telegram_webhook():
         user_id = user.get("id")
         data = (cq.get("data") or "").strip()
 
-        if not _is_admin(user_id):
+        if not _is_admin(user_id, chat_id):
             if chat_id:
                 send_message(chat_id, "⛔ Доступ запрещён. Обратитесь к администратору.")
             if cq_id:
@@ -1544,7 +1553,7 @@ def telegram_webhook():
     if not chat_id or not user_id:
         return "ok"
 
-    if not _is_admin(user_id):
+    if not _is_admin(user_id, chat_id):
         send_message(chat_id, "⛔ Доступ запрещён. Обратитесь к администратору.")
         return "ok"
 
@@ -1748,6 +1757,7 @@ def telegram_webhook():
     if session:
         state = session.get("state")
         payload = session.get("payload") or {}
+
         if state == STATE_WAIT_REVIEW_TEXT:
             review_text = text.strip()
             if not review_text:
@@ -1835,15 +1845,13 @@ def handle_callback(chat_id: Optional[int], callback_query_id: str, data: str) -
             chat_id,
             "Укажи рейтинг:",
             reply_markup={
-                "inline_keyboard": [
-                    [
-                        {"text": "⭐1", "callback_data": "rating:1"},
-                        {"text": "⭐2", "callback_data": "rating:2"},
-                        {"text": "⭐3", "callback_data": "rating:3"},
-                        {"text": "⭐4", "callback_data": "rating:4"},
-                        {"text": "⭐5", "callback_data": "rating:5"},
-                    ]
-                ]
+                "inline_keyboard": [[
+                    {"text": "⭐1", "callback_data": "rating:1"},
+                    {"text": "⭐2", "callback_data": "rating:2"},
+                    {"text": "⭐3", "callback_data": "rating:3"},
+                    {"text": "⭐4", "callback_data": "rating:4"},
+                    {"text": "⭐5", "callback_data": "rating:5"},
+                ]]
             },
         )
         return
@@ -1863,6 +1871,7 @@ def handle_callback(chat_id: Optional[int], callback_query_id: str, data: str) -
         platform = payload.get("platform") or "unknown"
         added_by = payload.get("added_by")
         review_hash = _hash_review(review_text)
+
         duplicate = db_find_duplicate_review(review_hash)
         if duplicate:
             db_set_session(chat_id, STATE_WAIT_DUP_CONFIRM, {
@@ -1921,6 +1930,7 @@ def handle_callback(chat_id: Optional[int], callback_query_id: str, data: str) -
         rating = payload.get("rating")
         review_hash = payload.get("review_hash")
         added_by = payload.get("added_by")
+
         rid = db_insert_review(
             source="manual",
             rating=rating,
@@ -2290,6 +2300,7 @@ def send_find_results(chat_id: int, payload: dict) -> None:
     )
     reply_markup = {"inline_keyboard": action_rows}
     send_message(chat_id, "\n".join(lines), reply_markup=reply_markup)
+
 def build_csv_export(rows: List[dict]) -> bytes:
     output = io.StringIO()
     writer = csv.writer(output)
