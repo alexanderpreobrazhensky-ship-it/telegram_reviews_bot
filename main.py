@@ -1,129 +1,81 @@
 import os
 import json
-from flask import Flask, request
 import requests
-from dotenv import load_dotenv
-
-load_dotenv()
+from flask import Flask, request
 
 app = Flask(__name__)
 
-# -----------------------------------------
-#   НАСТРОЙКИ
-# -----------------------------------------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN is not set in environment!")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # https://telegramreviewsbot-production-xxx.up.railway.app
 
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
-
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-if not WEBHOOK_URL:
-    raise ValueError("WEBHOOK_URL is not set! Example: https://your-app.up.railway.app")
-
-WEBHOOK_SET_URL = f"{WEBHOOK_URL}/{BOT_TOKEN}"
-
-# Файл с отзывами
-REVIEWS_FILE = "reviews.json"
+ADMIN_ID = os.getenv("ADMIN_ID", "0")  # необязательно
 
 
-# -----------------------------------------
-#   ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
-# -----------------------------------------
+# ===========================
+#  Функция отправки сообщений
+# ===========================
 def send_message(chat_id, text):
     url = f"{TELEGRAM_API}/sendMessage"
     requests.post(url, json={"chat_id": chat_id, "text": text})
 
 
-def load_reviews():
-    if not os.path.exists(REVIEWS_FILE):
-        return []
-    with open(REVIEWS_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+# ===========================
+#  Установка вебхука при старте
+# ===========================
+def setup_webhook():
+    full_webhook_url = f"{WEBHOOK_URL}/{BOT_TOKEN}"
+    url = f"{TELEGRAM_API}/setWebhook?url={full_webhook_url}"
+
+    try:
+        r = requests.get(url)
+        print("=== SET_WEBHOOK RESPONSE ===")
+        print(r.text)
+        print("============================")
+    except Exception as e:
+        print("ERROR setting webhook:", e)
 
 
-def save_review(user, rating, text):
-    reviews = load_reviews()
-    reviews.append({"user": user, "rating": rating, "text": text})
-    with open(REVIEWS_FILE, "w", encoding="utf-8") as f:
-        json.dump(reviews, f, ensure_ascii=False, indent=2)
+# ===========================
+#  Проверка, что бот жив
+# ===========================
+@app.route("/", methods=["GET"])
+def home():
+    return "Bot is running!"
 
 
-# -----------------------------------------
-#   АВТО-УСТАНОВКА ВЕБХУКА ПРИ ЗАПУСКЕ
-# -----------------------------------------
-def set_webhook():
-    webhook_url = f"{WEBHOOK_URL}/{BOT_TOKEN}"
-    r = requests.get(f"{TELEGRAM_API}/setWebhook", params={"url": webhook_url})
-    print("SET_WEBHOOK:", r.text)
-
-
-@app.before_first_request
-def startup():
-    print(">>> Starting bot…")
-    set_webhook()
-
-
-# -----------------------------------------
-#   МАРШРУТ ДЛЯ ВЕБХУКА (ВАЖНО!)
-# -----------------------------------------
+# ===========================
+#   ОСНОВНОЙ ВЕБХУК
+# ===========================
 @app.route(f"/{BOT_TOKEN}", methods=["POST"])
 def webhook_handler():
     update = request.get_json()
+    print("=== INCOMING UPDATE ===")
+    print(update)
+    print("=======================")
 
-    print(">>> UPDATE:", update)
+    if "message" in update:
+        chat_id = update["message"]["chat"]["id"]
+        text = update["message"].get("text", "")
 
-    if "message" not in update:
-        return "ok"
+        # простейшая реакция
+        if text == "/start":
+            send_message(chat_id, "Бот работает! Webhook активен.")
+        else:
+            send_message(chat_id, f"Вы сказали: {text}")
 
-    msg = update["message"]
-    chat_id = msg["chat"]["id"]
-    text = msg.get("text", "")
-
-    # ADMIN PANEL
-    if chat_id == ADMIN_ID:
-        if text == "/reviews":
-            reviews = load_reviews()
-            if not reviews:
-                send_message(chat_id, "Пока нет отзывов.")
-            else:
-                msg_out = "\n\n".join(
-                    [f"⭐ {r['rating']} — {r['text']}\n👤 {r['user']}" for r in reviews]
-                )
-                send_message(chat_id, msg_out)
-            return "ok"
-
-    # USER SIDE
-    if text.startswith("/start"):
-        send_message(chat_id, "Привет! Оставьте рейтинг от 1 до 5:")
-        return "ok"
-
-    if text.isdigit() and 1 <= int(text) <= 5:
-        rating = int(text)
-        save_review(chat_id, rating, "Без текста")
-        send_message(chat_id, f"Спасибо! Ваша оценка: {rating} ⭐")
-        return "ok"
-
-    # текстовый отзыв
-    save_review(chat_id, 5, text)
-    send_message(chat_id, "Спасибо за отзыв! ❤️")
-
-    return "ok"
+    return "OK", 200
 
 
-# -----------------------------------------
-#   РУЧНАЯ КНОПКА ДЛЯ ОТЛАДКИ (НЕ УДАЛЯТЬ)
-# -----------------------------------------
-@app.route("/set_webhook")
-def manual_set():
-    set_webhook()
-    return "Webhook set manually"
-
-
-# -----------------------------------------
-#   ЗАПУСК
-# -----------------------------------------
+# ===========================
+#  Запуск приложения
+# ===========================
 if __name__ == "__main__":
+    print("=== STARTING BOT ===")
+    print("BOT_TOKEN:", BOT_TOKEN)
+    print("WEBHOOK_URL:", WEBHOOK_URL)
+
+    setup_webhook()
+
     app.run(host="0.0.0.0", port=8080)
