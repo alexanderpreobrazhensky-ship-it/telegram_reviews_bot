@@ -76,17 +76,12 @@ GROK_BASE_URL = (os.getenv("GROK_BASE_URL") or "").rstrip("/")
 GROK_MODEL = os.getenv("GROK_MODEL") or "grok-beta"
 
 REPORT_CHAT_IDS = os.getenv("REPORT_CHAT_IDS", "").strip()
-ADMIN_CHAT_IDS: List[int] = []
-if REPORT_CHAT_IDS:
-    for x in REPORT_CHAT_IDS.split(","):
-        x = x.strip()
-        if x:
-            try:
-                ADMIN_CHAT_IDS.append(int(x))
-            except Exception:
-                pass
-
+ADMIN_CHAT_IDS = sorted({int(x) for x in re.findall(r"\d+", REPORT_CHAT_IDS)})
 ADMIN_MODE = "allowlist" if ADMIN_CHAT_IDS else "closed"
+if ADMIN_CHAT_IDS:
+    logger.info("Admins parsed: count=%s sample=%s", len(ADMIN_CHAT_IDS), ADMIN_CHAT_IDS[:3])
+else:
+    logger.warning("Admins parsed: count=0 (REPORT_CHAT_IDS is empty or invalid)")
 
 DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("DATABASE_PUBLIC_URL") or os.getenv("DATABASE_URL_INTERNAL")
 
@@ -95,6 +90,7 @@ DIAG_TOKEN = os.getenv("DIAG_TOKEN", "").strip()
 
 TG_TIMEOUT = float(os.getenv("TG_TIMEOUT", "10"))
 AI_TIMEOUT = float(os.getenv("AI_TIMEOUT", "40"))
+SET_WEBHOOK_ON_START = (os.getenv("SET_WEBHOOK_ON_START") or "1").strip() not in ("0", "false", "no")
 
 # -----------------------------
 # Flask
@@ -182,6 +178,9 @@ _webhook_lock = threading.Lock()
 
 def set_webhook_once() -> None:
     global _webhook_set_once
+    if not SET_WEBHOOK_ON_START:
+        logger.info("setWebhook skipped (SET_WEBHOOK_ON_START=0)")
+        return
     with _webhook_lock:
         if _webhook_set_once:
             return
@@ -207,6 +206,8 @@ def set_webhook_once() -> None:
 # DB layer (psycopg v3 recommended)
 # -----------------------------
 DB_OK = False
+DB_HAS_TEXT = False
+DB_HAS_REVIEW_TEXT = False
 
 def _db_connect():
     if not DATABASE_URL:
@@ -218,6 +219,29 @@ def _db_connect():
     except Exception as e:
         logger.error("DB connect failed: %s", e)
         return None
+
+def _refresh_review_columns(cur) -> None:
+    global DB_HAS_TEXT, DB_HAS_REVIEW_TEXT
+    cur.execute(
+        """
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema='public' AND table_name='reviews'
+        """
+    )
+    cols = {row[0] for row in (cur.fetchall() or [])}
+    DB_HAS_TEXT = "text" in cols
+    DB_HAS_REVIEW_TEXT = "review_text" in cols
+    logger.info("reviews columns: has_text=%s has_review_text=%s", DB_HAS_TEXT, DB_HAS_REVIEW_TEXT)
+
+def _review_text_expr(prefix: str = "") -> str:
+    if DB_HAS_REVIEW_TEXT and DB_HAS_TEXT:
+        return f"COALESCE({prefix}review_text, {prefix}text)"
+    if DB_HAS_REVIEW_TEXT:
+        return f"{prefix}review_text"
+    if DB_HAS_TEXT:
+        return f"{prefix}text"
+    return "NULL"
 
 def db_init() -> None:
     """
@@ -277,6 +301,7 @@ def db_init() -> None:
 
             # If `text` is NOT NULL in old DB, ensure inserts won't violate it.
             # We will always insert into `text`, so no need to drop constraint here.
+            _refresh_review_columns(cur)
 
             # ---- review_analyses columns
             cur.execute("ALTER TABLE review_analyses ADD COLUMN IF NOT EXISTS review_id BIGINT;")
@@ -327,22 +352,31 @@ def db_insert_review(source: str, rating: Optional[int], review_text: str, meta:
         return None
     try:
         with conn.cursor() as cur:
-            # IMPORTANT: insert into BOTH columns (compat with old schema NOT NULL `text`)
+            column_parts = [
+                ("source", "%s", source),
+                ("rating", "%s", rating),
+                ("meta", "%s::jsonb", json.dumps(meta, ensure_ascii=False)),
+                ("platform", "%s", platform),
+                ("review_hash", "%s", review_hash),
+            ]
+            if DB_HAS_REVIEW_TEXT:
+                column_parts.append(("review_text", "%s", review_text))
+            if DB_HAS_TEXT:
+                column_parts.append(("text", "%s", review_text))
+            if not (DB_HAS_REVIEW_TEXT or DB_HAS_TEXT):
+                logger.error("reviews table has no text columns; insert skipped")
+                return None
+
+            columns = ", ".join([col for col, _, _ in column_parts])
+            placeholders = ", ".join([ph for _, ph, _ in column_parts])
+            values = [val for _, _, val in column_parts]
             cur.execute(
-                """
-                INSERT INTO reviews (source, rating, review_text, text, meta, platform, review_hash)
-                VALUES (%s, %s, %s, %s, %s::jsonb, %s, %s)
+                f"""
+                INSERT INTO reviews ({columns})
+                VALUES ({placeholders})
                 RETURNING id
                 """,
-                (
-                    source,
-                    rating,
-                    review_text,
-                    review_text,
-                    json.dumps(meta, ensure_ascii=False),
-                    platform,
-                    review_hash,
-                ),
+                tuple(values),
             )
             row = cur.fetchone()
             return int(row[0]) if row else None
@@ -362,9 +396,9 @@ def db_get_review(review_id: int) -> Optional[dict]:
     try:
         with conn.cursor() as cur:
             cur.execute(
-                """
+                f"""
                 SELECT id, source, rating,
-                       COALESCE(review_text, text) AS review_text,
+                       {_review_text_expr()} AS review_text,
                        meta, created_at, platform, review_hash
                 FROM reviews
                 WHERE id=%s
@@ -512,7 +546,7 @@ def db_find_reviews(platform: Optional[str], rating: Optional[int], days: int, l
             cur.execute(
                 f"""
                 SELECT id, platform, rating,
-                       left(COALESCE(review_text, text), 80) as preview,
+                       left({_review_text_expr()}, 80) as preview,
                        created_at
                 FROM reviews
                 WHERE {where}
@@ -548,13 +582,13 @@ def db_export_reviews(days: int = 30, limit: int = 500) -> List[dict]:
     try:
         with conn.cursor() as cur:
             cur.execute(
-                """
+                f"""
                 SELECT
                   r.id,
                   r.created_at,
                   r.platform,
                   r.rating,
-                  COALESCE(r.review_text, r.text) as review_text,
+                  {_review_text_expr("r.")} as review_text,
                   a.created_at as analysis_created_at,
                   a.result_json
                 FROM reviews r
@@ -1257,6 +1291,39 @@ def settings_keyboard() -> dict:
         ]
     }
 
+def engine_keyboard() -> dict:
+    return {
+        "inline_keyboard": [
+            [{"text": "DeepSeek", "callback_data": "setengine:deepseek"}],
+            [{"text": "OpenAI", "callback_data": "setengine:openai"}],
+            [{"text": "Gemini", "callback_data": "setengine:gemini"}],
+        ]
+    }
+
+def rating_keyboard(prefix: str = "rating") -> dict:
+    rows = []
+    for rating in range(5, 0, -1):
+        rows.append([{"text": f"⭐{rating}", "callback_data": f"{prefix}:{rating}"}])
+    return {"inline_keyboard": rows}
+
+def find_rating_keyboard() -> dict:
+    rows = [[{"text": "Любой", "callback_data": "find_rating:any"}]]
+    for rating in range(5, 0, -1):
+        rows.append([{"text": f"⭐{rating}", "callback_data": f"find_rating:{rating}"}])
+    return {"inline_keyboard": rows}
+
+def find_days_keyboard() -> dict:
+    return {
+        "inline_keyboard": [
+            [{"text": "7 дней", "callback_data": "find_days:7"}],
+            [{"text": "30 дней", "callback_data": "find_days:30"}],
+            [{"text": "90 дней", "callback_data": "find_days:90"}],
+        ]
+    }
+
+def _log_route(route: str, chat_id: Optional[int], user_id: Optional[int], detail: str = "") -> None:
+    logger.info("route=%s chat_id=%s user_id=%s %s", route, chat_id, user_id, detail)
+
 STATE_NONE = "NONE"
 STATE_WAIT_REVIEW_TEXT = "WAIT_REVIEW_TEXT"
 STATE_WAIT_PLATFORM = "WAIT_PLATFORM"
@@ -1390,6 +1457,9 @@ def background_analyze(chat_id: int, user_id: int, review_text: str, platform_hi
 # Find flow
 # -----------------------------
 def start_add_review(chat_id: int) -> None:
+    if not DB_OK:
+        send_message(chat_id, "DB disabled. Проверь DATABASE_URL или /diag.")
+        return
     _reset_state(chat_id)
     db_set_session(chat_id, STATE_WAIT_REVIEW_TEXT, {})
     send_message(chat_id, "Вставь текст отзыва одним сообщением и отправь.\n(Если передумал — напиши /cancel)")
@@ -1455,10 +1525,12 @@ def build_csv_export(rows: List[dict]) -> bytes:
         ])
     return output.getvalue().encode("utf-8")
 
-def diag_text() -> str:
+def diag_text(current_user_id: Optional[int] = None) -> str:
     engine = _current_engine()
     prompt_mode = (os.getenv("CX_PROMPT_MODE") or CX_PROMPT_MODE).strip().lower()
     base_url = DEEPSEEK_BASE_URL if engine == "deepseek" else None
+    is_admin_current = _is_admin(current_user_id) if current_user_id is not None else None
+    allowlist_empty = "yes" if not ADMIN_CHAT_IDS else "no"
     return (
         "Самодиагностика:\n"
         f"- webhook_path: {WEBHOOK_PATH}\n"
@@ -1470,6 +1542,10 @@ def diag_text() -> str:
         f"- gemini_key_set: {'yes' if GEMINI_API_KEY else 'no'}\n"
         f"- db: {'postgres' if DB_OK else 'disabled'}\n"
         f"- openai_sdk: {OPENAI_SDK_AVAILABLE}\n"
+        f"- admin_mode: {ADMIN_MODE}\n"
+        f"- admins_count: {len(ADMIN_CHAT_IDS)}\n"
+        f"- allowlist_empty: {allowlist_empty}\n"
+        f"- is_admin_current_user: {is_admin_current}\n"
     )
 
 # -----------------------------
@@ -1477,7 +1553,6 @@ def diag_text() -> str:
 # -----------------------------
 @app.get("/")
 def health():
-    set_webhook_once()
     return jsonify({
         "ok": True,
         "status": "running",
@@ -1522,77 +1597,624 @@ def cron_weekly():
 @app.post(WEBHOOK_PATH)
 def telegram_webhook():
     update = request.get_json(silent=True) or {}
-    logger.info("Update: %s", _redact(json.dumps(update, ensure_ascii=False)[:1200]))
+    update_id = update.get("update_id")
+    chat_id = None
+    user_id = None
 
-    # callback
-    if "callback_query" in update:
-        cq = update["callback_query"]
-        cq_id = cq.get("id", "")
-        msg = cq.get("message") or {}
-        chat = msg.get("chat") or {}
-        chat_id = chat.get("id")
-        user = cq.get("from") or {}
-        user_id = user.get("id")
-        data = (cq.get("data") or "").strip()
+    try:
+        logger.info("Update: %s", _redact(json.dumps(update, ensure_ascii=False)[:1200]))
 
-        if not _is_admin(user_id, chat_id):
-            if chat_id:
-                send_message(chat_id, "⛔ Доступ запрещён. Обратитесь к администратору.")
-            if cq_id:
-                answer_callback_query(cq_id, "Доступ запрещён", show_alert=True)
+        # callback
+        if "callback_query" in update:
+            cq = update["callback_query"]
+            cq_id = cq.get("id", "")
+            msg = cq.get("message") or {}
+            chat = msg.get("chat") or {}
+            chat_id = chat.get("id")
+            user = cq.get("from") or {}
+            user_id = user.get("id")
+            data = (cq.get("data") or "").strip()
+            sess = _get_active_session(chat_id) if chat_id else None
+            logger.info(
+                "Trace callback: update_id=%s chat_id=%s user_id=%s data=%r session_state=%s",
+                update_id,
+                chat_id,
+                user_id,
+                data,
+                sess.get("state") if sess else None,
+            )
+
+            if not _is_admin(user_id, chat_id):
+                _log_route("blocked_callback", chat_id, user_id)
+                if chat_id:
+                    send_message(chat_id, "⛔ Доступ запрещён. Обратитесь к администратору.")
+                if cq_id:
+                    answer_callback_query(cq_id, "Доступ запрещён", show_alert=True)
+                return "ok"
+
+            if data.startswith("settings:engine"):
+                _log_route("settings_engine", chat_id, user_id)
+                send_message(chat_id, "Выберите движок ИИ:", reply_markup=engine_keyboard())
+                answer_callback_query(cq_id, "OK")
+                return "ok"
+
+            if data.startswith("settings:context"):
+                _log_route("settings_context", chat_id, user_id)
+                if chat_id:
+                    db_set_session(chat_id, STATE_WAIT_CONTEXT, {})
+                    send_message(chat_id, "Пришли новый бизнес-контекст одним сообщением.")
+                answer_callback_query(cq_id, "OK")
+                return "ok"
+
+            if data.startswith("setengine:"):
+                engine = data.split(":", 1)[1].strip().lower()
+                _log_route(f"setengine:{engine}", chat_id, user_id)
+                if engine in ("deepseek", "openai", "gemini"):
+                    db_set_setting("ai_engine_override", {"value": engine})
+                    send_message(chat_id, f"Движок обновлён: {engine}")
+                else:
+                    send_message(chat_id, "Неизвестный движок.")
+                answer_callback_query(cq_id, "OK")
+                return "ok"
+
+            if data.startswith("platform:"):
+                platform = data.split(":", 1)[1]
+                _log_route(f"platform:{platform}", chat_id, user_id)
+                if not chat_id:
+                    return "ok"
+                payload = (sess or {}).get("payload") or {}
+                payload["platform"] = platform
+                db_set_session(chat_id, STATE_WAIT_RATING, payload)
+                send_message(chat_id, "Оцени отзыв:", reply_markup=rating_keyboard())
+                answer_callback_query(cq_id, "OK")
+                return "ok"
+
+            if data.startswith("rating:"):
+                rating_val = data.split(":", 1)[1]
+                _log_route(f"rating:{rating_val}", chat_id, user_id)
+                if not chat_id:
+                    return "ok"
+                payload = (sess or {}).get("payload") or {}
+                review_text = (payload.get("review_text") or "").strip()
+                if not review_text:
+                    send_message(chat_id, "Текст отзыва не найден. Начни заново: /addreview")
+                    _reset_state(chat_id)
+                    return "ok"
+                try:
+                    rating = int(rating_val)
+                except Exception:
+                    send_message(chat_id, "Некорректный рейтинг. Попробуй снова.")
+                    return "ok"
+                review_hash = payload.get("review_hash") or _hash_review(review_text)
+                review_id = db_insert_review(
+                    source="manual",
+                    rating=rating,
+                    review_text=review_text,
+                    meta=payload.get("meta") or {},
+                    platform=payload.get("platform"),
+                    review_hash=review_hash,
+                )
+                _reset_state(chat_id)
+                if review_id:
+                    send_message(
+                        chat_id,
+                        f"✅ Отзыв добавлен. Номер: #{review_id}",
+                        reply_markup={"inline_keyboard": [[{"text": "🧠 Проанализировать", "callback_data": f"analyze_review:{review_id}"}]]},
+                    )
+                else:
+                    send_message(chat_id, "❌ Не удалось сохранить отзыв. Проверь /diag.")
+                answer_callback_query(cq_id, "OK")
+                return "ok"
+
+            if data.startswith("dup_confirm:"):
+                decision = data.split(":", 1)[1]
+                _log_route(f"dup_confirm:{decision}", chat_id, user_id)
+                if not chat_id:
+                    return "ok"
+                if decision == "no":
+                    _reset_state(chat_id)
+                    send_message(chat_id, "Ок, дубликат не сохраняем.")
+                    answer_callback_query(cq_id, "OK")
+                    return "ok"
+                payload = (sess or {}).get("payload") or {}
+                db_set_session(chat_id, STATE_WAIT_PLATFORM, payload)
+                send_message(
+                    chat_id,
+                    "Дубликат подтверждён. Выбери площадку:",
+                    reply_markup={"inline_keyboard": [
+                        [{"text": "🟡 Яндекс", "callback_data": "platform:yandex"}],
+                        [{"text": "🟢 2ГИС", "callback_data": "platform:2gis"}],
+                    ]},
+                )
+                answer_callback_query(cq_id, "OK")
+                return "ok"
+
+            if data.startswith("find_platform:"):
+                platform = data.split(":", 1)[1]
+                _log_route(f"find_platform:{platform}", chat_id, user_id)
+                if not chat_id:
+                    return "ok"
+                payload = (sess or {}).get("payload") or {}
+                payload["platform"] = platform
+                db_set_session(chat_id, STATE_FIND_RATING, payload)
+                send_message(chat_id, "Рейтинг:", reply_markup=find_rating_keyboard())
+                answer_callback_query(cq_id, "OK")
+                return "ok"
+
+            if data.startswith("find_rating:"):
+                rating_raw = data.split(":", 1)[1]
+                _log_route(f"find_rating:{rating_raw}", chat_id, user_id)
+                if not chat_id:
+                    return "ok"
+                payload = (sess or {}).get("payload") or {}
+                if rating_raw == "any":
+                    payload["rating"] = None
+                else:
+                    try:
+                        payload["rating"] = int(rating_raw)
+                    except Exception:
+                        payload["rating"] = None
+                db_set_session(chat_id, STATE_FIND_DAYS, payload)
+                send_message(chat_id, "Период:", reply_markup=find_days_keyboard())
+                answer_callback_query(cq_id, "OK")
+                return "ok"
+
+            if data.startswith("find_days:"):
+                days_raw = data.split(":", 1)[1]
+                _log_route(f"find_days:{days_raw}", chat_id, user_id)
+                if not chat_id:
+                    return "ok"
+                payload = (sess or {}).get("payload") or {}
+                try:
+                    payload["days"] = int(days_raw)
+                except Exception:
+                    payload["days"] = 7
+                payload["offset"] = 0
+                db_set_session(chat_id, STATE_FIND_DAYS, payload)
+                send_find_results(chat_id, payload)
+                answer_callback_query(cq_id, "OK")
+                return "ok"
+
+            if data.startswith("find_page:"):
+                action = data.split(":", 1)[1]
+                _log_route(f"find_page:{action}", chat_id, user_id)
+                if not chat_id:
+                    return "ok"
+                payload = (sess or {}).get("payload") or {}
+                offset = int(payload.get("offset") or 0)
+                if action == "next":
+                    offset += 10
+                elif action == "prev":
+                    offset = max(0, offset - 10)
+                payload["offset"] = offset
+                db_set_session(chat_id, STATE_FIND_DAYS, payload)
+                send_find_results(chat_id, payload)
+                answer_callback_query(cq_id, "OK")
+                return "ok"
+
+            if data.startswith("open_review:"):
+                review_id_raw = data.split(":", 1)[1]
+                _log_route(f"open_review:{review_id_raw}", chat_id, user_id)
+                if not chat_id:
+                    return "ok"
+                try:
+                    review_id = int(review_id_raw)
+                except Exception:
+                    send_message(chat_id, "Некорректный ID.")
+                    return "ok"
+                review = db_get_review(review_id)
+                if not review:
+                    send_message(chat_id, "Отзыв не найден.")
+                    return "ok"
+                send_message(
+                    chat_id,
+                    f"#{review['id']} | {review.get('platform') or '-'} | ⭐{review.get('rating') or '-'}\n{review.get('review_text') or ''}",
+                )
+                answer_callback_query(cq_id, "OK")
+                return "ok"
+
+            if data.startswith("analyze_review:"):
+                review_id_raw = data.split(":", 1)[1]
+                _log_route(f"analyze_review:{review_id_raw}", chat_id, user_id)
+                if not chat_id:
+                    return "ok"
+                try:
+                    review_id = int(review_id_raw)
+                except Exception:
+                    send_message(chat_id, "Некорректный ID.")
+                    return "ok"
+                review = db_get_review(review_id)
+                if not review:
+                    send_message(chat_id, "Отзыв не найден.")
+                    return "ok"
+                threading.Thread(
+                    target=background_analyze,
+                    args=(chat_id, user_id, review.get("review_text") or "", review.get("platform") or "unknown", review.get("rating"), review_id),
+                    daemon=True,
+                ).start()
+                send_message(chat_id, "⏳ Анализ запущен, подожди пару секунд…")
+                answer_callback_query(cq_id, "OK")
+                return "ok"
+
+            if data.startswith("reanalyze_review:"):
+                review_id_raw = data.split(":", 1)[1]
+                _log_route(f"reanalyze_review:{review_id_raw}", chat_id, user_id)
+                if not chat_id:
+                    return "ok"
+                try:
+                    review_id = int(review_id_raw)
+                except Exception:
+                    send_message(chat_id, "Некорректный ID.")
+                    return "ok"
+                review = db_get_review(review_id)
+                if not review:
+                    send_message(chat_id, "Отзыв не найден.")
+                    return "ok"
+                threading.Thread(
+                    target=background_analyze,
+                    args=(chat_id, user_id, review.get("review_text") or "", review.get("platform") or "unknown", review.get("rating"), review_id),
+                    daemon=True,
+                ).start()
+                send_message(chat_id, "🔄 Пересчёт запущен.")
+                answer_callback_query(cq_id, "OK")
+                return "ok"
+
+            if data.startswith(("reply:", "complaint:", "both:", "json:")):
+                _log_route(f"analysis_action:{data}", chat_id, user_id)
+                if not chat_id:
+                    return "ok"
+                action, analysis_id_raw = data.split(":", 1)
+                try:
+                    analysis_id = int(analysis_id_raw)
+                except Exception:
+                    send_message(chat_id, "Некорректный ID анализа.")
+                    return "ok"
+                analysis = db_get_analysis(analysis_id)
+                if not analysis:
+                    send_message(chat_id, "Анализ не найден.")
+                    return "ok"
+                result_json = analysis.get("result_json") or {}
+                public_reply = (result_json.get("public_reply") or {}).get("text")
+                complaint = (result_json.get("complaint") or {}).get("text")
+                if action == "reply":
+                    send_message(chat_id, public_reply or "Ответ не найден.")
+                elif action == "complaint":
+                    send_message(chat_id, complaint or "Жалоба не найдена.")
+                elif action == "both":
+                    send_message(chat_id, f"Ответ:\n{public_reply or '-'}\n\nЖалоба:\n{complaint or '-'}")
+                else:
+                    send_message(chat_id, json.dumps(result_json, ensure_ascii=False)[:3500])
+                answer_callback_query(cq_id, "OK")
+                return "ok"
+
+            answer_callback_query(cq_id, "OK")
             return "ok"
 
-        # Your original handle_callback is large; keep it as-is in your project.
-        # Here we only return OK to keep this file runnable.
-        answer_callback_query(cq_id, "OK")
-        return "ok"
-
-    message = update.get("message") or {}
-    chat = message.get("chat") or {}
-    chat_id = chat.get("id")
-    user = message.get("from") or {}
-    user_id = user.get("id")
-    text = (message.get("text") or "").strip()
-
-    logger.info("Parsed: chat_id=%s user_id=%s text=%r", chat_id, user_id, text[:220])
-
-    if not chat_id or not user_id:
-        return "ok"
-    if not _is_admin(user_id, chat_id):
-        send_message(chat_id, "⛔ Доступ запрещён. Обратитесь к администратору.")
-        return "ok"
-
-    # Minimal demo routes; keep your full command logic in your repo.
-    if text.startswith("/start"):
-        send_message(chat_id, "OK", reply_markup=main_menu_keyboard())
-        return "ok"
-
-    if text == "🛠 Самодиагностика":
-        send_message(chat_id, diag_text())
-        return "ok"
-
-    if text == "➕ Добавить отзыв":
-        start_add_review(chat_id)
-        return "ok"
-
-    # state example: expecting review text
-    sess = _get_active_session(chat_id)
-    if sess and sess.get("state") == STATE_WAIT_REVIEW_TEXT:
-        payload = sess.get("payload") or {}
-        payload["review_text"] = text
-        payload["added_by"] = user_id
-        db_set_session(chat_id, STATE_WAIT_PLATFORM, payload)
-        send_message(
+        message = update.get("message") or {}
+        chat = message.get("chat") or {}
+        chat_id = chat.get("id")
+        user = message.get("from") or {}
+        user_id = user.get("id")
+        text = message.get("text")
+        text = text if isinstance(text, str) else ""
+        text_clean = text.strip()
+        sess = _get_active_session(chat_id) if chat_id else None
+        logger.info(
+            "Trace message: update_id=%s chat_id=%s user_id=%s text=%r len=%s session_state=%s",
+            update_id,
             chat_id,
-            "Выбери площадку:",
-            reply_markup={"inline_keyboard": [
-                [{"text": "🟡 Яндекс", "callback_data": "platform:yandex"}],
-                [{"text": "🟢 2ГИС", "callback_data": "platform:2gis"}],
-            ]},
+            user_id,
+            text_clean,
+            len(text_clean),
+            sess.get("state") if sess else None,
         )
+
+        if not chat_id or not user_id:
+            return "ok"
+        if not _is_admin(user_id, chat_id):
+            _log_route("blocked_message", chat_id, user_id)
+            send_message(chat_id, "⛔ Доступ запрещён. Обратитесь к администратору.")
+            return "ok"
+
+        cmd_token = text_clean.split()[0] if text_clean else ""
+        cmd = cmd_token.split("@")[0].lower() if cmd_token.startswith("/") else ""
+        cmd_args = text_clean[len(cmd_token):].strip() if cmd_token else ""
+
+        if cmd == "/start":
+            _log_route("start", chat_id, user_id)
+            _reset_state(chat_id)
+            name = _display_name(user)
+            send_message(
+                chat_id,
+                f"Привет, {name}! Выбери действие в меню ниже.",
+                reply_markup=main_menu_keyboard(),
+            )
+            return "ok"
+
+        if cmd == "/help":
+            _log_route("help", chat_id, user_id)
+            send_message(chat_id, HELP_TEXT)
+            return "ok"
+
+        if cmd == "/myid":
+            _log_route("myid", chat_id, user_id)
+            send_message(chat_id, f"Ваш ID: {user_id}")
+            return "ok"
+
+        if cmd == "/diag":
+            _log_route("diag", chat_id, user_id)
+            send_message(chat_id, diag_text(user_id))
+            return "ok"
+
+        if cmd == "/cancel":
+            _log_route("cancel", chat_id, user_id)
+            _reset_state(chat_id)
+            send_message(chat_id, "Состояние сброшено.")
+            return "ok"
+
+        if cmd == "/engine":
+            _log_route("engine", chat_id, user_id)
+            send_message(chat_id, f"Текущий движок: {_current_engine()}")
+            return "ok"
+
+        if cmd == "/setengine":
+            _log_route("setengine", chat_id, user_id)
+            send_message(chat_id, "Выберите движок ИИ:", reply_markup=engine_keyboard())
+            return "ok"
+
+        if cmd == "/setcontext":
+            _log_route("setcontext", chat_id, user_id)
+            db_set_session(chat_id, STATE_WAIT_CONTEXT, {})
+            send_message(chat_id, "Пришли новый бизнес-контекст одним сообщением.")
+            return "ok"
+
+        if cmd == "/addreview":
+            _log_route("addreview", chat_id, user_id)
+            start_add_review(chat_id)
+            return "ok"
+
+        if cmd == "/find":
+            _log_route("find", chat_id, user_id)
+            if not DB_OK:
+                send_message(chat_id, "DB disabled. Проверь DATABASE_URL или /diag.")
+                return "ok"
+            start_find_flow(chat_id)
+            return "ok"
+
+        if cmd == "/weeklyreport":
+            _log_route("weeklyreport", chat_id, user_id)
+            if not DB_OK:
+                send_message(chat_id, "DB disabled. Проверь DATABASE_URL или /diag.")
+                return "ok"
+            report = db_weekly_summary()
+            if not report.get("ok"):
+                send_message(chat_id, f"❌ {report.get('error')}")
+                return "ok"
+            avg_rating = report.get("avg_rating")
+            sentiments = report.get("sentiments") or {}
+            msg = (
+                f"Недельный отчёт ({report.get('days')} дн.):\n"
+                f"- всего анализов: {report.get('total')}\n"
+                f"- с ошибкой: {report.get('with_error')}\n"
+                f"- средний рейтинг: {avg_rating if avg_rating is not None else 'n/a'}\n"
+                f"- тональности: {sentiments}\n"
+            )
+            send_message(chat_id, msg)
+            return "ok"
+
+        if cmd == "/exportcsv":
+            _log_route("exportcsv", chat_id, user_id)
+            if not DB_OK:
+                send_message(chat_id, "DB disabled. Проверь DATABASE_URL или /diag.")
+                return "ok"
+            rows = db_export_reviews()
+            if not rows:
+                send_message(chat_id, "Нет данных для экспорта.")
+                return "ok"
+            send_document(chat_id, "reviews_export.csv", build_csv_export(rows))
+            return "ok"
+
+        if cmd == "/review":
+            _log_route("review", chat_id, user_id)
+            try:
+                review_id = int(cmd_args.split()[0])
+            except Exception:
+                send_message(chat_id, "Укажи ID отзыва: /review 123")
+                return "ok"
+            review = db_get_review(review_id)
+            if not review:
+                send_message(chat_id, "Отзыв не найден.")
+                return "ok"
+            send_message(
+                chat_id,
+                f"#{review['id']} | {review.get('platform') or '-'} | ⭐{review.get('rating') or '-'}\n{review.get('review_text') or ''}",
+            )
+            return "ok"
+
+        if cmd == "/analyze":
+            _log_route("analyze", chat_id, user_id)
+            if not DB_OK:
+                send_message(chat_id, "DB disabled. Проверь DATABASE_URL или /diag.")
+                return "ok"
+            review_text = cmd_args
+            if not review_text:
+                send_message(chat_id, "Укажи текст: /analyze <текст>")
+                return "ok"
+            threading.Thread(
+                target=background_analyze,
+                args=(chat_id, user_id, review_text, "unknown", None, None),
+                daemon=True,
+            ).start()
+            send_message(chat_id, "⏳ Анализ запущен, подожди пару секунд…")
+            return "ok"
+
+        if cmd == "/analyzereview":
+            _log_route("analyzereview", chat_id, user_id)
+            if not DB_OK:
+                send_message(chat_id, "DB disabled. Проверь DATABASE_URL или /diag.")
+                return "ok"
+            try:
+                review_id = int(cmd_args.split()[0])
+            except Exception:
+                send_message(chat_id, "Укажи ID: /analyzereview 123")
+                return "ok"
+            review = db_get_review(review_id)
+            if not review:
+                send_message(chat_id, "Отзыв не найден.")
+                return "ok"
+            threading.Thread(
+                target=background_analyze,
+                args=(chat_id, user_id, review.get("review_text") or "", review.get("platform") or "unknown", review.get("rating"), review_id),
+                daemon=True,
+            ).start()
+            send_message(chat_id, "⏳ Анализ запущен, подожди пару секунд…")
+            return "ok"
+
+        if text_clean == "📘 Инструкция":
+            _log_route("menu_instruction", chat_id, user_id)
+            send_message(chat_id, INSTRUCTION_TEXT, parse_mode="Markdown")
+            return "ok"
+        if text_clean == "📋 Список команд":
+            _log_route("menu_help", chat_id, user_id)
+            send_message(chat_id, HELP_TEXT)
+            return "ok"
+        if text_clean == "🆔 Мой ID":
+            _log_route("menu_myid", chat_id, user_id)
+            send_message(chat_id, f"Ваш ID: {user_id}")
+            return "ok"
+        if text_clean == "🛠 Самодиагностика":
+            _log_route("menu_diag", chat_id, user_id)
+            send_message(chat_id, diag_text(user_id))
+            return "ok"
+        if text_clean == "➕ Добавить отзыв":
+            _log_route("menu_addreview", chat_id, user_id)
+            start_add_review(chat_id)
+            return "ok"
+        if text_clean == "🧠 Анализ по ID":
+            _log_route("menu_analyze_id", chat_id, user_id)
+            db_set_session(chat_id, STATE_WAIT_ANALYZE_ID, {})
+            send_message(chat_id, "Введи ID отзыва для анализа.")
+            return "ok"
+        if text_clean == "🔍 Поиск отзывов":
+            _log_route("menu_find", chat_id, user_id)
+            if not DB_OK:
+                send_message(chat_id, "DB disabled. Проверь DATABASE_URL или /diag.")
+                return "ok"
+            start_find_flow(chat_id)
+            return "ok"
+        if text_clean == "📊 Недельный отчёт":
+            _log_route("menu_weekly", chat_id, user_id)
+            if not DB_OK:
+                send_message(chat_id, "DB disabled. Проверь DATABASE_URL или /diag.")
+                return "ok"
+            report = db_weekly_summary()
+            if not report.get("ok"):
+                send_message(chat_id, f"❌ {report.get('error')}")
+                return "ok"
+            avg_rating = report.get("avg_rating")
+            sentiments = report.get("sentiments") or {}
+            msg = (
+                f"Недельный отчёт ({report.get('days')} дн.):\n"
+                f"- всего анализов: {report.get('total')}\n"
+                f"- с ошибкой: {report.get('with_error')}\n"
+                f"- средний рейтинг: {avg_rating if avg_rating is not None else 'n/a'}\n"
+                f"- тональности: {sentiments}\n"
+            )
+            send_message(chat_id, msg)
+            return "ok"
+        if text_clean == "📤 Экспорт CSV":
+            _log_route("menu_export", chat_id, user_id)
+            if not DB_OK:
+                send_message(chat_id, "DB disabled. Проверь DATABASE_URL или /diag.")
+                return "ok"
+            rows = db_export_reviews()
+            if not rows:
+                send_message(chat_id, "Нет данных для экспорта.")
+                return "ok"
+            send_document(chat_id, "reviews_export.csv", build_csv_export(rows))
+            return "ok"
+        if text_clean == "⚙️ Настройки":
+            _log_route("menu_settings", chat_id, user_id)
+            send_message(chat_id, "Настройки:", reply_markup=settings_keyboard())
+            return "ok"
+
+        if sess and sess.get("state") == STATE_WAIT_REVIEW_TEXT:
+            _log_route("state_wait_review_text", chat_id, user_id)
+            if not text_clean:
+                send_message(chat_id, "Текст пустой. Пришли отзыв одним сообщением.")
+                return "ok"
+            review_text = text_clean
+            review_hash = _hash_review(review_text)
+            payload = sess.get("payload") or {}
+            payload["review_text"] = review_text
+            payload["review_hash"] = review_hash
+            payload["added_by"] = user_id
+            duplicate = db_find_duplicate_review(review_hash) if DB_OK else None
+            if duplicate:
+                db_set_session(chat_id, STATE_WAIT_DUP_CONFIRM, payload)
+                send_message(
+                    chat_id,
+                    f"⚠️ Найден дубликат #{duplicate['id']} от {duplicate['created_at'][:10]}. Сохранить всё равно?",
+                    reply_markup={"inline_keyboard": [
+                        [{"text": "Да, сохранить", "callback_data": "dup_confirm:yes"}],
+                        [{"text": "Нет", "callback_data": "dup_confirm:no"}],
+                    ]},
+                )
+                return "ok"
+            db_set_session(chat_id, STATE_WAIT_PLATFORM, payload)
+            send_message(
+                chat_id,
+                "Выбери площадку:",
+                reply_markup={"inline_keyboard": [
+                    [{"text": "🟡 Яндекс", "callback_data": "platform:yandex"}],
+                    [{"text": "🟢 2ГИС", "callback_data": "platform:2gis"}],
+                ]},
+            )
+            return "ok"
+
+        if sess and sess.get("state") == STATE_WAIT_ANALYZE_ID:
+            _log_route("state_wait_analyze_id", chat_id, user_id)
+            try:
+                review_id = int(re.findall(r"\d+", text_clean)[0])
+            except Exception:
+                send_message(chat_id, "Укажи числовой ID отзыва.")
+                return "ok"
+            review = db_get_review(review_id)
+            if not review:
+                send_message(chat_id, "Отзыв не найден.")
+                return "ok"
+            threading.Thread(
+                target=background_analyze,
+                args=(chat_id, user_id, review.get("review_text") or "", review.get("platform") or "unknown", review.get("rating"), review_id),
+                daemon=True,
+            ).start()
+            _reset_state(chat_id)
+            send_message(chat_id, "⏳ Анализ запущен, подожди пару секунд…")
+            return "ok"
+
+        if sess and sess.get("state") == STATE_WAIT_CONTEXT:
+            _log_route("state_wait_context", chat_id, user_id)
+            db_set_setting("business_context", {"value": text_clean})
+            _reset_state(chat_id)
+            send_message(chat_id, "Бизнес-контекст обновлён.")
+            return "ok"
+
+        if sess and sess.get("state") in (STATE_WAIT_PLATFORM, STATE_WAIT_RATING, STATE_WAIT_DUP_CONFIRM, STATE_FIND_PLATFORM, STATE_FIND_RATING, STATE_FIND_DAYS):
+            _log_route(f"state_pending_buttons:{sess.get('state')}", chat_id, user_id)
+            send_message(chat_id, "Используй кнопки под сообщением или /cancel.")
+            return "ok"
+
+        _log_route("fallback", chat_id, user_id)
+        if text_clean:
+            send_message(chat_id, "Не понимаю команду. Открой меню или /help.")
         return "ok"
 
-    return "ok"
+    except Exception:
+        logger.exception("telegram_webhook exception")
+        if chat_id and _is_admin(user_id, chat_id):
+            send_message(chat_id, "⚠️ Ошибка обработки. См. /diag")
+        notify_admins("⚠️ Ошибка обработки. См. /diag")
+        return "ok"
 
 # -----------------------------
 # Startup
