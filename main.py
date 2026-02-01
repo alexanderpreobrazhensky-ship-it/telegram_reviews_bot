@@ -83,13 +83,13 @@ if ADMIN_CHAT_IDS:
 else:
     logger.warning("Admins parsed: count=0 (REPORT_CHAT_IDS is empty or invalid)")
 
-OWNER_CHAT_ID_RAW = (os.getenv("OWNER_CHAT_ID") or "").strip()
-OWNER_CHAT_ID = int(OWNER_CHAT_ID_RAW) if OWNER_CHAT_ID_RAW.isdigit() else None
-if OWNER_CHAT_ID is None and ADMIN_CHAT_IDS:
-    OWNER_CHAT_ID = ADMIN_CHAT_IDS[0]
-    logger.warning("OWNER_CHAT_ID not set. Using REPORT_CHAT_IDS fallback=%s", OWNER_CHAT_ID)
-if OWNER_CHAT_ID is None:
-    logger.critical("OWNER_CHAT_ID not set and REPORT_CHAT_IDS empty. Bot starts in closed mode.")
+SUPERADMIN_ID_RAW = (os.getenv("SUPERADMIN_ID") or "").strip()
+SUPERADMIN_ID = int(SUPERADMIN_ID_RAW) if SUPERADMIN_ID_RAW.isdigit() else None
+if SUPERADMIN_ID is None and ADMIN_CHAT_IDS:
+    SUPERADMIN_ID = ADMIN_CHAT_IDS[0]
+    logger.warning("SUPERADMIN_ID not set. Using REPORT_CHAT_IDS fallback=%s", SUPERADMIN_ID)
+if SUPERADMIN_ID is None:
+    logger.critical("SUPERADMIN_ID not set and REPORT_CHAT_IDS empty. Bot starts in closed mode.")
 
 DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("DATABASE_PUBLIC_URL") or os.getenv("DATABASE_URL_INTERNAL")
 
@@ -183,16 +183,12 @@ def send_document(chat_id: int, filename: str, content: bytes) -> None:
 def get_user_role(user_id: Optional[int]) -> str:
     if user_id is None:
         return "none"
-    if OWNER_CHAT_ID is not None and user_id == OWNER_CHAT_ID:
+    if SUPERADMIN_ID is not None and user_id == SUPERADMIN_ID:
         return "owner"
     if not DB_OK:
-        if ADMIN_CHAT_IDS and user_id in ADMIN_CHAT_IDS:
-            return "staff"
         return "none"
     conn = _db_connect()
     if not conn:
-        if ADMIN_CHAT_IDS and user_id in ADMIN_CHAT_IDS:
-            return "staff"
         return "none"
     try:
         with conn.cursor() as cur:
@@ -217,7 +213,7 @@ def get_user_role(user_id: Optional[int]) -> str:
             pass
 
 def can_use_bot(user_id: Optional[int]) -> bool:
-    return get_user_role(user_id) in ("owner", "staff")
+    return get_user_role(user_id) in ("owner", "staff", "user")
 
 def can_manage_access(user_id: Optional[int]) -> bool:
     return get_user_role(user_id) == "owner"
@@ -274,6 +270,8 @@ DB_ACCESS_HAS_USER_ID = False
 DB_ACCESS_HAS_CHAT_ID = False
 DB_ACCESS_HAS_IS_ACTIVE = False
 DB_ACCESS_HAS_NOTE = False
+DB_ACCESS_HAS_CREATED_AT = False
+DB_ACCESS_HAS_ADDED_AT = False
 
 def _db_connect():
     global DB_LAST_ERROR
@@ -317,6 +315,7 @@ def _review_text_expr(prefix: str = "") -> str:
 
 def _refresh_access_columns(cur) -> None:
     global DB_ACCESS_HAS_USER_ID, DB_ACCESS_HAS_CHAT_ID, DB_ACCESS_HAS_IS_ACTIVE, DB_ACCESS_HAS_NOTE
+    global DB_ACCESS_HAS_CREATED_AT, DB_ACCESS_HAS_ADDED_AT
     cur.execute(
         """
         SELECT column_name
@@ -329,12 +328,16 @@ def _refresh_access_columns(cur) -> None:
     DB_ACCESS_HAS_CHAT_ID = "chat_id" in cols
     DB_ACCESS_HAS_IS_ACTIVE = "is_active" in cols
     DB_ACCESS_HAS_NOTE = "note" in cols
+    DB_ACCESS_HAS_CREATED_AT = "created_at" in cols
+    DB_ACCESS_HAS_ADDED_AT = "added_at" in cols
     logger.info(
-        "access_users columns: user_id=%s chat_id=%s is_active=%s note=%s",
+        "access_users columns: user_id=%s chat_id=%s is_active=%s note=%s created_at=%s added_at=%s",
         DB_ACCESS_HAS_USER_ID,
         DB_ACCESS_HAS_CHAT_ID,
         DB_ACCESS_HAS_IS_ACTIVE,
         DB_ACCESS_HAS_NOTE,
+        DB_ACCESS_HAS_CREATED_AT,
+        DB_ACCESS_HAS_ADDED_AT,
     )
 
 def _ensure_access_columns(cur) -> None:
@@ -346,6 +349,13 @@ def _access_user_id_column() -> Optional[str]:
         return "user_id"
     if DB_ACCESS_HAS_CHAT_ID:
         return "chat_id"
+    return None
+
+def _access_created_at_column() -> Optional[str]:
+    if DB_ACCESS_HAS_CREATED_AT:
+        return "created_at"
+    if DB_ACCESS_HAS_ADDED_AT:
+        return "added_at"
     return None
 
 def db_init() -> None:
@@ -364,6 +374,20 @@ def db_init() -> None:
 
     try:
         with conn.cursor() as cur:
+            # Required SQL blocks (kept for compatibility and audit):
+            # -- Access list for bot users
+            # CREATE TABLE IF NOT EXISTS access_users (
+            #   user_id BIGINT PRIMARY KEY,
+            #   role TEXT NOT NULL DEFAULT 'user',
+            #   added_by BIGINT,
+            #   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            # );
+            #
+            # -- Optional: helper indexes for reviews
+            # CREATE INDEX IF NOT EXISTS idx_reviews_created_at ON reviews(created_at);
+            # CREATE INDEX IF NOT EXISTS idx_reviews_platform ON reviews(platform);
+            # CREATE INDEX IF NOT EXISTS idx_reviews_review_hash ON reviews(review_hash);
+
             # baseline (minimal tables)
             cur.execute("CREATE TABLE IF NOT EXISTS public.reviews (id BIGSERIAL PRIMARY KEY);")
             cur.execute("CREATE TABLE IF NOT EXISTS public.review_analyses (id BIGSERIAL PRIMARY KEY);")
@@ -411,6 +435,7 @@ def db_init() -> None:
             cur.execute("ALTER TABLE public.reviews ALTER COLUMN text SET NOT NULL;")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_reviews_created_at ON public.reviews(created_at);")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_reviews_review_hash ON public.reviews(review_hash);")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_reviews_platform ON public.reviews(platform);")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_reviews_platform_rating_created ON public.reviews(platform, rating, created_at);")
             _refresh_review_columns(cur)
 
@@ -461,22 +486,21 @@ def db_init() -> None:
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS public.access_users (
                   user_id BIGINT PRIMARY KEY,
-                  role TEXT NOT NULL DEFAULT 'staff',
+                  role TEXT NOT NULL DEFAULT 'user',
                   added_by BIGINT,
-                  note TEXT,
-                  added_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-                  is_active BOOLEAN NOT NULL DEFAULT TRUE
+                  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
                 );
             """)
             cur.execute("ALTER TABLE public.access_users ADD COLUMN IF NOT EXISTS chat_id BIGINT;")
             cur.execute("ALTER TABLE public.access_users ADD COLUMN IF NOT EXISTS user_id BIGINT;")
-            cur.execute("ALTER TABLE public.access_users ADD COLUMN IF NOT EXISTS role TEXT;")
+            cur.execute("ALTER TABLE public.access_users ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'user';")
             cur.execute("ALTER TABLE public.access_users ADD COLUMN IF NOT EXISTS added_by BIGINT;")
             cur.execute("ALTER TABLE public.access_users ADD COLUMN IF NOT EXISTS note TEXT;")
+            cur.execute("ALTER TABLE public.access_users ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT now();")
             cur.execute("ALTER TABLE public.access_users ADD COLUMN IF NOT EXISTS added_at TIMESTAMPTZ NOT NULL DEFAULT now();")
             cur.execute("ALTER TABLE public.access_users ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE;")
-            cur.execute("ALTER TABLE public.access_users ALTER COLUMN role SET DEFAULT 'staff';")
-            cur.execute("UPDATE public.access_users SET role='staff' WHERE role IS NULL;")
+            cur.execute("ALTER TABLE public.access_users ALTER COLUMN role SET DEFAULT 'user';")
+            cur.execute("UPDATE public.access_users SET role='user' WHERE role IS NULL;")
             cur.execute("UPDATE public.access_users SET user_id = chat_id WHERE user_id IS NULL AND chat_id IS NOT NULL;")
             cur.execute("""
                 DO $$
@@ -495,7 +519,7 @@ def db_init() -> None:
             cur.execute("CREATE INDEX IF NOT EXISTS idx_access_users_active ON public.access_users(is_active);")
             _refresh_access_columns(cur)
 
-            if OWNER_CHAT_ID is not None:
+            if SUPERADMIN_ID is not None:
                 user_id_col = _access_user_id_column() or "user_id"
                 cur.execute(
                     f"""
@@ -504,7 +528,7 @@ def db_init() -> None:
                     ON CONFLICT ({user_id_col})
                     DO UPDATE SET role='owner', is_active=TRUE
                     """,
-                    (OWNER_CHAT_ID, OWNER_CHAT_ID),
+                    (SUPERADMIN_ID, SUPERADMIN_ID),
                 )
 
             cur.execute(
@@ -777,6 +801,8 @@ def db_export_reviews(days: int = 30, limit: int = 500) -> List[dict]:
                   r.platform,
                   r.rating,
                   {_review_text_expr("r.")} as review_text,
+                  r.meta->>'source_url' as source_url,
+                  r.meta->>'author_name' as author_name,
                   a.created_at as analysis_created_at,
                   a.result_json
                 FROM reviews r
@@ -790,7 +816,7 @@ def db_export_reviews(days: int = 30, limit: int = 500) -> List[dict]:
             rows = cur.fetchall() or []
             out = []
             for r in rows:
-                result_json = r[6] if isinstance(r[6], dict) else (json.loads(r[6]) if r[6] else {})
+                result_json = r[8] if isinstance(r[8], dict) else (json.loads(r[8]) if r[8] else {})
                 sentiment = result_json.get("sentiment") or {}
                 public_reply = result_json.get("public_reply") or {}
                 complaint = result_json.get("complaint") or {}
@@ -800,7 +826,9 @@ def db_export_reviews(days: int = 30, limit: int = 500) -> List[dict]:
                     "platform": r[2],
                     "rating": r[3],
                     "review_text": r[4],
-                    "analysis_created_at": str(r[5]) if r[5] else None,
+                    "source_url": r[5],
+                    "author_name": r[6],
+                    "analysis_created_at": str(r[7]) if r[7] else None,
                     "sentiment_label": sentiment.get("label"),
                     "sentiment_score": sentiment.get("score"),
                     "public_reply_text": public_reply.get("text") if isinstance(public_reply, dict) else None,
@@ -883,9 +911,17 @@ def db_upsert_access_user(chat_id: int, role: str, added_by: Optional[int], note
             if DB_ACCESS_HAS_IS_ACTIVE:
                 columns.append("is_active")
                 placeholders.append("TRUE")
+            if DB_ACCESS_HAS_CREATED_AT:
+                columns.append("created_at")
+                placeholders.append("now()")
+            if DB_ACCESS_HAS_ADDED_AT:
+                columns.append("added_at")
+                placeholders.append("now()")
             col_list = ", ".join(columns)
             ph_list = ", ".join(placeholders)
-            set_parts = ["role=EXCLUDED.role", "added_by=EXCLUDED.added_by", "added_at=now()"]
+            set_parts = ["role=EXCLUDED.role", "added_by=EXCLUDED.added_by"]
+            if DB_ACCESS_HAS_ADDED_AT:
+                set_parts.append("added_at=now()")
             if DB_ACCESS_HAS_NOTE:
                 set_parts.append("note=EXCLUDED.note")
             if DB_ACCESS_HAS_IS_ACTIVE:
@@ -941,12 +977,13 @@ def db_list_access_users(active_only: bool = True) -> List[dict]:
         with conn.cursor() as cur:
             _ensure_access_columns(cur)
             user_id_col = _access_user_id_column() or "user_id"
+            created_at_col = _access_created_at_column() or "now()"
             note_col = ", note" if DB_ACCESS_HAS_NOTE else ""
             is_active_expr = "is_active" if DB_ACCESS_HAS_IS_ACTIVE else "TRUE as is_active"
             active_clause = " WHERE is_active=true" if active_only and DB_ACCESS_HAS_IS_ACTIVE else ""
             cur.execute(
-                f"SELECT {user_id_col}, role, added_by, added_at, {is_active_expr}{note_col} FROM access_users{active_clause} "
-                f"ORDER BY role DESC, added_at ASC"
+                f"SELECT {user_id_col}, role, added_by, {created_at_col}, {is_active_expr}{note_col} FROM access_users{active_clause} "
+                f"ORDER BY role DESC, {created_at_col} ASC"
             )
             rows = cur.fetchall() or []
             return [
@@ -1384,6 +1421,14 @@ def _get_active_session(chat_id: int) -> Optional[dict]:
 def _hash_review(text: str) -> str:
     return hashlib.sha256(text.strip().encode("utf-8")).hexdigest()
 
+def _guess_platform_from_url(url: str) -> str:
+    lower = url.lower()
+    if "yandex" in lower or "yandex.ru/maps" in lower:
+        return "yandex"
+    if "2gis" in lower or "2gis.ru" in lower or "2gis.com" in lower:
+        return "2gis"
+    return "unknown"
+
 # -----------------------------
 # AI clients
 # -----------------------------
@@ -1582,17 +1627,21 @@ HELP_TEXT = (
 )
 
 INSTRUCTION_TEXT = (
-    f"🤖 Бот настроен под **{SERVICE_NAME}**.\n\n"
+    f"🤖 Бот для **{SERVICE_NAME}**.\n\n"
     "**Как пользоваться (очень просто):**\n\n"
     "1. Нажми **➕ Добавить отзыв**\n"
-    "2. Вставь текст отзыва (как есть) и отправь\n"
-    "3. Выбери площадку (**Яндекс** или **2ГИС**)\n"
-    "4. Выбери рейтинг (⭐1–⭐5)\n"
-    "5. Бот сохранит отзыв и предложит **🧠 Проанализировать**\n"
-    "6. После анализа появятся кнопки:\n"
+    "2. Выбери метод: **✍️ Ручной ввод** или **🔗 По ссылке**\n"
+    "3. Следуй подсказкам бота (площадка, рейтинг, автор, текст)\n"
+    "4. Бот сохранит отзыв и предложит **🧠 Проанализировать**\n"
+    "5. После анализа появятся кнопки:\n"
     "   **✍️ Ответ** — готовый публичный ответ клиенту\n"
     "   **⚠️ Жалоба** — текст жалобы (если отзыв нарушает правила или ⭐1)\n"
     "   **🧾 JSON** — полный результат анализа (для выгрузки/отчётов)\n\n"
+    "**О сервисе 🛠️**\n"
+    f"- {SERVICE_NAME}\n"
+    f"- Адрес: {SERVICE_ADDRESS}\n"
+    f"- Режим работы: {SERVICE_HOURS}\n"
+    f"- Телефоны: {', '.join(SERVICE_PHONES)}\n\n"
     "**Если что-то не работает:** нажми **🛠 Самодиагностика** и пришли результат разработчику."
 )
 
@@ -1686,6 +1735,30 @@ def rating_keyboard(prefix: str = "rating") -> dict:
         rows.append([{"text": f"⭐{rating}", "callback_data": f"{prefix}:{rating}"}])
     return {"inline_keyboard": rows}
 
+def link_rating_keyboard() -> dict:
+    rows = [[{"text": "Не указан", "callback_data": "link_rating:none"}]]
+    for rating in range(5, 0, -1):
+        rows.append([{"text": f"⭐{rating}", "callback_data": f"link_rating:{rating}"}])
+    return {"inline_keyboard": rows}
+
+def review_method_keyboard() -> dict:
+    return {
+        "inline_keyboard": [
+            [{"text": "✍️ Ручной ввод", "callback_data": "review_method:manual"}],
+            [{"text": "🔗 По ссылке", "callback_data": "review_method:link"}],
+            [{"text": "❌ Отмена", "callback_data": "review_method:cancel"}],
+        ]
+    }
+
+def link_platform_keyboard() -> dict:
+    return {
+        "inline_keyboard": [
+            [{"text": "🟡 Яндекс", "callback_data": "link_platform:yandex"}],
+            [{"text": "🟢 2ГИС", "callback_data": "link_platform:2gis"}],
+            [{"text": "❓ Другое", "callback_data": "link_platform:unknown"}],
+        ]
+    }
+
 def find_rating_keyboard() -> dict:
     rows = [[{"text": "Любой", "callback_data": "find_rating:any"}]]
     for rating in range(5, 0, -1):
@@ -1706,6 +1779,12 @@ def _log_route(route: str, chat_id: Optional[int], user_id: Optional[int], detai
 
 STATE_NONE = "NONE"
 STATE_WAIT_REVIEW_TEXT = "WAIT_REVIEW_TEXT"
+STATE_WAIT_REVIEW_METHOD = "WAIT_REVIEW_METHOD"
+STATE_WAIT_REVIEW_LINK = "WAIT_REVIEW_LINK"
+STATE_WAIT_LINK_PLATFORM = "WAIT_LINK_PLATFORM"
+STATE_WAIT_LINK_RATING = "WAIT_LINK_RATING"
+STATE_WAIT_LINK_AUTHOR = "WAIT_LINK_AUTHOR"
+STATE_WAIT_LINK_TEXT = "WAIT_LINK_TEXT"
 STATE_WAIT_PLATFORM = "WAIT_PLATFORM"
 STATE_WAIT_RATING = "WAIT_RATING"
 STATE_WAIT_DUP_CONFIRM = "WAIT_DUP_CONFIRM"
@@ -1752,7 +1831,7 @@ def format_analysis_brief(result_json: dict) -> str:
     return "\n".join(lines)
 
 def notify_admins(text: str) -> None:
-    ids = {OWNER_CHAT_ID} if OWNER_CHAT_ID is not None else set()
+    ids = {SUPERADMIN_ID} if SUPERADMIN_ID is not None else set()
     if DB_OK:
         for user in db_list_access_users(active_only=True):
             if user.get("role") in ("owner", "staff"):
@@ -1855,8 +1934,43 @@ def start_add_review(chat_id: int) -> None:
         send_message(chat_id, "DB disabled. Проверь DATABASE_URL или /diag.")
         return
     _reset_state(chat_id)
-    db_set_session(chat_id, STATE_WAIT_REVIEW_TEXT, {})
-    send_message(chat_id, "Вставь текст отзыва одним сообщением и отправь.\n(Если передумал — напиши /cancel)")
+    db_set_session(chat_id, STATE_WAIT_REVIEW_METHOD, {})
+    send_message(chat_id, "Выберите способ добавления отзыва:", reply_markup=review_method_keyboard())
+
+def _clean_meta(meta: dict) -> dict:
+    return {k: v for k, v in meta.items() if v is not None}
+
+def _manual_meta(payload: dict, user_id: int) -> dict:
+    meta = dict(payload.get("meta") or {})
+    meta.setdefault("added_by", user_id)
+    meta.setdefault("input_method", "manual")
+    return _clean_meta(meta)
+
+def _link_meta(payload: dict) -> dict:
+    meta = {
+        "source_url": payload.get("source_url"),
+        "platform_guess": payload.get("platform_guess"),
+        "author_name": payload.get("author_name"),
+        "rating_source": "user_confirmed",
+        "added_by": payload.get("added_by"),
+        "input_method": "link",
+    }
+    return _clean_meta(meta)
+
+def _insert_link_review(payload: dict) -> Optional[int]:
+    review_text = (payload.get("review_text") or "").strip()
+    if not review_text:
+        return None
+    review_hash = payload.get("review_hash") or _hash_review(review_text)
+    platform = payload.get("platform") or payload.get("platform_guess") or "unknown"
+    return db_insert_review(
+        source="link",
+        rating=payload.get("rating"),
+        review_text=review_text,
+        meta=_link_meta(payload),
+        platform=platform,
+        review_hash=review_hash,
+    )
 
 def start_find_flow(chat_id: int) -> None:
     _reset_state(chat_id)
@@ -1900,6 +2014,7 @@ def build_csv_export(rows: List[dict]) -> bytes:
     writer = csv.writer(output)
     writer.writerow([
         "id", "created_at", "platform", "rating", "review_text",
+        "source_url", "author_name",
         "analysis_created_at", "sentiment_label", "sentiment_score",
         "public_reply_text", "complaint_needed", "complaint_text",
     ])
@@ -1910,6 +2025,8 @@ def build_csv_export(rows: List[dict]) -> bytes:
             row.get("platform"),
             row.get("rating"),
             row.get("review_text"),
+            row.get("source_url"),
+            row.get("author_name"),
             row.get("analysis_created_at"),
             row.get("sentiment_label"),
             row.get("sentiment_score"),
@@ -1945,7 +2062,7 @@ def diag_text(current_user_id: Optional[int] = None) -> str:
         f"- allowlist_empty: {allowlist_empty}\n"
         f"- role_current_user: {role_current}\n"
         f"- access_users_count_active: {access_count}\n"
-        f"- owner_chat_id_detected: {OWNER_CHAT_ID}\n"
+        f"- owner_chat_id_detected: {SUPERADMIN_ID}\n"
         f"- ui_labels_version: {UI_VERSION}\n"
         f"- reviews.text_exists: {review_text_col}\n"
         f"- reviews.review_text_exists: {review_review_text_col}\n"
@@ -2071,6 +2188,29 @@ def telegram_webhook():
                 answer_callback_query(cq_id, "OK")
                 return "ok"
 
+            if data.startswith("review_method:"):
+                method = data.split(":", 1)[1]
+                _log_route(f"review_method:{method}", chat_id, user_id)
+                if not chat_id:
+                    return "ok"
+                if method == "cancel":
+                    _reset_state(chat_id)
+                    send_message(chat_id, "Ок, отменено.")
+                    answer_callback_query(cq_id, "OK")
+                    return "ok"
+                payload = {"flow": method, "added_by": user_id}
+                if method == "manual":
+                    payload["meta"] = {"added_by": user_id, "input_method": "manual"}
+                    db_set_session(chat_id, STATE_WAIT_REVIEW_TEXT, payload)
+                    send_message(chat_id, "Вставь текст отзыва одним сообщением и отправь.\n(Если передумал — напиши /cancel)")
+                    answer_callback_query(cq_id, "OK")
+                    return "ok"
+                if method == "link":
+                    db_set_session(chat_id, STATE_WAIT_REVIEW_LINK, payload)
+                    send_message(chat_id, "Вставь ссылку на отзыв одним сообщением.")
+                    answer_callback_query(cq_id, "OK")
+                    return "ok"
+
             if data.startswith("access:"):
                 action = data.split(":", 1)[1]
                 _log_route(f"access:{action}", chat_id, user_id)
@@ -2143,7 +2283,7 @@ def telegram_webhook():
                     send_message(chat_id, "Некорректный ID.")
                     answer_callback_query(cq_id, "OK")
                     return "ok"
-                if OWNER_CHAT_ID is not None and target_id == OWNER_CHAT_ID:
+                if SUPERADMIN_ID is not None and target_id == SUPERADMIN_ID:
                     send_message(chat_id, "Нельзя удалить владельца.")
                     answer_callback_query(cq_id, "OK")
                     return "ok"
@@ -2155,6 +2295,36 @@ def telegram_webhook():
                 _reset_state(chat_id)
                 logger.info("access_remove: owner=%s target=%s", user_id, target_id)
                 send_message(chat_id, f"✅ Пользователь {target_id} отключён.")
+                answer_callback_query(cq_id, "OK")
+                return "ok"
+
+            if data.startswith("link_platform:"):
+                platform = data.split(":", 1)[1]
+                _log_route(f"link_platform:{platform}", chat_id, user_id)
+                if not chat_id:
+                    return "ok"
+                payload = (sess or {}).get("payload") or {}
+                payload["platform"] = platform
+                db_set_session(chat_id, STATE_WAIT_LINK_RATING, payload)
+                send_message(chat_id, "Укажи рейтинг:", reply_markup=link_rating_keyboard())
+                answer_callback_query(cq_id, "OK")
+                return "ok"
+
+            if data.startswith("link_rating:"):
+                rating_raw = data.split(":", 1)[1]
+                _log_route(f"link_rating:{rating_raw}", chat_id, user_id)
+                if not chat_id:
+                    return "ok"
+                payload = (sess or {}).get("payload") or {}
+                if rating_raw == "none":
+                    payload["rating"] = None
+                else:
+                    try:
+                        payload["rating"] = int(rating_raw)
+                    except Exception:
+                        payload["rating"] = None
+                db_set_session(chat_id, STATE_WAIT_LINK_AUTHOR, payload)
+                send_message(chat_id, "Укажи автора (например: инкогнито 1234).")
                 answer_callback_query(cq_id, "OK")
                 return "ok"
 
@@ -2191,7 +2361,7 @@ def telegram_webhook():
                     source="manual",
                     rating=rating,
                     review_text=review_text,
-                    meta=payload.get("meta") or {},
+                    meta=_manual_meta(payload, user_id),
                     platform=payload.get("platform"),
                     review_hash=review_hash,
                 )
@@ -2218,6 +2388,19 @@ def telegram_webhook():
                     answer_callback_query(cq_id, "OK")
                     return "ok"
                 payload = (sess or {}).get("payload") or {}
+                if payload.get("flow") == "link":
+                    review_id = _insert_link_review(payload)
+                    _reset_state(chat_id)
+                    if review_id:
+                        send_message(
+                            chat_id,
+                            f"✅ Отзыв добавлен. Номер: #{review_id}",
+                            reply_markup={"inline_keyboard": [[{"text": "🧠 Проанализировать", "callback_data": f"analyze_review:{review_id}"}]]},
+                        )
+                    else:
+                        send_message(chat_id, "❌ Не удалось сохранить отзыв в БД. Проверь DATABASE_URL, миграции и /diag.")
+                    answer_callback_query(cq_id, "OK")
+                    return "ok"
                 db_set_session(chat_id, STATE_WAIT_PLATFORM, payload)
                 send_message(
                     chat_id,
@@ -2418,9 +2601,85 @@ def telegram_webhook():
             send_message(chat_id, "⛔ Доступ запрещён. Обратитесь к администратору.")
             return "ok"
 
+        if text_clean == "OK":
+            _log_route("ignore_ok", chat_id, user_id)
+            return "ok"
+
         cmd_token = text_clean.split()[0] if text_clean else ""
         cmd = cmd_token.split("@")[0].lower() if cmd_token.startswith("/") else ""
         cmd_args = text_clean[len(cmd_token):].strip() if cmd_token else ""
+
+        if _matches_label("instruction", text_clean, text_norm):
+            _log_route("menu_instruction", chat_id, user_id)
+            send_message(chat_id, INSTRUCTION_TEXT, parse_mode="Markdown")
+            return "ok"
+        if _matches_label("help", text_clean, text_norm):
+            _log_route("menu_help", chat_id, user_id)
+            send_message(chat_id, HELP_TEXT)
+            return "ok"
+        if _matches_label("myid", text_clean, text_norm):
+            _log_route("menu_myid", chat_id, user_id)
+            send_message(chat_id, f"Ваш ID: {user_id}")
+            return "ok"
+        if _matches_label("diag", text_clean, text_norm):
+            _log_route("menu_diag", chat_id, user_id)
+            send_message(chat_id, diag_text(user_id))
+            return "ok"
+        if _matches_label("add_review", text_clean, text_norm):
+            _log_route("menu_addreview", chat_id, user_id)
+            start_add_review(chat_id)
+            return "ok"
+        if _matches_label("analyze_id", text_clean, text_norm):
+            _log_route("menu_analyze_id", chat_id, user_id)
+            db_set_session(chat_id, STATE_WAIT_ANALYZE_ID, {})
+            send_message(chat_id, "Введи ID отзыва для анализа.")
+            return "ok"
+        if _matches_label("find", text_clean, text_norm):
+            _log_route("menu_find", chat_id, user_id)
+            if not DB_OK:
+                send_message(chat_id, "DB disabled. Проверь DATABASE_URL или /diag.")
+                return "ok"
+            start_find_flow(chat_id)
+            return "ok"
+        if _matches_label("weekly", text_clean, text_norm):
+            _log_route("menu_weekly", chat_id, user_id)
+            if not DB_OK:
+                send_message(chat_id, "DB disabled. Проверь DATABASE_URL или /diag.")
+                return "ok"
+            report = db_weekly_summary()
+            if not report.get("ok"):
+                send_message(chat_id, f"❌ {report.get('error')}")
+                return "ok"
+            avg_rating = report.get("avg_rating")
+            sentiments = report.get("sentiments") or {}
+            msg = (
+                f"Недельный отчёт ({report.get('days')} дн.):\n"
+                f"- всего анализов: {report.get('total')}\n"
+                f"- с ошибкой: {report.get('with_error')}\n"
+                f"- средний рейтинг: {avg_rating if avg_rating is not None else 'n/a'}\n"
+                f"- тональности: {sentiments}\n"
+            )
+            send_message(chat_id, msg)
+            return "ok"
+        if _matches_label("export", text_clean, text_norm):
+            _log_route("menu_export", chat_id, user_id)
+            if not DB_OK:
+                send_message(chat_id, "DB disabled. Проверь DATABASE_URL или /diag.")
+                return "ok"
+            rows = db_export_reviews()
+            if not rows:
+                send_message(chat_id, "Нет данных для экспорта.")
+                return "ok"
+            send_document(chat_id, "reviews_export.csv", build_csv_export(rows))
+            return "ok"
+        if _matches_label("settings", text_clean, text_norm):
+            _log_route("menu_settings", chat_id, user_id)
+            send_message(chat_id, "Настройки:", reply_markup=settings_keyboard(can_manage_access(user_id)))
+            return "ok"
+        if _matches_label("contacts", text_clean, text_norm):
+            _log_route("menu_contacts", chat_id, user_id)
+            send_message(chat_id, contacts_text())
+            return "ok"
 
         if cmd == "/start":
             _log_route("start", chat_id, user_id)
@@ -2429,7 +2688,14 @@ def telegram_webhook():
             name = _display_name(user)
             send_message(
                 chat_id,
-                f"Привет, {name}! Бот настроен под {SERVICE_NAME}. Выбери действие в меню ниже.",
+                (
+                    f"Привет, {name}! Бот для {SERVICE_NAME} 🛠️.\n\n"
+                    "🛠️ О сервисе:\n"
+                    f"- Адрес: {SERVICE_ADDRESS}\n"
+                    f"- Режим работы: {SERVICE_HOURS}\n"
+                    f"- Телефоны: {', '.join(SERVICE_PHONES)}\n\n"
+                    "Выбери действие в меню ниже."
+                ),
                 reply_markup=main_menu_keyboard(),
             )
             return "ok"
@@ -2578,78 +2844,6 @@ def telegram_webhook():
             send_message(chat_id, "⏳ Анализ запущен, подожди пару секунд…")
             return "ok"
 
-        if _matches_label("instruction", text_clean, text_norm):
-            _log_route("menu_instruction", chat_id, user_id)
-            send_message(chat_id, INSTRUCTION_TEXT, parse_mode="Markdown")
-            return "ok"
-        if _matches_label("help", text_clean, text_norm):
-            _log_route("menu_help", chat_id, user_id)
-            send_message(chat_id, HELP_TEXT)
-            return "ok"
-        if _matches_label("myid", text_clean, text_norm):
-            _log_route("menu_myid", chat_id, user_id)
-            send_message(chat_id, f"Ваш ID: {user_id}")
-            return "ok"
-        if _matches_label("diag", text_clean, text_norm):
-            _log_route("menu_diag", chat_id, user_id)
-            send_message(chat_id, diag_text(user_id))
-            return "ok"
-        if _matches_label("add_review", text_clean, text_norm):
-            _log_route("menu_addreview", chat_id, user_id)
-            start_add_review(chat_id)
-            return "ok"
-        if _matches_label("analyze_id", text_clean, text_norm):
-            _log_route("menu_analyze_id", chat_id, user_id)
-            db_set_session(chat_id, STATE_WAIT_ANALYZE_ID, {})
-            send_message(chat_id, "Введи ID отзыва для анализа.")
-            return "ok"
-        if _matches_label("find", text_clean, text_norm):
-            _log_route("menu_find", chat_id, user_id)
-            if not DB_OK:
-                send_message(chat_id, "DB disabled. Проверь DATABASE_URL или /diag.")
-                return "ok"
-            start_find_flow(chat_id)
-            return "ok"
-        if _matches_label("weekly", text_clean, text_norm):
-            _log_route("menu_weekly", chat_id, user_id)
-            if not DB_OK:
-                send_message(chat_id, "DB disabled. Проверь DATABASE_URL или /diag.")
-                return "ok"
-            report = db_weekly_summary()
-            if not report.get("ok"):
-                send_message(chat_id, f"❌ {report.get('error')}")
-                return "ok"
-            avg_rating = report.get("avg_rating")
-            sentiments = report.get("sentiments") or {}
-            msg = (
-                f"Недельный отчёт ({report.get('days')} дн.):\n"
-                f"- всего анализов: {report.get('total')}\n"
-                f"- с ошибкой: {report.get('with_error')}\n"
-                f"- средний рейтинг: {avg_rating if avg_rating is not None else 'n/a'}\n"
-                f"- тональности: {sentiments}\n"
-            )
-            send_message(chat_id, msg)
-            return "ok"
-        if _matches_label("export", text_clean, text_norm):
-            _log_route("menu_export", chat_id, user_id)
-            if not DB_OK:
-                send_message(chat_id, "DB disabled. Проверь DATABASE_URL или /diag.")
-                return "ok"
-            rows = db_export_reviews()
-            if not rows:
-                send_message(chat_id, "Нет данных для экспорта.")
-                return "ok"
-            send_document(chat_id, "reviews_export.csv", build_csv_export(rows))
-            return "ok"
-        if _matches_label("settings", text_clean, text_norm):
-            _log_route("menu_settings", chat_id, user_id)
-            send_message(chat_id, "Настройки:", reply_markup=settings_keyboard(can_manage_access(user_id)))
-            return "ok"
-        if _matches_label("contacts", text_clean, text_norm):
-            _log_route("menu_contacts", chat_id, user_id)
-            send_message(chat_id, contacts_text())
-            return "ok"
-
         if sess and sess.get("state") == STATE_WAIT_REVIEW_TEXT:
             _log_route("state_wait_review_text", chat_id, user_id)
             if not text_clean:
@@ -2682,6 +2876,62 @@ def telegram_webhook():
                     [{"text": "🟢 2ГИС", "callback_data": "platform:2gis"}],
                 ]},
             )
+            return "ok"
+
+        if sess and sess.get("state") == STATE_WAIT_REVIEW_LINK:
+            _log_route("state_wait_review_link", chat_id, user_id)
+            if not text_clean:
+                send_message(chat_id, "Ссылка пустая. Пришли ссылку одним сообщением.")
+                return "ok"
+            payload = sess.get("payload") or {}
+            payload["source_url"] = text_clean
+            payload["platform_guess"] = _guess_platform_from_url(text_clean)
+            db_set_session(chat_id, STATE_WAIT_LINK_PLATFORM, payload)
+            send_message(chat_id, "Выбери площадку (или оставь «Другое»):", reply_markup=link_platform_keyboard())
+            return "ok"
+
+        if sess and sess.get("state") == STATE_WAIT_LINK_AUTHOR:
+            _log_route("state_wait_link_author", chat_id, user_id)
+            if not text_clean:
+                send_message(chat_id, "Укажи автора текста (можно «неизвестно»).")
+                return "ok"
+            payload = sess.get("payload") or {}
+            payload["author_name"] = text_clean
+            db_set_session(chat_id, STATE_WAIT_LINK_TEXT, payload)
+            send_message(chat_id, "Вставь текст отзыва (обязательно).")
+            return "ok"
+
+        if sess and sess.get("state") == STATE_WAIT_LINK_TEXT:
+            _log_route("state_wait_link_text", chat_id, user_id)
+            if not text_clean:
+                send_message(chat_id, "Текст отзыва пустой. Пришли текст одним сообщением.")
+                return "ok"
+            payload = sess.get("payload") or {}
+            payload["review_text"] = text_clean
+            payload["review_hash"] = _hash_review(text_clean)
+            payload["added_by"] = user_id
+            duplicate = db_find_duplicate_review(payload["review_hash"]) if DB_OK else None
+            if duplicate:
+                db_set_session(chat_id, STATE_WAIT_DUP_CONFIRM, payload)
+                send_message(
+                    chat_id,
+                    f"⚠️ Найден дубликат #{duplicate['id']} от {duplicate['created_at'][:10]}. Сохранить всё равно?",
+                    reply_markup={"inline_keyboard": [
+                        [{"text": "Да, сохранить", "callback_data": "dup_confirm:yes"}],
+                        [{"text": "Нет", "callback_data": "dup_confirm:no"}],
+                    ]},
+                )
+                return "ok"
+            review_id = _insert_link_review(payload)
+            _reset_state(chat_id)
+            if review_id:
+                send_message(
+                    chat_id,
+                    f"✅ Отзыв добавлен. Номер: #{review_id}",
+                    reply_markup={"inline_keyboard": [[{"text": "🧠 Проанализировать", "callback_data": f"analyze_review:{review_id}"}]]},
+                )
+            else:
+                send_message(chat_id, "❌ Не удалось сохранить отзыв в БД. Проверь DATABASE_URL, миграции и /diag.")
             return "ok"
 
         if sess and sess.get("state") == STATE_WAIT_ANALYZE_ID:
@@ -2747,7 +2997,7 @@ def telegram_webhook():
                 send_message(chat_id, "Пришли числовой ID пользователя.")
                 return "ok"
             target_id = int(match[0])
-            if OWNER_CHAT_ID is not None and target_id == OWNER_CHAT_ID:
+            if SUPERADMIN_ID is not None and target_id == SUPERADMIN_ID:
                 send_message(chat_id, "Нельзя удалить владельца.")
                 _reset_state(chat_id)
                 return "ok"
@@ -2765,12 +3015,15 @@ def telegram_webhook():
             return "ok"
 
         if sess and sess.get("state") in (
+            STATE_WAIT_REVIEW_METHOD,
             STATE_WAIT_PLATFORM,
             STATE_WAIT_RATING,
             STATE_WAIT_DUP_CONFIRM,
             STATE_FIND_PLATFORM,
             STATE_FIND_RATING,
             STATE_FIND_DAYS,
+            STATE_WAIT_LINK_PLATFORM,
+            STATE_WAIT_LINK_RATING,
         ):
             _log_route(f"state_pending_buttons:{sess.get('state')}", chat_id, user_id)
             send_message(chat_id, "Используй кнопки под сообщением или /cancel.")
