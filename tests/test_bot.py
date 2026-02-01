@@ -20,6 +20,20 @@ def load_bot(monkeypatch):
     module = importlib.import_module("main")
     return module
 
+def load_bot_with_env(monkeypatch, extra_env):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "testtoken1234567890")
+    monkeypatch.setenv("WEBHOOK_URL", "https://example.com")
+    monkeypatch.setenv("SET_WEBHOOK_ON_START", "0")
+    monkeypatch.setenv("SUPERADMIN_ID", "738627185")
+    monkeypatch.setenv("REPORT_CHAT_IDS", "")
+    monkeypatch.setenv("DATABASE_URL", "")
+    for key, value in (extra_env or {}).items():
+        monkeypatch.setenv(key, value)
+    if "main" in sys.modules:
+        del sys.modules["main"]
+    module = importlib.import_module("main")
+    return module
+
 
 def setup_bot(monkeypatch):
     module = load_bot(monkeypatch)
@@ -343,3 +357,94 @@ def test_normalize_access_config_missing_all(monkeypatch):
     config = module.normalize_access_config("", "", "")
     assert config["superadmin_id"] is None
     assert config["owner_chat_id"] is None
+
+
+def test_extract_chat_user_variants(monkeypatch):
+    module = load_bot(monkeypatch)
+    chat_id, user_id = module.extract_chat_user(
+        {"message": {"chat": {"id": 10}, "from": {"id": 20}}}
+    )
+    assert chat_id == 10
+    assert user_id == 20
+
+    chat_id, user_id = module.extract_chat_user(
+        {"callback_query": {"from": {"id": 30}, "message": {"chat": {"id": 40}}}}
+    )
+    assert chat_id == 40
+    assert user_id == 30
+
+    chat_id, user_id = module.extract_chat_user(
+        {"my_chat_member": {"from": {"id": 50}, "chat": {"id": 60}}}
+    )
+    assert chat_id == 60
+    assert user_id == 50
+
+
+def test_db_enabled_flag(monkeypatch):
+    module = load_bot_with_env(
+        monkeypatch,
+        {"DB_ENABLED": "0", "DATABASE_URL": "postgresql://user:pass@localhost/db"},
+    )
+    assert module.db_enabled() is False
+    assert "БД отключена" in module._db_status_message()
+
+
+def test_db_insert_analysis_sets_engine(monkeypatch):
+    module = load_bot(monkeypatch)
+    monkeypatch.setattr(module, "_current_engine", lambda: "deepseek")
+    monkeypatch.setattr(module, "db_enabled", lambda: True)
+
+    class DummyCursor:
+        def __init__(self):
+            self.params = None
+
+        def execute(self, _query, params):
+            self.params = params
+
+        def fetchone(self):
+            return [123]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class DummyConn:
+        def __init__(self):
+            self.cursor_obj = DummyCursor()
+
+        def cursor(self):
+            return self.cursor_obj
+
+        def close(self):
+            return None
+
+    dummy_conn = DummyConn()
+    monkeypatch.setattr(module, "_db_connect", lambda: dummy_conn)
+
+    module.db_insert_analysis(
+        review_id=1,
+        platform="yandex",
+        rating=5,
+        review_text="ok",
+        result_json={},
+        error=None,
+        model="gpt",
+        engine="",
+        created_by=99,
+    )
+    assert dummy_conn.cursor_obj.params[7] == "deepseek"
+
+
+def test_db_upsert_access_user_skips_empty_chat_id(monkeypatch):
+    module = load_bot(monkeypatch)
+    called = {"count": 0}
+
+    def fake_connect():
+        called["count"] += 1
+        return None
+
+    monkeypatch.setattr(module, "_db_connect", fake_connect)
+    module.db_upsert_access_user(None, "user", 1, note=None)
+    assert called["count"] == 0
