@@ -41,17 +41,35 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKE
 if not TELEGRAM_BOT_TOKEN:
     raise ValueError("TELEGRAM_BOT_TOKEN (or TELEGRAM_TOKEN) is required")
 
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-if not WEBHOOK_URL:
-    raise ValueError("WEBHOOK_URL is required (e.g. https://xxx.up.railway.app)")
-
 BOT_PATH_SECRET = os.getenv("BOT_PATH_SECRET", "").strip()
 if not BOT_PATH_SECRET:
     BOT_PATH_SECRET = TELEGRAM_BOT_TOKEN[-12:]
     logger.warning("BOT_PATH_SECRET not set. Using fallback based on token suffix.")
 
 WEBHOOK_PATH = f"/webhook/{BOT_PATH_SECRET}"
-WEBHOOK_FULL_URL = f"{WEBHOOK_URL.rstrip('/')}{WEBHOOK_PATH}"
+DOMAIN = (os.getenv("DOMAIN") or "").strip()
+
+def _normalize_base_url(raw_url: str) -> str:
+    url = (raw_url or "").strip()
+    if not url:
+        return ""
+    if not url.startswith(("http://", "https://")):
+        url = f"https://{url}"
+    return url.rstrip("/")
+
+def resolve_webhook_base_url() -> Tuple[str, str]:
+    webhook_url = _normalize_base_url(os.getenv("WEBHOOK_URL") or "")
+    if webhook_url:
+        return webhook_url, "WEBHOOK_URL"
+    domain_url = _normalize_base_url(os.getenv("DOMAIN") or "")
+    if domain_url:
+        return domain_url, "DOMAIN"
+    return "", "missing"
+
+WEBHOOK_BASE_URL, WEBHOOK_URL_SOURCE = resolve_webhook_base_url()
+WEBHOOK_FULL_URL = f"{WEBHOOK_BASE_URL}{WEBHOOK_PATH}" if WEBHOOK_BASE_URL else ""
+if not WEBHOOK_BASE_URL:
+    logger.warning("WEBHOOK_URL/DOMAIN not set; webhook auto-setup disabled")
 
 PORT = int(os.getenv("PORT", "8000"))
 
@@ -79,22 +97,63 @@ GROK_BASE_URL = (os.getenv("GROK_BASE_URL") or "").rstrip("/")
 GROK_MODEL = os.getenv("GROK_MODEL") or "grok-beta"
 
 REPORT_CHAT_IDS = os.getenv("REPORT_CHAT_IDS", "").strip()
-ADMIN_CHAT_IDS = sorted({int(x) for x in re.findall(r"\d+", REPORT_CHAT_IDS)})
+EXTRA_ADMIN_CHAT_IDS = os.getenv("ADMIN_CHAT_IDS", "").strip()
+
+def _parse_id_list(raw: str) -> List[int]:
+    return sorted({int(x) for x in re.findall(r"\d+", raw or "")})
+
+def normalize_access_config(superadmin_raw: str, report_chat_ids_raw: str, owner_chat_id_raw: str = "",
+                            extra_admin_ids_raw: str = "") -> Dict[str, Any]:
+    report_ids = _parse_id_list(report_chat_ids_raw)
+    extra_admin_ids = _parse_id_list(extra_admin_ids_raw)
+    admin_ids = sorted({*report_ids, *extra_admin_ids})
+    admin_sources = []
+    if report_ids:
+        admin_sources.append("REPORT_CHAT_IDS")
+    if extra_admin_ids:
+        admin_sources.append("ADMIN_CHAT_IDS")
+
+    superadmin_id = int(superadmin_raw) if (superadmin_raw or "").isdigit() else None
+    if superadmin_id is not None:
+        superadmin_source = "SUPERADMIN_ID"
+    elif report_ids:
+        superadmin_id = report_ids[0]
+        superadmin_source = "REPORT_CHAT_IDS"
+    else:
+        superadmin_source = "unset"
+
+    owner_chat_id = int(owner_chat_id_raw) if (owner_chat_id_raw or "").isdigit() else None
+    if owner_chat_id is not None:
+        owner_source = "OWNER_CHAT_ID"
+    else:
+        owner_chat_id = superadmin_id
+        owner_source = superadmin_source
+
+    return {
+        "superadmin_id": superadmin_id,
+        "superadmin_source": superadmin_source,
+        "owner_chat_id": owner_chat_id,
+        "owner_source": owner_source,
+        "admin_ids": admin_ids,
+        "admin_sources": admin_sources,
+    }
+
+ACCESS_CONFIG = normalize_access_config(
+    os.getenv("SUPERADMIN_ID") or "",
+    REPORT_CHAT_IDS,
+    os.getenv("OWNER_CHAT_ID") or "",
+    EXTRA_ADMIN_CHAT_IDS,
+)
+SUPERADMIN_ID = ACCESS_CONFIG["superadmin_id"]
+OWNER_CHAT_ID = ACCESS_CONFIG["owner_chat_id"]
+ADMIN_CHAT_IDS = ACCESS_CONFIG["admin_ids"]
 ADMIN_MODE = "allowlist" if ADMIN_CHAT_IDS else "closed"
 if ADMIN_CHAT_IDS:
     logger.info("Admins parsed: count=%s sample=%s", len(ADMIN_CHAT_IDS), ADMIN_CHAT_IDS[:3])
 else:
     logger.warning("Admins parsed: count=0 (REPORT_CHAT_IDS is empty or invalid)")
-
-DEFAULT_SUPERADMIN_ID = 738627185
-SUPERADMIN_ID_RAW = (os.getenv("SUPERADMIN_ID") or "").strip()
-SUPERADMIN_ID = int(SUPERADMIN_ID_RAW) if SUPERADMIN_ID_RAW.isdigit() else None
-if SUPERADMIN_ID is None and ADMIN_CHAT_IDS:
-    SUPERADMIN_ID = ADMIN_CHAT_IDS[0]
-    logger.warning("SUPERADMIN_ID not set. Using REPORT_CHAT_IDS fallback=%s", SUPERADMIN_ID)
 if SUPERADMIN_ID is None:
-    SUPERADMIN_ID = DEFAULT_SUPERADMIN_ID
-    logger.warning("SUPERADMIN_ID not set. Using default owner id=%s", SUPERADMIN_ID)
+    logger.warning("SUPERADMIN_ID not set and REPORT_CHAT_IDS empty; owner seed will be skipped.")
 
 DATABASE_URL = None
 DB_URL_SOURCE = "unset"
@@ -223,10 +282,16 @@ def send_document(chat_id: int, filename: str, content: bytes) -> None:
     except Exception:
         logger.exception("sendDocument exception")
 
+def _owner_ids() -> set:
+    return {value for value in (SUPERADMIN_ID, OWNER_CHAT_ID) if value is not None}
+
+def _is_owner_id(user_id: Optional[int]) -> bool:
+    return user_id is not None and user_id in _owner_ids()
+
 def get_user_role(user_id: Optional[int]) -> str:
     if user_id is None:
         return "none"
-    if SUPERADMIN_ID is not None and user_id == SUPERADMIN_ID:
+    if _is_owner_id(user_id):
         return "owner"
     if not DB_OK:
         return "none"
@@ -276,17 +341,35 @@ def _display_name(user: dict) -> str:
 _webhook_set_once = False
 _webhook_lock = threading.Lock()
 
+def _webhook_lock_key() -> int:
+    digest = hashlib.sha256(f"setWebhook:{TELEGRAM_BOT_TOKEN}".encode("utf-8")).hexdigest()
+    return int(digest[:15], 16)
+
 def set_webhook_once() -> None:
     global _webhook_set_once
     if not SET_WEBHOOK_ON_START:
         logger.info("setWebhook skipped (SET_WEBHOOK_ON_START=0)")
         return
+    if not WEBHOOK_FULL_URL:
+        logger.warning("setWebhook skipped (WEBHOOK_URL/DOMAIN missing)")
+        return
     with _webhook_lock:
         if _webhook_set_once:
             return
         _webhook_set_once = True
-
+    lock_conn = None
+    lock_acquired = False
     try:
+        lock_conn = _db_connect()
+        if lock_conn:
+            with lock_conn.cursor() as cur:
+                cur.execute("SELECT pg_try_advisory_lock(%s)", (_webhook_lock_key(),))
+                row = cur.fetchone()
+                lock_acquired = bool(row and row[0])
+            if not lock_acquired:
+                logger.info("setWebhook skipped (advisory lock held by another worker)")
+                return
+
         logger.info("Setting webhook: %s", WEBHOOK_FULL_URL)
         r = requests.get(
             tg_api("setWebhook"),
@@ -301,6 +384,18 @@ def set_webhook_once() -> None:
             logger.error("setWebhook failed status=%s body=%s", r.status_code, _redact(r.text[:900]))
     except Exception:
         logger.exception("setWebhook exception")
+    finally:
+        if lock_conn and lock_acquired:
+            try:
+                with lock_conn.cursor() as cur:
+                    cur.execute("SELECT pg_advisory_unlock(%s)", (_webhook_lock_key(),))
+            except Exception:
+                logger.exception("setWebhook advisory unlock failed")
+        if lock_conn:
+            try:
+                lock_conn.close()
+            except Exception:
+                pass
 
 # -----------------------------
 # DB layer (psycopg v3 recommended)
@@ -313,6 +408,7 @@ DB_ACCESS_HAS_USER_ID = False
 DB_ACCESS_HAS_CHAT_ID = False
 DB_ACCESS_HAS_IS_ACTIVE = False
 DB_ACCESS_HAS_NOTE = False
+DB_ACCESS_HAS_ADDED_BY = False
 DB_ACCESS_HAS_CREATED_AT = False
 DB_ACCESS_HAS_ADDED_AT = False
 
@@ -375,6 +471,7 @@ def _review_text_expr(prefix: str = "") -> str:
 
 def _refresh_access_columns(cur) -> None:
     global DB_ACCESS_HAS_USER_ID, DB_ACCESS_HAS_CHAT_ID, DB_ACCESS_HAS_IS_ACTIVE, DB_ACCESS_HAS_NOTE
+    global DB_ACCESS_HAS_ADDED_BY
     global DB_ACCESS_HAS_CREATED_AT, DB_ACCESS_HAS_ADDED_AT
     cur.execute(
         """
@@ -388,14 +485,16 @@ def _refresh_access_columns(cur) -> None:
     DB_ACCESS_HAS_CHAT_ID = "chat_id" in cols
     DB_ACCESS_HAS_IS_ACTIVE = "is_active" in cols
     DB_ACCESS_HAS_NOTE = "note" in cols
+    DB_ACCESS_HAS_ADDED_BY = "added_by" in cols
     DB_ACCESS_HAS_CREATED_AT = "created_at" in cols
     DB_ACCESS_HAS_ADDED_AT = "added_at" in cols
     logger.info(
-        "access_users columns: user_id=%s chat_id=%s is_active=%s note=%s created_at=%s added_at=%s",
+        "access_users columns: user_id=%s chat_id=%s is_active=%s note=%s added_by=%s created_at=%s added_at=%s",
         DB_ACCESS_HAS_USER_ID,
         DB_ACCESS_HAS_CHAT_ID,
         DB_ACCESS_HAS_IS_ACTIVE,
         DB_ACCESS_HAS_NOTE,
+        DB_ACCESS_HAS_ADDED_BY,
         DB_ACCESS_HAS_CREATED_AT,
         DB_ACCESS_HAS_ADDED_AT,
     )
@@ -417,6 +516,28 @@ def _access_created_at_column() -> Optional[str]:
     if DB_ACCESS_HAS_ADDED_AT:
         return "added_at"
     return None
+
+def _access_unique_column(cur) -> Optional[str]:
+    try:
+        cur.execute(
+            """
+            SELECT a.attname
+            FROM pg_index i
+            JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+            WHERE i.indrelid = 'public.access_users'::regclass
+              AND i.indisunique
+              AND array_length(i.indkey, 1) = 1
+            """
+        )
+        cols = [row[0] for row in (cur.fetchall() or [])]
+        if "chat_id" in cols:
+            return "chat_id"
+        if "user_id" in cols:
+            return "user_id"
+        return cols[0] if cols else None
+    except Exception:
+        logger.exception("access_users unique constraint detection failed")
+        return None
 
 def db_init() -> None:
     """
@@ -581,17 +702,58 @@ def db_init() -> None:
             cur.execute("CREATE INDEX IF NOT EXISTS idx_access_users_active ON public.access_users(is_active);")
             _refresh_access_columns(cur)
 
-            if SUPERADMIN_ID is not None:
-                user_id_col = _access_user_id_column() or "user_id"
-                cur.execute(
-                    f"""
-                    INSERT INTO public.access_users ({user_id_col}, role, added_by, is_active)
-                    VALUES (%s, 'owner', %s, TRUE)
-                    ON CONFLICT ({user_id_col})
-                    DO UPDATE SET role='owner', is_active=TRUE
-                    """,
-                    (SUPERADMIN_ID, SUPERADMIN_ID),
-                )
+            owner_seed_id = SUPERADMIN_ID or OWNER_CHAT_ID
+            if DB_ACCESS_HAS_CHAT_ID and OWNER_CHAT_ID is None:
+                logger.error("Owner seed skipped: OWNER_CHAT_ID/SUPERADMIN_ID not configured")
+            elif owner_seed_id is None:
+                logger.error("Owner seed skipped: SUPERADMIN_ID/REPORT_CHAT_IDS not configured")
+            else:
+                column_parts: List[Tuple[str, str, Optional[Any]]] = []
+                if DB_ACCESS_HAS_CHAT_ID:
+                    column_parts.append(("chat_id", "%s", OWNER_CHAT_ID))
+                if DB_ACCESS_HAS_USER_ID:
+                    column_parts.append(("user_id", "%s", owner_seed_id))
+                column_parts.append(("role", "%s", "owner"))
+                if DB_ACCESS_HAS_IS_ACTIVE:
+                    column_parts.append(("is_active", "%s", True))
+                if DB_ACCESS_HAS_ADDED_BY:
+                    column_parts.append(("added_by", "%s", owner_seed_id))
+                if DB_ACCESS_HAS_CREATED_AT:
+                    column_parts.append(("created_at", "NOW()", None))
+                if DB_ACCESS_HAS_ADDED_AT:
+                    column_parts.append(("added_at", "NOW()", None))
+
+                columns = ", ".join([col for col, _, _ in column_parts])
+                placeholders = ", ".join([ph for _, ph, _ in column_parts])
+                values = [val for _, _, val in column_parts if val is not None]
+
+                conflict_col = _access_unique_column(cur)
+                update_sets = ["role='owner'"]
+                if DB_ACCESS_HAS_IS_ACTIVE:
+                    update_sets.append("is_active=TRUE")
+                if DB_ACCESS_HAS_ADDED_BY:
+                    update_sets.append("added_by=EXCLUDED.added_by")
+                update_sql = ", ".join(update_sets)
+
+                if conflict_col:
+                    cur.execute(
+                        f"""
+                        INSERT INTO public.access_users ({columns})
+                        VALUES ({placeholders})
+                        ON CONFLICT ({conflict_col})
+                        DO UPDATE SET {update_sql}
+                        """,
+                        tuple(values),
+                    )
+                else:
+                    cur.execute(
+                        f"""
+                        INSERT INTO public.access_users ({columns})
+                        VALUES ({placeholders})
+                        ON CONFLICT DO NOTHING
+                        """,
+                        tuple(values),
+                    )
 
             cur.execute(
                 """
@@ -1969,7 +2131,7 @@ def format_analysis_brief(result_json: dict) -> str:
     return "\n".join(lines)
 
 def notify_admins(text: str) -> None:
-    ids = {SUPERADMIN_ID} if SUPERADMIN_ID is not None else set()
+    ids = set(_owner_ids())
     if DB_OK:
         for user in db_list_access_users(active_only=True):
             if user.get("role") in ("owner", "staff"):
@@ -2266,6 +2428,7 @@ def diag_payload(current_user_id: Optional[int] = None) -> dict:
         "chat_id": DB_ACCESS_HAS_CHAT_ID,
         "is_active": DB_ACCESS_HAS_IS_ACTIVE,
         "note": DB_ACCESS_HAS_NOTE,
+        "added_by": DB_ACCESS_HAS_ADDED_BY,
         "created_at": DB_ACCESS_HAS_CREATED_AT,
         "added_at": DB_ACCESS_HAS_ADDED_AT,
     }
@@ -2273,6 +2436,7 @@ def diag_payload(current_user_id: Optional[int] = None) -> dict:
     return {
         "webhook_path": WEBHOOK_PATH,
         "webhook_url_set": WEBHOOK_FULL_URL,
+        "webhook_url_source": WEBHOOK_URL_SOURCE,
         "webhook_info": webhook,
         "engine": engine,
         "prompt_mode": prompt_mode,
@@ -2281,17 +2445,24 @@ def diag_payload(current_user_id: Optional[int] = None) -> dict:
         "openai_key_set": bool(OPENAI_API_KEY),
         "gemini_key_set": bool(GEMINI_API_KEY),
         "db": "postgres" if DB_OK else "disabled",
+        "db_status": "ok" if DB_OK else "failed",
         "db_configured": bool(DATABASE_URL),
         "db_url_source": DB_URL_SOURCE,
         "db_last_error": DB_LAST_ERROR,
+        "db_error": DB_LAST_ERROR,
         "openai_sdk": OPENAI_SDK_AVAILABLE,
         "admin_mode": ADMIN_MODE,
         "admins_count": len(ADMIN_CHAT_IDS),
+        "admins_sample": ADMIN_CHAT_IDS[:5],
+        "admins_source": ACCESS_CONFIG.get("admin_sources"),
         "allowlist_empty": allowlist_empty,
         "role_current_user": role_current,
         "access_users_count_active": access_count,
         "access_columns": access_columns,
-        "owner_chat_id_detected": SUPERADMIN_ID,
+        "superadmin_id": SUPERADMIN_ID,
+        "superadmin_source": ACCESS_CONFIG.get("superadmin_source"),
+        "owner_chat_id": OWNER_CHAT_ID,
+        "owner_source": ACCESS_CONFIG.get("owner_source"),
         "ui_labels_version": UI_VERSION,
         "reviews_text_exists": review_text_col,
         "reviews_review_text_exists": review_review_text_col,
@@ -2304,6 +2475,7 @@ def diag_text(current_user_id: Optional[int] = None) -> str:
         "Самодиагностика:\n"
         f"- webhook_path: {payload.get('webhook_path')}\n"
         f"- webhook_url_set: {payload.get('webhook_url_set')}\n"
+        f"- webhook_url_source: {payload.get('webhook_url_source')}\n"
         f"- webhook_info_url: {webhook.get('url')}\n"
         f"- webhook_pending: {webhook.get('pending_update_count')}\n"
         f"- engine: {payload.get('engine')}\n"
@@ -2313,17 +2485,23 @@ def diag_text(current_user_id: Optional[int] = None) -> str:
         f"- openai_key_set: {'yes' if payload.get('openai_key_set') else 'no'}\n"
         f"- gemini_key_set: {'yes' if payload.get('gemini_key_set') else 'no'}\n"
         f"- db: {payload.get('db')}\n"
+        f"- db_status: {payload.get('db_status')}\n"
         f"- db_configured: {payload.get('db_configured')}\n"
         f"- db_url_source: {payload.get('db_url_source')}\n"
         f"- db_last_error: {payload.get('db_last_error')}\n"
         f"- openai_sdk: {payload.get('openai_sdk')}\n"
         f"- admin_mode: {payload.get('admin_mode')}\n"
         f"- admins_count: {payload.get('admins_count')}\n"
+        f"- admins_sample: {payload.get('admins_sample')}\n"
+        f"- admins_source: {payload.get('admins_source')}\n"
         f"- allowlist_empty: {'yes' if payload.get('allowlist_empty') else 'no'}\n"
         f"- role_current_user: {payload.get('role_current_user')}\n"
         f"- access_users_count_active: {payload.get('access_users_count_active')}\n"
         f"- access_columns: {payload.get('access_columns')}\n"
-        f"- owner_chat_id_detected: {payload.get('owner_chat_id_detected')}\n"
+        f"- superadmin_id: {payload.get('superadmin_id')}\n"
+        f"- superadmin_source: {payload.get('superadmin_source')}\n"
+        f"- owner_chat_id: {payload.get('owner_chat_id')}\n"
+        f"- owner_source: {payload.get('owner_source')}\n"
         f"- ui_labels_version: {payload.get('ui_labels_version')}\n"
         f"- reviews.text_exists: {'yes' if payload.get('reviews_text_exists') else 'no'}\n"
         f"- reviews.review_text_exists: {'yes' if payload.get('reviews_review_text_exists') else 'no'}\n"
@@ -2608,7 +2786,7 @@ def telegram_webhook():
                     send_message(chat_id, "Некорректный ID.")
                     answer_callback_query(cq_id, "OK")
                     return "ok"
-                if SUPERADMIN_ID is not None and target_id == SUPERADMIN_ID:
+                if _is_owner_id(target_id):
                     send_message(chat_id, "Нельзя удалить владельца.")
                     answer_callback_query(cq_id, "OK")
                     return "ok"
@@ -3131,7 +3309,7 @@ def telegram_webhook():
                 send_message(chat_id, "Формат: /kick <id>")
                 return "ok"
             target_id = int(match.group())
-            if SUPERADMIN_ID is not None and target_id == SUPERADMIN_ID:
+            if _is_owner_id(target_id):
                 send_message(chat_id, "Нельзя удалить владельца.")
                 return "ok"
             db_deactivate_access_user(target_id)
@@ -3400,7 +3578,7 @@ def telegram_webhook():
                 send_message(chat_id, "Пришли числовой ID пользователя.")
                 return "ok"
             target_id = int(match[0])
-            if SUPERADMIN_ID is not None and target_id == SUPERADMIN_ID:
+            if _is_owner_id(target_id):
                 send_message(chat_id, "Нельзя удалить владельца.")
                 _reset_state(chat_id)
                 return "ok"

@@ -10,19 +10,28 @@
 
 **Обязательные переменные окружения:**
 - `TELEGRAM_BOT_TOKEN`
-- `WEBHOOK_URL` (например, `https://xxx.up.railway.app`)
-- `SUPERADMIN_ID`
 - `DATABASE_URL` **или** набор `PG*`:
   - `PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE`
 - AI ключи/настройки (`DEEPSEEK_API_KEY` или альтернативы)
 
 **Опциональные переменные:**
+- `WEBHOOK_URL` **или** `DOMAIN` (см. ниже)
+- `SUPERADMIN_ID` (если нет — берётся первый ID из `REPORT_CHAT_IDS`)
+- `OWNER_CHAT_ID` (если нужно явно задать chat_id владельца)
 - `DIAG_TOKEN`
 - `CRON_TOKEN`
 - `CX_PROMPT_MODE` (`full|lite`)
 - `AI_ENGINE`
+- `REPORT_CHAT_IDS` (список админов, разделитель произвольный)
 
-**Важно:** управление доступами теперь живёт в БД и управляется через бот — редактировать `REPORT_CHAT_IDS`/Railway UI не нужно (кроме первоначальной настройки `SUPERADMIN_ID` и БД).
+**Важно:** управление доступами теперь живёт в БД и управляется через бот — редактировать `REPORT_CHAT_IDS`/Railway UI не нужно (кроме первоначальной настройки владельца и БД).
+
+## Webhook URL
+Webhook формируется так:
+1) если задан `WEBHOOK_URL`, используется он;
+2) иначе берётся `DOMAIN` и формируется `https://{DOMAIN}/webhook/{BOT_PATH_SECRET}`.
+
+Если не задано ни `WEBHOOK_URL`, ни `DOMAIN`, установка webhook будет пропущена и это отразится в `/diag`.
 
 ## Управление доступами
 Роли:

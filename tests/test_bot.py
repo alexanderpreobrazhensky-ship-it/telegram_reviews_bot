@@ -1,8 +1,12 @@
 import importlib
 import json
 import sys
+from pathlib import Path
 from datetime import datetime, timezone
 
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
 def load_bot(monkeypatch):
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "testtoken1234567890")
@@ -317,3 +321,25 @@ def test_diag_contains_webhook(monkeypatch):
         {"update_id": 30, "message": {"chat": {"id": 40}, "from": {"id": module.SUPERADMIN_ID}, "text": "/diag"}},
     )
     assert "webhook_pending" in sent[-1]["json"]["text"]
+
+
+def test_normalize_access_config_prefers_superadmin(monkeypatch):
+    module = load_bot(monkeypatch)
+    config = module.normalize_access_config("123", "777,888", "")
+    assert config["superadmin_id"] == 123
+    assert config["owner_chat_id"] == 123
+    assert config["admin_ids"] == [777, 888]
+
+
+def test_normalize_access_config_fallback_report_ids(monkeypatch):
+    module = load_bot(monkeypatch)
+    config = module.normalize_access_config("", "777,888", "")
+    assert config["superadmin_id"] == 777
+    assert config["owner_chat_id"] == 777
+
+
+def test_normalize_access_config_missing_all(monkeypatch):
+    module = load_bot(monkeypatch)
+    config = module.normalize_access_config("", "", "")
+    assert config["superadmin_id"] is None
+    assert config["owner_chat_id"] is None
