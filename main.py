@@ -167,6 +167,7 @@ SET_WEBHOOK_ON_START = (os.getenv("SET_WEBHOOK_ON_START") or "1").strip() not in
 
 AI_LAST_HTTP_STATUS: Optional[int] = None
 AI_LAST_RAW_PREVIEW: Optional[str] = None
+DEEPSEEK_TRANSPORT: Optional[str] = None
 
 SERVICE_NAME = "Автоцентр Лира"
 SERVICE_ADDRESS = "Нижний Новгород, ул. Удмуртская, д. 10"
@@ -210,6 +211,12 @@ def _redact_db_error(err: str) -> str:
     sanitized = re.sub(r"//([^:/?#]+):([^@]+)@", r"//\1:***@", err)
     sanitized = re.sub(r"password=([^\s]+)", "password=***", sanitized, flags=re.IGNORECASE)
     return sanitized
+
+def _short_error(err: Optional[str], limit: int = 180) -> Optional[str]:
+    if not err:
+        return err
+    text = _redact_db_error(str(err))
+    return text[:limit]
 
 def resolve_database_url() -> Tuple[Optional[str], str]:
     direct = os.getenv("DATABASE_URL")
@@ -401,7 +408,13 @@ def set_webhook_once() -> None:
 # DB layer (psycopg v3 recommended)
 # -----------------------------
 DB_OK = False
+DB_OK_MIGRATIONS = False
 DB_LAST_ERROR: Optional[str] = None
+DB_MIGRATION_ERROR: Optional[str] = None
+DB_LAST_ANALYSIS_ERROR: Optional[str] = None
+DB_LAST_ANALYSIS_ERROR_TYPE: Optional[str] = None
+OWNER_SEED_STATUS = "skipped"
+OWNER_SEED_ERROR: Optional[str] = None
 DB_HAS_TEXT = False
 DB_HAS_REVIEW_TEXT = False
 DB_ACCESS_HAS_USER_ID = False
@@ -413,21 +426,25 @@ DB_ACCESS_HAS_CREATED_AT = False
 DB_ACCESS_HAS_ADDED_AT = False
 
 def _db_connect():
-    global DB_LAST_ERROR, DATABASE_URL, DB_URL_SOURCE
+    global DB_LAST_ERROR, DATABASE_URL, DB_URL_SOURCE, DB_OK
     if not DATABASE_URL:
         DATABASE_URL, DB_URL_SOURCE = resolve_database_url()
     if not DATABASE_URL:
         DB_LAST_ERROR = "DATABASE_URL missing"
+        DB_OK = False
         return None
     try:
         import psycopg  # type: ignore
         url_with_timeout = _append_url_params(DATABASE_URL, {"connect_timeout": "5"})
         conn = psycopg.connect(url_with_timeout, autocommit=True)
+        if DB_OK_MIGRATIONS:
+            DB_OK = True
         return conn
     except Exception as e:
         err_text = str(e)[:500]
         logger.warning("DB connect failed: %s", _redact_db_error(err_text))
         DB_LAST_ERROR = _redact_db_error(err_text)
+        DB_OK = False
         parsed = urlparse(DATABASE_URL)
         host = parsed.hostname or ""
         if host and host not in ("localhost", "127.0.0.1") and "sslmode=" not in (parsed.query or ""):
@@ -435,11 +452,14 @@ def _db_connect():
                 url_with_ssl = _append_url_params(DATABASE_URL, {"sslmode": "require", "connect_timeout": "5"})
                 conn = psycopg.connect(url_with_ssl, autocommit=True)
                 logger.info("DB connect retry OK with sslmode=require")
+                if DB_OK_MIGRATIONS:
+                    DB_OK = True
                 return conn
             except Exception as ssl_err:
                 ssl_text = str(ssl_err)[:500]
                 DB_LAST_ERROR = _redact_db_error(ssl_text)
                 logger.error("DB connect retry with sslmode=require failed: %s", _redact_db_error(ssl_text))
+                DB_OK = False
         return None
 
 def _refresh_review_columns(cur) -> None:
@@ -539,6 +559,33 @@ def _access_unique_column(cur) -> Optional[str]:
         logger.exception("access_users unique constraint detection failed")
         return None
 
+def _classify_db_error(err_text: Optional[str]) -> str:
+    text = (err_text or "").lower()
+    if not text:
+        return "unknown"
+    if "could not connect" in text or "connection refused" in text or "connection error" in text:
+        return "connect_failed"
+    if "timeout" in text or "timed out" in text:
+        return "timeout"
+    if "permission denied" in text or "not authorized" in text:
+        return "permission_denied"
+    if "does not exist" in text or "undefined column" in text or "schema" in text:
+        return "schema_mismatch"
+    if "violates" in text or "duplicate key" in text or "constraint" in text:
+        return "constraint_violation"
+    return "unknown"
+
+def _db_status_message() -> str:
+    if not DATABASE_URL:
+        return "DB disabled. Проверь DATABASE_URL или /diag."
+    if not DB_OK_MIGRATIONS:
+        err = _short_error(DB_MIGRATION_ERROR) or "unknown"
+        return f"DB migration failed: {err}"
+    if not DB_OK:
+        err = _short_error(DB_LAST_ERROR) or "unknown"
+        return f"DB connection failed: {err}"
+    return "DB disabled. Проверь DATABASE_URL или /diag."
+
 def db_init() -> None:
     """
     Safe migration for mixed schemas.
@@ -546,12 +593,15 @@ def db_init() -> None:
       - ensuring both `text` and `review_text` exist
       - backfilling each other
     """
-    global DB_OK, DB_LAST_ERROR, DATABASE_URL, DB_URL_SOURCE
+    global DB_OK, DB_OK_MIGRATIONS, DB_LAST_ERROR, DB_MIGRATION_ERROR, DATABASE_URL, DB_URL_SOURCE
+    global OWNER_SEED_STATUS, OWNER_SEED_ERROR
     if not DATABASE_URL:
         DATABASE_URL, DB_URL_SOURCE = resolve_database_url()
     conn = _db_connect()
     if not conn:
         DB_OK = False
+        DB_OK_MIGRATIONS = False
+        DB_MIGRATION_ERROR = DB_LAST_ERROR
         logger.warning("DB init skipped (DATABASE_URL not set or connect failed)")
         return
 
@@ -702,59 +752,6 @@ def db_init() -> None:
             cur.execute("CREATE INDEX IF NOT EXISTS idx_access_users_active ON public.access_users(is_active);")
             _refresh_access_columns(cur)
 
-            owner_seed_id = SUPERADMIN_ID or OWNER_CHAT_ID
-            if DB_ACCESS_HAS_CHAT_ID and OWNER_CHAT_ID is None:
-                logger.error("Owner seed skipped: OWNER_CHAT_ID/SUPERADMIN_ID not configured")
-            elif owner_seed_id is None:
-                logger.error("Owner seed skipped: SUPERADMIN_ID/REPORT_CHAT_IDS not configured")
-            else:
-                column_parts: List[Tuple[str, str, Optional[Any]]] = []
-                if DB_ACCESS_HAS_CHAT_ID:
-                    column_parts.append(("chat_id", "%s", OWNER_CHAT_ID))
-                if DB_ACCESS_HAS_USER_ID:
-                    column_parts.append(("user_id", "%s", owner_seed_id))
-                column_parts.append(("role", "%s", "owner"))
-                if DB_ACCESS_HAS_IS_ACTIVE:
-                    column_parts.append(("is_active", "%s", True))
-                if DB_ACCESS_HAS_ADDED_BY:
-                    column_parts.append(("added_by", "%s", owner_seed_id))
-                if DB_ACCESS_HAS_CREATED_AT:
-                    column_parts.append(("created_at", "NOW()", None))
-                if DB_ACCESS_HAS_ADDED_AT:
-                    column_parts.append(("added_at", "NOW()", None))
-
-                columns = ", ".join([col for col, _, _ in column_parts])
-                placeholders = ", ".join([ph for _, ph, _ in column_parts])
-                values = [val for _, _, val in column_parts if val is not None]
-
-                conflict_col = _access_unique_column(cur)
-                update_sets = ["role='owner'"]
-                if DB_ACCESS_HAS_IS_ACTIVE:
-                    update_sets.append("is_active=TRUE")
-                if DB_ACCESS_HAS_ADDED_BY:
-                    update_sets.append("added_by=EXCLUDED.added_by")
-                update_sql = ", ".join(update_sets)
-
-                if conflict_col:
-                    cur.execute(
-                        f"""
-                        INSERT INTO public.access_users ({columns})
-                        VALUES ({placeholders})
-                        ON CONFLICT ({conflict_col})
-                        DO UPDATE SET {update_sql}
-                        """,
-                        tuple(values),
-                    )
-                else:
-                    cur.execute(
-                        f"""
-                        INSERT INTO public.access_users ({columns})
-                        VALUES ({placeholders})
-                        ON CONFLICT DO NOTHING
-                        """,
-                        tuple(values),
-                    )
-
             cur.execute(
                 """
                 INSERT INTO public.settings (key, value)
@@ -763,19 +760,113 @@ def db_init() -> None:
                 """,
                 (json.dumps({"value": DEFAULT_BUSINESS_CONTEXT}, ensure_ascii=False),),
             )
-
-        DB_OK = True
-        DB_LAST_ERROR = None
-        logger.info("DB init OK (postgres=True)")
+        DB_OK_MIGRATIONS = True
+        DB_MIGRATION_ERROR = None
     except Exception as e:
         DB_OK = False
-        DB_LAST_ERROR = _redact_db_error(str(e)[:500])
+        DB_OK_MIGRATIONS = False
+        DB_MIGRATION_ERROR = _redact_db_error(str(e)[:500])
         logger.exception("DB init failed")
     finally:
         try:
             conn.close()
         except Exception:
             pass
+
+    if not DB_OK_MIGRATIONS:
+        return
+
+    OWNER_SEED_STATUS = "skipped"
+    OWNER_SEED_ERROR = None
+    try:
+        owner_seed_id = SUPERADMIN_ID or OWNER_CHAT_ID
+        owner_chat_id_for_seed = OWNER_CHAT_ID or owner_seed_id
+        if owner_seed_id is None:
+            OWNER_SEED_STATUS = "skipped"
+            logger.error("Owner seed skipped: SUPERADMIN_ID/REPORT_CHAT_IDS not configured")
+        elif DB_ACCESS_HAS_CHAT_ID and owner_chat_id_for_seed is None:
+            OWNER_SEED_STATUS = "skipped"
+            logger.error("Owner seed skipped: OWNER_CHAT_ID/SUPERADMIN_ID not configured")
+        else:
+            column_parts = []
+            if DB_ACCESS_HAS_CHAT_ID:
+                column_parts.append(("chat_id", "%s", owner_chat_id_for_seed))
+            if DB_ACCESS_HAS_USER_ID:
+                column_parts.append(("user_id", "%s", owner_seed_id))
+            column_parts.append(("role", "%s", "owner"))
+            if DB_ACCESS_HAS_IS_ACTIVE:
+                column_parts.append(("is_active", "%s", True))
+            if DB_ACCESS_HAS_ADDED_BY:
+                column_parts.append(("added_by", "%s", owner_seed_id))
+            if DB_ACCESS_HAS_CREATED_AT:
+                column_parts.append(("created_at", "NOW()", None))
+            if DB_ACCESS_HAS_ADDED_AT:
+                column_parts.append(("added_at", "NOW()", None))
+
+            columns = ", ".join([col for col, _, _ in column_parts])
+            placeholders = ", ".join([ph for _, ph, _ in column_parts])
+            values = [val for _, _, val in column_parts if val is not None]
+
+            seed_conn = _db_connect()
+            if not seed_conn:
+                raise RuntimeError(DB_LAST_ERROR or "seed_connection_failed")
+            try:
+                with seed_conn.cursor() as cur:
+                    conflict_col = _access_unique_column(cur)
+                    update_sets = ["role='owner'"]
+                    if DB_ACCESS_HAS_IS_ACTIVE:
+                        update_sets.append("is_active=TRUE")
+                    if DB_ACCESS_HAS_ADDED_BY:
+                        update_sets.append("added_by=EXCLUDED.added_by")
+                    update_sql = ", ".join(update_sets)
+
+                    if conflict_col:
+                        cur.execute(
+                            f"""
+                            INSERT INTO public.access_users ({columns})
+                            VALUES ({placeholders})
+                            ON CONFLICT ({conflict_col})
+                            DO UPDATE SET {update_sql}
+                            """,
+                            tuple(values),
+                        )
+                    else:
+                        cur.execute(
+                            f"""
+                            INSERT INTO public.access_users ({columns})
+                            VALUES ({placeholders})
+                            ON CONFLICT DO NOTHING
+                            """,
+                            tuple(values),
+                        )
+            finally:
+                try:
+                    seed_conn.close()
+                except Exception:
+                    pass
+            OWNER_SEED_STATUS = "ok"
+    except Exception as e:
+        OWNER_SEED_STATUS = "failed"
+        OWNER_SEED_ERROR = _short_error(str(e))
+        logger.warning("Owner seed failed: %s", OWNER_SEED_ERROR)
+
+    probe = _db_connect()
+    if probe:
+        try:
+            with probe.cursor() as cur:
+                cur.execute("SELECT 1")
+            DB_OK = True
+            DB_OK_MIGRATIONS = True
+            DB_LAST_ERROR = None
+            DB_MIGRATION_ERROR = None
+            logger.info("DB init OK (postgres=True)")
+        finally:
+            try:
+                probe.close()
+            except Exception:
+                pass
+    else:
+        DB_OK = False
 
 def db_insert_review(source: str, rating: Optional[int], review_text: str, meta: dict,
                      platform: Optional[str] = None, review_hash: Optional[str] = None) -> Optional[int]:
@@ -1321,10 +1412,13 @@ def db_insert_analysis(
     model: str,
     engine: str,
     created_by: Optional[int],
-) -> Optional[int]:
+) -> Tuple[Optional[int], Optional[str], Optional[str]]:
+    global DB_LAST_ANALYSIS_ERROR, DB_LAST_ANALYSIS_ERROR_TYPE
     conn = _db_connect()
     if not conn:
-        return None
+        DB_LAST_ANALYSIS_ERROR = _short_error(DB_LAST_ERROR)
+        DB_LAST_ANALYSIS_ERROR_TYPE = "connect_failed"
+        return None, DB_LAST_ANALYSIS_ERROR_TYPE, DB_LAST_ANALYSIS_ERROR
     try:
         with conn.cursor() as cur:
             if review_id is not None:
@@ -1379,10 +1473,21 @@ def db_insert_analysis(
                     ),
                 )
             row = cur.fetchone()
-            return int(row[0]) if row else None
-    except Exception:
-        logger.exception("db_insert_analysis failed")
-        return None
+            DB_LAST_ANALYSIS_ERROR = None
+            DB_LAST_ANALYSIS_ERROR_TYPE = None
+            return (int(row[0]) if row else None), None, None
+    except Exception as exc:
+        err_text = _short_error(str(exc))
+        DB_LAST_ANALYSIS_ERROR = err_text
+        DB_LAST_ANALYSIS_ERROR_TYPE = _classify_db_error(err_text)
+        logger.exception(
+            "db_insert_analysis failed review_id=%s engine=%s model=%s error=%s",
+            review_id,
+            engine,
+            model,
+            err_text,
+        )
+        return None, DB_LAST_ANALYSIS_ERROR_TYPE, DB_LAST_ANALYSIS_ERROR
     finally:
         try:
             conn.close()
@@ -1700,10 +1805,11 @@ def ai_chat(messages: List[Dict[str, str]]) -> str:
     raise RuntimeError(f"Unknown AI_ENGINE: {engine}")
 
 def call_deepseek(messages: List[Dict[str, str]]) -> str:
-    global AI_LAST_HTTP_STATUS, AI_LAST_RAW_PREVIEW
+    global AI_LAST_HTTP_STATUS, AI_LAST_RAW_PREVIEW, DEEPSEEK_TRANSPORT
     if not DEEPSEEK_API_KEY:
         raise RuntimeError("DEEPSEEK_API_KEY not set")
 
+    force_requests_fallback = False
     if OPENAI_SDK_AVAILABLE and OpenAI is not None:
         try:
             client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
@@ -1715,13 +1821,18 @@ def call_deepseek(messages: List[Dict[str, str]]) -> str:
             )
             AI_LAST_HTTP_STATUS = None
             AI_LAST_RAW_PREVIEW = None
+            DEEPSEEK_TRANSPORT = "openai_sdk"
             return (resp.choices[0].message.content or "").strip()
         except Exception as e:
-            logger.warning("DeepSeek via OpenAI SDK failed. err=%s", str(e)[:200])
-            if not DEEPSEEK_ALLOW_REQUESTS_FALLBACK:
+            err_text = str(e)
+            logger.warning("DeepSeek via OpenAI SDK failed. err=%s", err_text[:200])
+            force_requests_fallback = "unexpected keyword argument 'proxies'" in err_text
+            if force_requests_fallback:
+                logger.warning("DeepSeek SDK incompatible with httpx proxies; forcing requests fallback")
+            if not (DEEPSEEK_ALLOW_REQUESTS_FALLBACK or force_requests_fallback):
                 raise RuntimeError("DeepSeek SDK failed (requests fallback disabled).")
 
-    if not DEEPSEEK_ALLOW_REQUESTS_FALLBACK:
+    if not (DEEPSEEK_ALLOW_REQUESTS_FALLBACK or force_requests_fallback):
         raise RuntimeError("DeepSeek requests fallback disabled (set DEEPSEEK_ALLOW_REQUESTS_FALLBACK=1).")
 
     payload = {"model": DEEPSEEK_MODEL, "messages": messages, "temperature": 0.2, "stream": False}
@@ -1739,6 +1850,7 @@ def call_deepseek(messages: List[Dict[str, str]]) -> str:
     AI_LAST_HTTP_STATUS = resp.status_code
     AI_LAST_RAW_PREVIEW = _redact(resp.text[:300])
     logger.info("DeepSeek status=%s body=%s", resp.status_code, _redact(resp.text[:900]))
+    DEEPSEEK_TRANSPORT = "requests_fallback"
 
     if "<html" in resp.text.lower() or "just a moment" in resp.text.lower():
         raise RuntimeError(f"DeepSeek gateway returned HTML (likely Cloudflare). status={resp.status_code}")
@@ -2165,7 +2277,7 @@ def background_analyze(chat_id: int, user_id: int, review_text: str, platform_hi
 
     try:
         parsed, _raw = cx_analyze(input_obj)
-        analysis_id = db_insert_analysis(
+        analysis_id, db_err_type, db_err_msg = db_insert_analysis(
             review_id=review_id,
             platform=parsed.get("platform_detected", {}).get("value") if isinstance(parsed.get("platform_detected"), dict) else platform_hint,
             rating=rating,
@@ -2177,7 +2289,11 @@ def background_analyze(chat_id: int, user_id: int, review_text: str, platform_hi
             created_by=user_id,
         )
         if analysis_id is None:
-            send_message(chat_id, "❌ Не удалось сохранить анализ в БД. Проверь DATABASE_URL и миграции.")
+            detail = f"{db_err_type or 'unknown'}"
+            if db_err_msg:
+                detail = f"{detail}: {db_err_msg}"
+            send_message(chat_id, f"❌ DB save failed: {detail}")
+            notify_admins(f"⚠️ DB save failed (analysis) review_id={review_id or '-'} type={db_err_type or 'unknown'}")
             return
 
         brief = format_analysis_brief(parsed)
@@ -2192,7 +2308,7 @@ def background_analyze(chat_id: int, user_id: int, review_text: str, platform_hi
         logger.exception("AI exception traceback")
 
         fallback_json = {"_error": "AI failed or returned invalid JSON (see logs)", "engine": engine}
-        analysis_id = db_insert_analysis(
+        analysis_id, db_err_type, db_err_msg = db_insert_analysis(
             review_id=review_id,
             platform=platform_hint,
             rating=rating,
@@ -2204,7 +2320,11 @@ def background_analyze(chat_id: int, user_id: int, review_text: str, platform_hi
             created_by=user_id,
         )
         if analysis_id is None:
-            send_message(chat_id, "❌ Не удалось сохранить анализ в БД. Проверь DATABASE_URL и миграции.")
+            detail = f"{db_err_type or 'unknown'}"
+            if db_err_msg:
+                detail = f"{detail}: {db_err_msg}"
+            send_message(chat_id, f"❌ DB save failed: {detail}")
+            notify_admins(f"⚠️ DB save failed (analysis) review_id={review_id or '-'} type={db_err_type or 'unknown'}")
             return
 
         error_type = "unknown"
@@ -2218,9 +2338,13 @@ def background_analyze(chat_id: int, user_id: int, review_text: str, platform_hi
             error_type = "parse_error"
 
         if error_type == "cloudflare_block":
-            msg = "❌ ИИ недоступен: блокировка шлюза (Cloudflare). Попробуй позже или переключи движок."
+            msg = "❌ Ошибка ИИ: cloudflare_block. Попробуй позже или переключи движок."
+        elif error_type in ("http_403", "http_429"):
+            msg = f"❌ Ошибка ИИ: {error_type}. Попробуй позже или переключи движок."
+        elif error_type == "parse_error":
+            msg = "❌ Ошибка ИИ: parse_error. Анализ сохранён с ошибкой."
         else:
-            msg = "❌ Не удалось получить валидный JSON от ИИ. Анализ сохранён с ошибкой. ID: %d\nПопробуй ещё раз или переключи CX_PROMPT_MODE=lite." % analysis_id
+            msg = f"❌ Ошибка ИИ: {error_type}. Анализ сохранён с ошибкой."
 
         send_message(chat_id, msg, reply_markup=analysis_keyboard(analysis_id, include_reanalyze=bool(review_id), review_id=review_id))
         notify_admins("⚠️ Ошибка ИИ при анализе #%s\nengine=%s model=%s\nтип=%s\nоткрой самодиагностику: /diag"
@@ -2231,7 +2355,7 @@ def background_analyze(chat_id: int, user_id: int, review_text: str, platform_hi
 # -----------------------------
 def start_add_review(chat_id: int) -> None:
     if not DB_OK:
-        send_message(chat_id, "DB disabled. Проверь DATABASE_URL или /diag.")
+        send_message(chat_id, _db_status_message())
         return
     _reset_state(chat_id)
     db_set_session(chat_id, STATE_WAIT_REVIEW_METHOD, {})
@@ -2416,6 +2540,18 @@ def diag_payload(current_user_id: Optional[int] = None) -> dict:
     global DATABASE_URL, DB_URL_SOURCE
     if not DATABASE_URL:
         DATABASE_URL, DB_URL_SOURCE = resolve_database_url()
+    db_url_host = urlparse(DATABASE_URL).hostname if DATABASE_URL else None
+    db_connect_error = None
+    db_connect_test = "fail"
+    conn = _db_connect()
+    if conn:
+        db_connect_test = "ok"
+        try:
+            conn.close()
+        except Exception:
+            pass
+    else:
+        db_connect_error = _short_error(DB_LAST_ERROR)
     engine = _current_engine()
     prompt_mode = (os.getenv("CX_PROMPT_MODE") or CX_PROMPT_MODE).strip().lower()
     role_current = get_user_role(current_user_id) if current_user_id is not None else None
@@ -2442,15 +2578,27 @@ def diag_payload(current_user_id: Optional[int] = None) -> dict:
         "prompt_mode": prompt_mode,
         "deepseek_base_url": DEEPSEEK_BASE_URL if engine == "deepseek" else None,
         "deepseek_key_set": bool(DEEPSEEK_API_KEY),
+        "deepseek_transport": DEEPSEEK_TRANSPORT,
         "openai_key_set": bool(OPENAI_API_KEY),
         "gemini_key_set": bool(GEMINI_API_KEY),
         "db": "postgres" if DB_OK else "disabled",
         "db_status": "ok" if DB_OK else "failed",
         "db_configured": bool(DATABASE_URL),
+        "db_ok_global": DB_OK,
+        "db_migrations_ok": DB_OK_MIGRATIONS,
+        "db_connect_test": db_connect_test,
+        "db_connect_error": db_connect_error,
+        "db_url_host": db_url_host,
         "db_url_source": DB_URL_SOURCE,
         "db_last_error": DB_LAST_ERROR,
         "db_error": DB_LAST_ERROR,
+        "db_last_analysis_error": DB_LAST_ANALYSIS_ERROR,
+        "db_last_analysis_error_type": DB_LAST_ANALYSIS_ERROR_TYPE,
+        "owner_seed_status": OWNER_SEED_STATUS,
+        "owner_seed_error": OWNER_SEED_ERROR,
         "openai_sdk": OPENAI_SDK_AVAILABLE,
+        "ai_last_http_status": AI_LAST_HTTP_STATUS,
+        "ai_last_raw_preview": AI_LAST_RAW_PREVIEW,
         "admin_mode": ADMIN_MODE,
         "admins_count": len(ADMIN_CHAT_IDS),
         "admins_sample": ADMIN_CHAT_IDS[:5],
@@ -2482,14 +2630,24 @@ def diag_text(current_user_id: Optional[int] = None) -> str:
         f"- prompt_mode: {payload.get('prompt_mode')}\n"
         f"- deepseek_base_url: {payload.get('deepseek_base_url')}\n"
         f"- deepseek_key_set: {'yes' if payload.get('deepseek_key_set') else 'no'}\n"
+        f"- deepseek_transport: {payload.get('deepseek_transport')}\n"
         f"- openai_key_set: {'yes' if payload.get('openai_key_set') else 'no'}\n"
         f"- gemini_key_set: {'yes' if payload.get('gemini_key_set') else 'no'}\n"
         f"- db: {payload.get('db')}\n"
         f"- db_status: {payload.get('db_status')}\n"
         f"- db_configured: {payload.get('db_configured')}\n"
+        f"- db_ok_global: {payload.get('db_ok_global')}\n"
+        f"- db_migrations_ok: {payload.get('db_migrations_ok')}\n"
+        f"- db_connect_test: {payload.get('db_connect_test')}\n"
+        f"- db_connect_error: {payload.get('db_connect_error')}\n"
+        f"- db_url_host: {payload.get('db_url_host')}\n"
         f"- db_url_source: {payload.get('db_url_source')}\n"
         f"- db_last_error: {payload.get('db_last_error')}\n"
+        f"- db_last_analysis_error_type: {payload.get('db_last_analysis_error_type')}\n"
+        f"- db_last_analysis_error: {payload.get('db_last_analysis_error')}\n"
         f"- openai_sdk: {payload.get('openai_sdk')}\n"
+        f"- ai_last_http_status: {payload.get('ai_last_http_status')}\n"
+        f"- ai_last_raw_preview: {payload.get('ai_last_raw_preview')}\n"
         f"- admin_mode: {payload.get('admin_mode')}\n"
         f"- admins_count: {payload.get('admins_count')}\n"
         f"- admins_sample: {payload.get('admins_sample')}\n"
@@ -2502,6 +2660,8 @@ def diag_text(current_user_id: Optional[int] = None) -> str:
         f"- superadmin_source: {payload.get('superadmin_source')}\n"
         f"- owner_chat_id: {payload.get('owner_chat_id')}\n"
         f"- owner_source: {payload.get('owner_source')}\n"
+        f"- owner_seed_status: {payload.get('owner_seed_status')}\n"
+        f"- owner_seed_error: {payload.get('owner_seed_error')}\n"
         f"- ui_labels_version: {payload.get('ui_labels_version')}\n"
         f"- reviews.text_exists: {'yes' if payload.get('reviews_text_exists') else 'no'}\n"
         f"- reviews.review_text_exists: {'yes' if payload.get('reviews_review_text_exists') else 'no'}\n"
@@ -2545,6 +2705,9 @@ def diag_ai():
             "prompt_mode": prompt_mode,
             "http_status": AI_LAST_HTTP_STATUS,
             "raw_preview": raw[:300],
+            "deepseek_transport": DEEPSEEK_TRANSPORT,
+            "ai_last_http_status": AI_LAST_HTTP_STATUS,
+            "ai_last_raw_preview": AI_LAST_RAW_PREVIEW,
         })
     except Exception as e:
         return jsonify({
@@ -2554,6 +2717,9 @@ def diag_ai():
             "prompt_mode": prompt_mode,
             "http_status": AI_LAST_HTTP_STATUS,
             "raw_preview": AI_LAST_RAW_PREVIEW,
+            "deepseek_transport": DEEPSEEK_TRANSPORT,
+            "ai_last_http_status": AI_LAST_HTTP_STATUS,
+            "ai_last_raw_preview": AI_LAST_RAW_PREVIEW,
             "error": str(e)[:700],
         }), 500
 
@@ -2677,7 +2843,7 @@ def telegram_webhook():
                     return "ok"
                 if action == "list":
                     if not DB_OK:
-                        send_message(chat_id, "DB disabled. Проверь DATABASE_URL или /diag.")
+                        send_message(chat_id, _db_status_message())
                         answer_callback_query(cq_id, "OK")
                         return "ok"
                     users = db_list_access_users(active_only=True)
@@ -2693,7 +2859,7 @@ def telegram_webhook():
                     return "ok"
                 if action == "add":
                     if not DB_OK:
-                        send_message(chat_id, "DB disabled. Проверь DATABASE_URL или /diag.")
+                        send_message(chat_id, _db_status_message())
                         answer_callback_query(cq_id, "OK")
                         return "ok"
                     db_set_session(chat_id, STATE_ACCESS_ADD, {})
@@ -2702,7 +2868,7 @@ def telegram_webhook():
                     return "ok"
                 if action == "remove":
                     if not DB_OK:
-                        send_message(chat_id, "DB disabled. Проверь DATABASE_URL или /diag.")
+                        send_message(chat_id, _db_status_message())
                         answer_callback_query(cq_id, "OK")
                         return "ok"
                     users = [u for u in db_list_access_users(active_only=True) if u.get("role") != "owner"]
@@ -2791,7 +2957,7 @@ def telegram_webhook():
                     answer_callback_query(cq_id, "OK")
                     return "ok"
                 if not DB_OK:
-                    send_message(chat_id, "DB disabled. Проверь DATABASE_URL или /diag.")
+                    send_message(chat_id, _db_status_message())
                     answer_callback_query(cq_id, "OK")
                     return "ok"
                 db_deactivate_access_user(target_id)
@@ -3163,14 +3329,14 @@ def telegram_webhook():
         if _matches_label("find", text_clean, text_norm):
             _log_route("menu_find", chat_id, user_id)
             if not DB_OK:
-                send_message(chat_id, "DB disabled. Проверь DATABASE_URL или /diag.")
+                send_message(chat_id, _db_status_message())
                 return "ok"
             start_find_flow(chat_id)
             return "ok"
         if _matches_label("weekly", text_clean, text_norm):
             _log_route("menu_weekly", chat_id, user_id)
             if not DB_OK:
-                send_message(chat_id, "DB disabled. Проверь DATABASE_URL или /diag.")
+                send_message(chat_id, _db_status_message())
                 return "ok"
             report = db_weekly_summary()
             if not report.get("ok"):
@@ -3190,7 +3356,7 @@ def telegram_webhook():
         if _matches_label("export", text_clean, text_norm):
             _log_route("menu_export", chat_id, user_id)
             if not DB_OK:
-                send_message(chat_id, "DB disabled. Проверь DATABASE_URL или /diag.")
+                send_message(chat_id, _db_status_message())
                 return "ok"
             rows = db_export_reviews()
             if not rows:
@@ -3277,7 +3443,7 @@ def telegram_webhook():
                 send_message(chat_id, "⛔ Доступ запрещён.")
                 return "ok"
             if not DB_OK:
-                send_message(chat_id, "DB disabled. Проверь DATABASE_URL или /diag.")
+                send_message(chat_id, _db_status_message())
                 return "ok"
             match = re.search(r"\d+", cmd_args)
             if not match:
@@ -3302,7 +3468,7 @@ def telegram_webhook():
                 send_message(chat_id, "⛔ Доступ запрещён.")
                 return "ok"
             if not DB_OK:
-                send_message(chat_id, "DB disabled. Проверь DATABASE_URL или /diag.")
+                send_message(chat_id, _db_status_message())
                 return "ok"
             match = re.search(r"\d+", cmd_args)
             if not match:
@@ -3324,7 +3490,7 @@ def telegram_webhook():
         if cmd == "/find":
             _log_route("find", chat_id, user_id)
             if not DB_OK:
-                send_message(chat_id, "DB disabled. Проверь DATABASE_URL или /diag.")
+                send_message(chat_id, _db_status_message())
                 return "ok"
             start_find_flow(chat_id)
             return "ok"
@@ -3332,7 +3498,7 @@ def telegram_webhook():
         if cmd == "/weeklyreport":
             _log_route("weeklyreport", chat_id, user_id)
             if not DB_OK:
-                send_message(chat_id, "DB disabled. Проверь DATABASE_URL или /diag.")
+                send_message(chat_id, _db_status_message())
                 return "ok"
             report = db_weekly_summary()
             if not report.get("ok"):
@@ -3353,7 +3519,7 @@ def telegram_webhook():
         if cmd == "/exportcsv":
             _log_route("exportcsv", chat_id, user_id)
             if not DB_OK:
-                send_message(chat_id, "DB disabled. Проверь DATABASE_URL или /diag.")
+                send_message(chat_id, _db_status_message())
                 return "ok"
             rows = db_export_reviews()
             if not rows:
@@ -3382,7 +3548,7 @@ def telegram_webhook():
         if cmd == "/analyze":
             _log_route("analyze", chat_id, user_id)
             if not DB_OK:
-                send_message(chat_id, "DB disabled. Проверь DATABASE_URL или /diag.")
+                send_message(chat_id, _db_status_message())
                 return "ok"
             review_text = cmd_args
             if not review_text:
@@ -3399,7 +3565,7 @@ def telegram_webhook():
         if cmd == "/analyzereview":
             _log_route("analyzereview", chat_id, user_id)
             if not DB_OK:
-                send_message(chat_id, "DB disabled. Проверь DATABASE_URL или /diag.")
+                send_message(chat_id, _db_status_message())
                 return "ok"
             try:
                 review_id = int(cmd_args.split()[0])
@@ -3525,7 +3691,7 @@ def telegram_webhook():
                 _reset_state(chat_id)
                 return "ok"
             if not DB_OK:
-                send_message(chat_id, "DB disabled. Проверь DATABASE_URL или /diag.")
+                send_message(chat_id, _db_status_message())
                 _reset_state(chat_id)
                 return "ok"
             target_id = None
@@ -3570,7 +3736,7 @@ def telegram_webhook():
                 _reset_state(chat_id)
                 return "ok"
             if not DB_OK:
-                send_message(chat_id, "DB disabled. Проверь DATABASE_URL или /diag.")
+                send_message(chat_id, _db_status_message())
                 _reset_state(chat_id)
                 return "ok"
             match = re.findall(r"\d+", text_clean)
