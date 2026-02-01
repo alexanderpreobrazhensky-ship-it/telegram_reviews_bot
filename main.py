@@ -83,6 +83,14 @@ if ADMIN_CHAT_IDS:
 else:
     logger.warning("Admins parsed: count=0 (REPORT_CHAT_IDS is empty or invalid)")
 
+OWNER_CHAT_ID_RAW = (os.getenv("OWNER_CHAT_ID") or "").strip()
+OWNER_CHAT_ID = int(OWNER_CHAT_ID_RAW) if OWNER_CHAT_ID_RAW.isdigit() else None
+if OWNER_CHAT_ID is None and ADMIN_CHAT_IDS:
+    OWNER_CHAT_ID = ADMIN_CHAT_IDS[0]
+    logger.warning("OWNER_CHAT_ID not set. Using REPORT_CHAT_IDS fallback=%s", OWNER_CHAT_ID)
+if OWNER_CHAT_ID is None:
+    logger.critical("OWNER_CHAT_ID not set and REPORT_CHAT_IDS empty. Bot starts in closed mode.")
+
 DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("DATABASE_PUBLIC_URL") or os.getenv("DATABASE_URL_INTERNAL")
 
 CRON_TOKEN = os.getenv("CRON_TOKEN", "").strip()
@@ -91,6 +99,16 @@ DIAG_TOKEN = os.getenv("DIAG_TOKEN", "").strip()
 TG_TIMEOUT = float(os.getenv("TG_TIMEOUT", "10"))
 AI_TIMEOUT = float(os.getenv("AI_TIMEOUT", "40"))
 SET_WEBHOOK_ON_START = (os.getenv("SET_WEBHOOK_ON_START") or "1").strip() not in ("0", "false", "no")
+
+SERVICE_NAME = "Автоцентр Лира"
+SERVICE_ADDRESS = "Н. Новгород, ул. Удмуртская, д. 10"
+SERVICE_HOURS = "Пн–Пт 09:00–19:00; Сб–Вс выходной"
+SERVICE_PHONES = ["+7 (831) 214-00-50", "+7 (967) 711-50-50"]
+DEFAULT_BUSINESS_CONTEXT = (
+    "Автоцентр и автосервис: диагностика, ремонт, ТО, приёмка автомобиля, "
+    "запись на обслуживание, ожидание в зоне клиента, парковка, коммуникация мастеров, "
+    "сроки работ, согласование стоимости, качество ремонта и сервиса."
+)
 
 # -----------------------------
 # Flask
@@ -129,9 +147,15 @@ def send_message(chat_id: int, text: str, reply_markup: Optional[dict] = None, p
     try:
         r = requests.post(tg_api("sendMessage"), json=payload, timeout=TG_TIMEOUT)
         if r.status_code != 200:
-            logger.error("sendMessage failed status=%s body=%s", r.status_code, _redact(r.text[:900]))
+            logger.error(
+                "sendMessage failed status=%s chat_id=%s text=%s body=%s",
+                r.status_code,
+                chat_id,
+                _redact(text[:200]),
+                _redact(r.text[:900]),
+            )
     except Exception as e:
-        logger.exception("sendMessage exception: %s", e)
+        logger.exception("sendMessage exception chat_id=%s text=%s err=%s", chat_id, _redact(text[:200]), e)
 
 def answer_callback_query(callback_query_id: str, text: str = "", show_alert: bool = False) -> None:
     payload = {"callback_query_id": callback_query_id, "text": text, "show_alert": show_alert}
@@ -152,14 +176,40 @@ def send_document(chat_id: int, filename: str, content: bytes) -> None:
     except Exception:
         logger.exception("sendDocument exception")
 
-def _is_admin(user_id: Optional[int], chat_id: Optional[int] = None) -> bool:
-    if not ADMIN_CHAT_IDS:
-        return False
-    if user_id is not None and user_id in ADMIN_CHAT_IDS:
-        return True
-    if chat_id is not None and chat_id in ADMIN_CHAT_IDS:
-        return True
-    return False
+def get_user_role(user_id: Optional[int]) -> str:
+    if user_id is None:
+        return "none"
+    if not DB_OK:
+        if OWNER_CHAT_ID is not None and user_id == OWNER_CHAT_ID:
+            return "owner"
+        if ADMIN_CHAT_IDS and user_id in ADMIN_CHAT_IDS:
+            return "operator"
+        return "none"
+    conn = _db_connect()
+    if not conn:
+        return "none"
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT role FROM access_users WHERE chat_id=%s AND is_active=true",
+                (user_id,),
+            )
+            row = cur.fetchone()
+            return row[0] if row else "none"
+    except Exception:
+        logger.exception("get_user_role failed")
+        return "none"
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+def can_use_bot(user_id: Optional[int]) -> bool:
+    return get_user_role(user_id) in ("owner", "operator")
+
+def can_manage_access(user_id: Optional[int]) -> bool:
+    return get_user_role(user_id) == "owner"
 
 def _display_name(user: dict) -> str:
     username = (user.get("username") or "").strip()
@@ -260,18 +310,18 @@ def db_init() -> None:
     try:
         with conn.cursor() as cur:
             # baseline (minimal tables)
-            cur.execute("CREATE TABLE IF NOT EXISTS reviews (id BIGSERIAL PRIMARY KEY);")
-            cur.execute("CREATE TABLE IF NOT EXISTS review_analyses (id BIGSERIAL PRIMARY KEY);")
+            cur.execute("CREATE TABLE IF NOT EXISTS public.reviews (id BIGSERIAL PRIMARY KEY);")
+            cur.execute("CREATE TABLE IF NOT EXISTS public.review_analyses (id BIGSERIAL PRIMARY KEY);")
 
             cur.execute("""
-                CREATE TABLE IF NOT EXISTS settings (
+                CREATE TABLE IF NOT EXISTS public.settings (
                     key TEXT PRIMARY KEY,
                     value JSONB NOT NULL DEFAULT '{}'::jsonb,
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
                 );
             """)
             cur.execute("""
-                CREATE TABLE IF NOT EXISTS user_sessions (
+                CREATE TABLE IF NOT EXISTS public.user_sessions (
                     chat_id BIGINT PRIMARY KEY,
                     state TEXT NOT NULL,
                     payload JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -280,59 +330,134 @@ def db_init() -> None:
             """)
 
             # ---- reviews columns (compat)
-            cur.execute("ALTER TABLE reviews ADD COLUMN IF NOT EXISTS platform TEXT;")
-            cur.execute("ALTER TABLE reviews ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'manual';")
-            cur.execute("ALTER TABLE reviews ADD COLUMN IF NOT EXISTS rating INT;")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS public.reviews (
+                  id BIGSERIAL PRIMARY KEY,
+                  platform TEXT,
+                  source TEXT NOT NULL DEFAULT 'manual',
+                  rating INT,
+                  review_text TEXT NOT NULL,
+                  review_hash TEXT,
+                  meta JSONB NOT NULL DEFAULT '{}'::jsonb,
+                  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                );
+            """)
+            cur.execute("""
+                DO $$
+                BEGIN
+                  IF EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_schema='public' AND table_name='reviews' AND column_name='text'
+                  )
+                  AND NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_schema='public' AND table_name='reviews' AND column_name='review_text'
+                  ) THEN
+                    ALTER TABLE public.reviews RENAME COLUMN text TO review_text;
+                  END IF;
+                END $$;
+            """)
+            cur.execute("ALTER TABLE public.reviews ADD COLUMN IF NOT EXISTS platform TEXT;")
+            cur.execute("ALTER TABLE public.reviews ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'manual';")
+            cur.execute("ALTER TABLE public.reviews ADD COLUMN IF NOT EXISTS rating INT;")
+            cur.execute("ALTER TABLE public.reviews ADD COLUMN IF NOT EXISTS review_hash TEXT;")
+            cur.execute("ALTER TABLE public.reviews ADD COLUMN IF NOT EXISTS meta JSONB NOT NULL DEFAULT '{}'::jsonb;")
+            cur.execute("ALTER TABLE public.reviews ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT now();")
+            cur.execute("""
+                DO $$
+                BEGIN
+                  IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_schema='public' AND table_name='reviews' AND column_name='review_text'
+                  ) THEN
+                    ALTER TABLE public.reviews ADD COLUMN review_text TEXT;
+                  END IF;
+                  UPDATE public.reviews SET review_text = '' WHERE review_text IS NULL;
+                  ALTER TABLE public.reviews ALTER COLUMN review_text SET NOT NULL;
+                END $$;
+            """)
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_reviews_created_at ON public.reviews(created_at);")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_reviews_review_hash ON public.reviews(review_hash);")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_reviews_platform_rating_created ON public.reviews(platform, rating, created_at);")
 
-            # OLD schema column:
-            cur.execute("ALTER TABLE reviews ADD COLUMN IF NOT EXISTS text TEXT;")
-            # NEW schema column:
-            cur.execute("ALTER TABLE reviews ADD COLUMN IF NOT EXISTS review_text TEXT;")
-
-            cur.execute("ALTER TABLE reviews ADD COLUMN IF NOT EXISTS review_hash TEXT;")
-            cur.execute("ALTER TABLE reviews ADD COLUMN IF NOT EXISTS meta JSONB NOT NULL DEFAULT '{}'::jsonb;")
-            cur.execute("ALTER TABLE reviews ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT now();")
-
-            # backfill between text <-> review_text
-            # if old column has data but new is null:
-            cur.execute("UPDATE reviews SET review_text = text WHERE review_text IS NULL AND text IS NOT NULL;")
-            # if new column has data but old is null:
-            cur.execute("UPDATE reviews SET text = review_text WHERE text IS NULL AND review_text IS NOT NULL;")
-
-            # If `text` is NOT NULL in old DB, ensure inserts won't violate it.
-            # We will always insert into `text`, so no need to drop constraint here.
+            cur.execute("ALTER TABLE public.reviews ADD COLUMN IF NOT EXISTS text TEXT;")
+            cur.execute("UPDATE public.reviews SET text = review_text WHERE text IS NULL AND review_text IS NOT NULL;")
             _refresh_review_columns(cur)
 
             # ---- review_analyses columns
-            cur.execute("ALTER TABLE review_analyses ADD COLUMN IF NOT EXISTS review_id BIGINT;")
-            cur.execute("ALTER TABLE review_analyses ADD COLUMN IF NOT EXISTS platform TEXT;")
-            cur.execute("ALTER TABLE review_analyses ADD COLUMN IF NOT EXISTS rating INT;")
-            cur.execute("ALTER TABLE review_analyses ADD COLUMN IF NOT EXISTS review_text TEXT;")
-            cur.execute("ALTER TABLE review_analyses ADD COLUMN IF NOT EXISTS result_json JSONB NOT NULL DEFAULT '{}'::jsonb;")
-            cur.execute("ALTER TABLE review_analyses ADD COLUMN IF NOT EXISTS error TEXT;")
-            cur.execute("ALTER TABLE review_analyses ADD COLUMN IF NOT EXISTS model TEXT;")
-            cur.execute("ALTER TABLE review_analyses ADD COLUMN IF NOT EXISTS engine TEXT;")
-            cur.execute("ALTER TABLE review_analyses ADD COLUMN IF NOT EXISTS created_by BIGINT;")
-            cur.execute("ALTER TABLE review_analyses ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT now();")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS public.review_analyses (
+                  id BIGSERIAL PRIMARY KEY,
+                  review_id BIGINT UNIQUE,
+                  platform TEXT,
+                  rating INT,
+                  review_text TEXT NOT NULL,
+                  result_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                  error TEXT,
+                  model TEXT,
+                  engine TEXT,
+                  created_by BIGINT,
+                  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                );
+            """)
+            cur.execute("ALTER TABLE public.review_analyses ADD COLUMN IF NOT EXISTS review_id BIGINT;")
+            cur.execute("ALTER TABLE public.review_analyses ADD COLUMN IF NOT EXISTS platform TEXT;")
+            cur.execute("ALTER TABLE public.review_analyses ADD COLUMN IF NOT EXISTS rating INT;")
+            cur.execute("ALTER TABLE public.review_analyses ADD COLUMN IF NOT EXISTS review_text TEXT;")
+            cur.execute("ALTER TABLE public.review_analyses ADD COLUMN IF NOT EXISTS result_json JSONB NOT NULL DEFAULT '{}'::jsonb;")
+            cur.execute("ALTER TABLE public.review_analyses ADD COLUMN IF NOT EXISTS error TEXT;")
+            cur.execute("ALTER TABLE public.review_analyses ADD COLUMN IF NOT EXISTS model TEXT;")
+            cur.execute("ALTER TABLE public.review_analyses ADD COLUMN IF NOT EXISTS engine TEXT;")
+            cur.execute("ALTER TABLE public.review_analyses ADD COLUMN IF NOT EXISTS created_by BIGINT;")
+            cur.execute("ALTER TABLE public.review_analyses ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT now();")
+            cur.execute("UPDATE public.review_analyses SET review_text = '' WHERE review_text IS NULL;")
+            cur.execute("ALTER TABLE public.review_analyses ALTER COLUMN review_text SET NOT NULL;")
+            cur.execute("""
+                DO $$
+                BEGIN
+                  IF NOT EXISTS (
+                    SELECT 1
+                    FROM pg_constraint
+                    WHERE conname = 'review_analyses_review_id_key'
+                      AND conrelid = 'public.review_analyses'::regclass
+                  ) THEN
+                    ALTER TABLE public.review_analyses
+                      ADD CONSTRAINT review_analyses_review_id_key UNIQUE (review_id);
+                  END IF;
+                END $$;
+            """)
 
-            # ensure unique index on review_id (best-effort)
-            try:
-                cur.execute("""
-                    DO $$
-                    BEGIN
-                        IF NOT EXISTS (
-                            SELECT 1
-                            FROM pg_indexes
-                            WHERE schemaname = 'public'
-                              AND tablename = 'review_analyses'
-                              AND indexname = 'review_analyses_review_id_uniq'
-                        ) THEN
-                            CREATE UNIQUE INDEX review_analyses_review_id_uniq ON review_analyses (review_id);
-                        END IF;
-                    END$$;
-                """)
-            except Exception:
-                pass
+            # ---- access control table
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS public.access_users (
+                  chat_id BIGINT PRIMARY KEY,
+                  role TEXT NOT NULL,
+                  added_by BIGINT,
+                  added_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                  is_active BOOLEAN NOT NULL DEFAULT TRUE
+                );
+            """)
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_access_users_active ON public.access_users(is_active);")
+
+            if OWNER_CHAT_ID is not None:
+                cur.execute(
+                    """
+                    INSERT INTO public.access_users (chat_id, role, added_by, is_active)
+                    VALUES (%s, 'owner', %s, TRUE)
+                    ON CONFLICT (chat_id)
+                    DO UPDATE SET role='owner', is_active=TRUE
+                    """,
+                    (OWNER_CHAT_ID, OWNER_CHAT_ID),
+                )
+
+            cur.execute(
+                """
+                INSERT INTO public.settings (key, value)
+                SELECT 'business_context', %s::jsonb
+                WHERE NOT EXISTS (SELECT 1 FROM public.settings WHERE key='business_context')
+                """,
+                (json.dumps({"value": DEFAULT_BUSINESS_CONTEXT}, ensure_ascii=False),),
+            )
 
         DB_OK = True
         logger.info("DB init OK (postgres=True)")
@@ -667,6 +792,102 @@ def db_set_setting(key: str, value: dict) -> None:
             )
     except Exception:
         logger.exception("db_set_setting failed")
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+def db_upsert_access_user(chat_id: int, role: str, added_by: Optional[int]) -> None:
+    conn = _db_connect()
+    if not conn:
+        return
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO access_users (chat_id, role, added_by, is_active)
+                VALUES (%s, %s, %s, TRUE)
+                ON CONFLICT (chat_id)
+                DO UPDATE SET role=EXCLUDED.role, added_by=EXCLUDED.added_by, is_active=TRUE, added_at=now()
+                """,
+                (chat_id, role, added_by),
+            )
+    except Exception:
+        logger.exception("db_upsert_access_user failed")
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+def db_deactivate_access_user(chat_id: int) -> None:
+    conn = _db_connect()
+    if not conn:
+        return
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE access_users SET is_active=false WHERE chat_id=%s",
+                (chat_id,),
+            )
+    except Exception:
+        logger.exception("db_deactivate_access_user failed")
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+def db_list_access_users(active_only: bool = True) -> List[dict]:
+    conn = _db_connect()
+    if not conn:
+        return []
+    try:
+        with conn.cursor() as cur:
+            if active_only:
+                cur.execute(
+                    "SELECT chat_id, role, added_by, added_at, is_active FROM access_users WHERE is_active=true ORDER BY role DESC, added_at ASC"
+                )
+            else:
+                cur.execute(
+                    "SELECT chat_id, role, added_by, added_at, is_active FROM access_users ORDER BY role DESC, added_at ASC"
+                )
+            rows = cur.fetchall() or []
+            return [
+                {
+                    "chat_id": int(r[0]),
+                    "role": r[1],
+                    "added_by": r[2],
+                    "added_at": r[3],
+                    "is_active": bool(r[4]),
+                }
+                for r in rows
+            ]
+    except Exception:
+        logger.exception("db_list_access_users failed")
+        return []
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+def db_count_access_users(active_only: bool = True) -> int:
+    conn = _db_connect()
+    if not conn:
+        return 0
+    try:
+        with conn.cursor() as cur:
+            if active_only:
+                cur.execute("SELECT count(*) FROM access_users WHERE is_active=true")
+            else:
+                cur.execute("SELECT count(*) FROM access_users")
+            row = cur.fetchone()
+            return int(row[0]) if row else 0
+    except Exception:
+        logger.exception("db_count_access_users failed")
+        return 0
     finally:
         try:
             conn.close()
@@ -1254,6 +1475,7 @@ HELP_TEXT = (
     "/find — поиск отзывов (пошагово)\n"
     "/weeklyreport — недельный отчёт\n"
     "/exportcsv — экспорт CSV\n"
+    "/contacts — контакты сервиса\n"
     "/diag — самодиагностика\n"
     "/cancel — сброс состояния\n"
 )
@@ -1272,22 +1494,42 @@ INSTRUCTION_TEXT = (
     "**Если что-то не работает:** нажми **🛠 Самодиагностика** и пришли результат разработчику."
 )
 
+def contacts_text() -> str:
+    phones = "\n".join([f"- {p}" for p in SERVICE_PHONES])
+    return (
+        f"📞 Контакты {SERVICE_NAME}\n"
+        f"📍 Адрес: {SERVICE_ADDRESS}\n"
+        f"🕒 Режим работы: {SERVICE_HOURS}\n"
+        f"☎️ Телефоны:\n{phones}"
+    )
+
 def main_menu_keyboard() -> dict:
     return {
         "keyboard": [
             ["📘 Инструкция", "📋 Список команд", "🆔 Мой ID"],
             ["🛠 Самодиагностика", "➕ Добавить отзыв", "🧠 Анализ по ID"],
             ["🔍 Поиск отзывов", "📊 Недельный отчёт", "📤 Экспорт CSV"],
-            ["⚙️ Настройки"],
+            ["📞 Контакты", "⚙️ Настройки"],
         ],
         "resize_keyboard": True,
     }
 
-def settings_keyboard() -> dict:
+def settings_keyboard(can_manage: bool = False) -> dict:
+    rows = [
+        [{"text": "Выбор ИИ", "callback_data": "settings:engine"}],
+        [{"text": "Бизнес-контекст", "callback_data": "settings:context"}],
+    ]
+    if can_manage:
+        rows.append([{"text": "👥 Управление доступами", "callback_data": "settings:access"}])
+    return {"inline_keyboard": rows}
+
+def access_manage_keyboard() -> dict:
     return {
         "inline_keyboard": [
-            [{"text": "Выбор ИИ", "callback_data": "settings:engine"}],
-            [{"text": "Бизнес-контекст", "callback_data": "settings:context"}],
+            [{"text": "📋 Список пользователей", "callback_data": "access:list"}],
+            [{"text": "➕ Добавить пользователя", "callback_data": "access:add"}],
+            [{"text": "➖ Удалить пользователя", "callback_data": "access:remove"}],
+            [{"text": "⬅️ Назад", "callback_data": "access:back"}],
         ]
     }
 
@@ -1334,6 +1576,8 @@ STATE_WAIT_CONTEXT = "WAIT_CONTEXT"
 STATE_FIND_PLATFORM = "FIND_PLATFORM"
 STATE_FIND_RATING = "FIND_RATING"
 STATE_FIND_DAYS = "FIND_DAYS"
+STATE_ACCESS_ADD = "ACCESS_ADD"
+STATE_ACCESS_REMOVE = "ACCESS_REMOVE"
 
 def _reset_state(chat_id: int) -> None:
     db_clear_session(chat_id)
@@ -1370,8 +1614,14 @@ def format_analysis_brief(result_json: dict) -> str:
     return "\n".join(lines)
 
 def notify_admins(text: str) -> None:
-    for cid in ADMIN_CHAT_IDS:
-        send_message(cid, text)
+    ids = {OWNER_CHAT_ID} if OWNER_CHAT_ID is not None else set()
+    if DB_OK:
+        for user in db_list_access_users(active_only=True):
+            if user.get("role") in ("owner", "operator"):
+                ids.add(user["chat_id"])
+    ids.update(ADMIN_CHAT_IDS)
+    for cid in sorted({i for i in ids if i is not None}):
+        send_message(int(cid), text)
 
 def background_analyze(chat_id: int, user_id: int, review_text: str, platform_hint: str = "unknown",
                       rating: Optional[int] = None, review_id: Optional[int] = None) -> None:
@@ -1408,7 +1658,10 @@ def background_analyze(chat_id: int, user_id: int, review_text: str, platform_hi
             model=model_name,
             engine=engine,
             created_by=user_id,
-        ) or 0
+        )
+        if analysis_id is None:
+            send_message(chat_id, "❌ Ошибка БД. Анализ не сохранён.")
+            return
 
         brief = format_analysis_brief(parsed)
         send_message(
@@ -1432,7 +1685,10 @@ def background_analyze(chat_id: int, user_id: int, review_text: str, platform_hi
             model=model_name,
             engine=engine,
             created_by=user_id,
-        ) or 0
+        )
+        if analysis_id is None:
+            send_message(chat_id, "❌ Ошибка БД. Анализ не сохранён.")
+            return
 
         error_type = "unknown"
         if "Cloudflare" in err_text or "returned HTML" in err_text or "just a moment" in err_text.lower():
@@ -1529,8 +1785,9 @@ def diag_text(current_user_id: Optional[int] = None) -> str:
     engine = _current_engine()
     prompt_mode = (os.getenv("CX_PROMPT_MODE") or CX_PROMPT_MODE).strip().lower()
     base_url = DEEPSEEK_BASE_URL if engine == "deepseek" else None
-    is_admin_current = _is_admin(current_user_id) if current_user_id is not None else None
+    role_current = get_user_role(current_user_id) if current_user_id is not None else None
     allowlist_empty = "yes" if not ADMIN_CHAT_IDS else "no"
+    access_count = db_count_access_users(active_only=True) if DB_OK else 0
     return (
         "Самодиагностика:\n"
         f"- webhook_path: {WEBHOOK_PATH}\n"
@@ -1545,7 +1802,9 @@ def diag_text(current_user_id: Optional[int] = None) -> str:
         f"- admin_mode: {ADMIN_MODE}\n"
         f"- admins_count: {len(ADMIN_CHAT_IDS)}\n"
         f"- allowlist_empty: {allowlist_empty}\n"
-        f"- is_admin_current_user: {is_admin_current}\n"
+        f"- role_current_user: {role_current}\n"
+        f"- access_users_count_active: {access_count}\n"
+        f"- owner_chat_id_detected: {OWNER_CHAT_ID}\n"
     )
 
 # -----------------------------
@@ -1624,7 +1883,7 @@ def telegram_webhook():
                 sess.get("state") if sess else None,
             )
 
-            if not _is_admin(user_id, chat_id):
+            if not can_use_bot(user_id):
                 _log_route("blocked_callback", chat_id, user_id)
                 if chat_id:
                     send_message(chat_id, "⛔ Доступ запрещён. Обратитесь к администратору.")
@@ -1646,6 +1905,17 @@ def telegram_webhook():
                 answer_callback_query(cq_id, "OK")
                 return "ok"
 
+            if data.startswith("settings:access"):
+                _log_route("settings_access", chat_id, user_id)
+                if not can_manage_access(user_id):
+                    if cq_id:
+                        answer_callback_query(cq_id, "Только владелец", show_alert=True)
+                    return "ok"
+                if chat_id:
+                    send_message(chat_id, "Управление доступами:", reply_markup=access_manage_keyboard())
+                answer_callback_query(cq_id, "OK")
+                return "ok"
+
             if data.startswith("setengine:"):
                 engine = data.split(":", 1)[1].strip().lower()
                 _log_route(f"setengine:{engine}", chat_id, user_id)
@@ -1654,6 +1924,84 @@ def telegram_webhook():
                     send_message(chat_id, f"Движок обновлён: {engine}")
                 else:
                     send_message(chat_id, "Неизвестный движок.")
+                answer_callback_query(cq_id, "OK")
+                return "ok"
+
+            if data.startswith("access:"):
+                action = data.split(":", 1)[1]
+                _log_route(f"access:{action}", chat_id, user_id)
+                if not can_manage_access(user_id):
+                    if cq_id:
+                        answer_callback_query(cq_id, "Только владелец", show_alert=True)
+                    return "ok"
+                if not chat_id:
+                    return "ok"
+                if action == "list":
+                    if not DB_OK:
+                        send_message(chat_id, "DB disabled. Проверь DATABASE_URL или /diag.")
+                        answer_callback_query(cq_id, "OK")
+                        return "ok"
+                    users = db_list_access_users(active_only=True)
+                    lines = ["👥 Активные пользователи:"]
+                    for u in users:
+                        added_at = u.get("added_at")
+                        date_str = added_at.strftime("%Y-%m-%d") if isinstance(added_at, datetime) else str(added_at)[:10]
+                        lines.append(f"- {u['chat_id']} | {u['role']} | {date_str}")
+                    send_message(chat_id, "\n".join(lines))
+                    answer_callback_query(cq_id, "OK")
+                    return "ok"
+                if action == "add":
+                    if not DB_OK:
+                        send_message(chat_id, "DB disabled. Проверь DATABASE_URL или /diag.")
+                        answer_callback_query(cq_id, "OK")
+                        return "ok"
+                    db_set_session(chat_id, STATE_ACCESS_ADD, {})
+                    send_message(chat_id, "Пришли ID пользователя (числом) или пересланное сообщение от пользователя.")
+                    answer_callback_query(cq_id, "OK")
+                    return "ok"
+                if action == "remove":
+                    if not DB_OK:
+                        send_message(chat_id, "DB disabled. Проверь DATABASE_URL или /diag.")
+                        answer_callback_query(cq_id, "OK")
+                        return "ok"
+                    users = [u for u in db_list_access_users(active_only=True) if u.get("role") != "owner"]
+                    if not users:
+                        send_message(chat_id, "Нет активных пользователей для удаления.")
+                        answer_callback_query(cq_id, "OK")
+                        return "ok"
+                    rows = []
+                    for u in users:
+                        label = f"Удалить {u['chat_id']}"
+                        rows.append([{"text": label, "callback_data": f"access_remove:{u['chat_id']}"}])
+                    send_message(chat_id, "Выбери пользователя для удаления:", reply_markup={"inline_keyboard": rows})
+                    answer_callback_query(cq_id, "OK")
+                    return "ok"
+                if action == "back":
+                    send_message(chat_id, "Настройки:", reply_markup=settings_keyboard(can_manage_access(user_id)))
+                    answer_callback_query(cq_id, "OK")
+                    return "ok"
+
+            if data.startswith("access_remove:"):
+                user_raw = data.split(":", 1)[1]
+                _log_route(f"access_remove:{user_raw}", chat_id, user_id)
+                if not can_manage_access(user_id):
+                    if cq_id:
+                        answer_callback_query(cq_id, "Только владелец", show_alert=True)
+                    return "ok"
+                if not chat_id:
+                    return "ok"
+                try:
+                    target_id = int(user_raw)
+                except Exception:
+                    send_message(chat_id, "Некорректный ID.")
+                    answer_callback_query(cq_id, "OK")
+                    return "ok"
+                if not DB_OK:
+                    send_message(chat_id, "DB disabled. Проверь DATABASE_URL или /diag.")
+                    answer_callback_query(cq_id, "OK")
+                    return "ok"
+                db_deactivate_access_user(target_id)
+                send_message(chat_id, f"✅ Пользователь {target_id} отключён.")
                 answer_callback_query(cq_id, "OK")
                 return "ok"
 
@@ -1898,6 +2246,7 @@ def telegram_webhook():
         text = message.get("text")
         text = text if isinstance(text, str) else ""
         text_clean = text.strip()
+        text_norm = re.sub(r"\s+", " ", text_clean)
         sess = _get_active_session(chat_id) if chat_id else None
         logger.info(
             "Trace message: update_id=%s chat_id=%s user_id=%s text=%r len=%s session_state=%s",
@@ -1911,7 +2260,7 @@ def telegram_webhook():
 
         if not chat_id or not user_id:
             return "ok"
-        if not _is_admin(user_id, chat_id):
+        if not can_use_bot(user_id):
             _log_route("blocked_message", chat_id, user_id)
             send_message(chat_id, "⛔ Доступ запрещён. Обратитесь к администратору.")
             return "ok"
@@ -1922,6 +2271,7 @@ def telegram_webhook():
 
         if cmd == "/start":
             _log_route("start", chat_id, user_id)
+            logger.info("Dispatch: matched=/start")
             _reset_state(chat_id)
             name = _display_name(user)
             send_message(
@@ -1939,6 +2289,11 @@ def telegram_webhook():
         if cmd == "/myid":
             _log_route("myid", chat_id, user_id)
             send_message(chat_id, f"Ваш ID: {user_id}")
+            return "ok"
+
+        if cmd == "/contacts":
+            _log_route("contacts", chat_id, user_id)
+            send_message(chat_id, contacts_text())
             return "ok"
 
         if cmd == "/diag":
@@ -2135,7 +2490,62 @@ def telegram_webhook():
             return "ok"
         if text_clean == "⚙️ Настройки":
             _log_route("menu_settings", chat_id, user_id)
-            send_message(chat_id, "Настройки:", reply_markup=settings_keyboard())
+            send_message(chat_id, "Настройки:", reply_markup=settings_keyboard(can_manage_access(user_id)))
+            return "ok"
+        if text_clean == "📞 Контакты":
+            _log_route("menu_contacts", chat_id, user_id)
+            send_message(chat_id, contacts_text())
+            return "ok"
+
+        if text_norm.startswith("📘"):
+            _log_route("menu_instruction_fallback", chat_id, user_id)
+            send_message(chat_id, INSTRUCTION_TEXT, parse_mode="Markdown")
+            return "ok"
+        if "Мой ID" in text_norm:
+            _log_route("menu_myid_fallback", chat_id, user_id)
+            send_message(chat_id, f"Ваш ID: {user_id}")
+            return "ok"
+        if "Поиск отзывов" in text_norm:
+            _log_route("menu_find_fallback", chat_id, user_id)
+            if not DB_OK:
+                send_message(chat_id, "DB disabled. Проверь DATABASE_URL или /diag.")
+                return "ok"
+            start_find_flow(chat_id)
+            return "ok"
+        if "Недельный отчёт" in text_norm:
+            _log_route("menu_weekly_fallback", chat_id, user_id)
+            if not DB_OK:
+                send_message(chat_id, "DB disabled. Проверь DATABASE_URL или /diag.")
+                return "ok"
+            report = db_weekly_summary()
+            if not report.get("ok"):
+                send_message(chat_id, f"❌ {report.get('error')}")
+                return "ok"
+            avg_rating = report.get("avg_rating")
+            sentiments = report.get("sentiments") or {}
+            msg = (
+                f"Недельный отчёт ({report.get('days')} дн.):\n"
+                f"- всего анализов: {report.get('total')}\n"
+                f"- с ошибкой: {report.get('with_error')}\n"
+                f"- средний рейтинг: {avg_rating if avg_rating is not None else 'n/a'}\n"
+                f"- тональности: {sentiments}\n"
+            )
+            send_message(chat_id, msg)
+            return "ok"
+        if "Экспорт CSV" in text_norm:
+            _log_route("menu_export_fallback", chat_id, user_id)
+            if not DB_OK:
+                send_message(chat_id, "DB disabled. Проверь DATABASE_URL или /diag.")
+                return "ok"
+            rows = db_export_reviews()
+            if not rows:
+                send_message(chat_id, "Нет данных для экспорта.")
+                return "ok"
+            send_document(chat_id, "reviews_export.csv", build_csv_export(rows))
+            return "ok"
+        if "Контакты" in text_norm:
+            _log_route("menu_contacts_fallback", chat_id, user_id)
+            send_message(chat_id, contacts_text())
             return "ok"
 
         if sess and sess.get("state") == STATE_WAIT_REVIEW_TEXT:
@@ -2192,6 +2602,33 @@ def telegram_webhook():
             send_message(chat_id, "⏳ Анализ запущен, подожди пару секунд…")
             return "ok"
 
+        if sess and sess.get("state") == STATE_ACCESS_ADD:
+            _log_route("state_access_add", chat_id, user_id)
+            if not can_manage_access(user_id):
+                send_message(chat_id, "⛔ Доступ запрещён.")
+                _reset_state(chat_id)
+                return "ok"
+            if not DB_OK:
+                send_message(chat_id, "DB disabled. Проверь DATABASE_URL или /diag.")
+                _reset_state(chat_id)
+                return "ok"
+            target_id = None
+            forward_from = message.get("forward_from") or {}
+            if forward_from.get("id"):
+                target_id = int(forward_from["id"])
+            if target_id is None:
+                match = re.findall(r"\d+", text_clean)
+                if match:
+                    target_id = int(match[0])
+            if target_id is None:
+                send_message(chat_id, "Не смог определить ID. Пришли число или пересланное сообщение.")
+                return "ok"
+            role = "operator"
+            db_upsert_access_user(target_id, role, user_id)
+            _reset_state(chat_id)
+            send_message(chat_id, f"✅ Пользователь {target_id} добавлен как {role}.")
+            return "ok"
+
         if sess and sess.get("state") == STATE_WAIT_CONTEXT:
             _log_route("state_wait_context", chat_id, user_id)
             db_set_setting("business_context", {"value": text_clean})
@@ -2199,7 +2636,14 @@ def telegram_webhook():
             send_message(chat_id, "Бизнес-контекст обновлён.")
             return "ok"
 
-        if sess and sess.get("state") in (STATE_WAIT_PLATFORM, STATE_WAIT_RATING, STATE_WAIT_DUP_CONFIRM, STATE_FIND_PLATFORM, STATE_FIND_RATING, STATE_FIND_DAYS):
+        if sess and sess.get("state") in (
+            STATE_WAIT_PLATFORM,
+            STATE_WAIT_RATING,
+            STATE_WAIT_DUP_CONFIRM,
+            STATE_FIND_PLATFORM,
+            STATE_FIND_RATING,
+            STATE_FIND_DAYS,
+        ):
             _log_route(f"state_pending_buttons:{sess.get('state')}", chat_id, user_id)
             send_message(chat_id, "Используй кнопки под сообщением или /cancel.")
             return "ok"
@@ -2211,7 +2655,7 @@ def telegram_webhook():
 
     except Exception:
         logger.exception("telegram_webhook exception")
-        if chat_id and _is_admin(user_id, chat_id):
+        if chat_id and can_use_bot(user_id):
             send_message(chat_id, "⚠️ Ошибка обработки. См. /diag")
         notify_admins("⚠️ Ошибка обработки. См. /diag")
         return "ok"
