@@ -8,9 +8,12 @@ import logging
 import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlencode, urlparse, urlunparse, quote
 
 import requests
 from flask import Flask, request, jsonify
+
+from review_fetch import detect_platform, fetch_url, parse_2gis_review, parse_yandex_review
 
 # -----------------------------
 # Logging
@@ -83,15 +86,18 @@ if ADMIN_CHAT_IDS:
 else:
     logger.warning("Admins parsed: count=0 (REPORT_CHAT_IDS is empty or invalid)")
 
+DEFAULT_SUPERADMIN_ID = 738627185
 SUPERADMIN_ID_RAW = (os.getenv("SUPERADMIN_ID") or "").strip()
 SUPERADMIN_ID = int(SUPERADMIN_ID_RAW) if SUPERADMIN_ID_RAW.isdigit() else None
 if SUPERADMIN_ID is None and ADMIN_CHAT_IDS:
     SUPERADMIN_ID = ADMIN_CHAT_IDS[0]
     logger.warning("SUPERADMIN_ID not set. Using REPORT_CHAT_IDS fallback=%s", SUPERADMIN_ID)
 if SUPERADMIN_ID is None:
-    logger.critical("SUPERADMIN_ID not set and REPORT_CHAT_IDS empty. Bot starts in closed mode.")
+    SUPERADMIN_ID = DEFAULT_SUPERADMIN_ID
+    logger.warning("SUPERADMIN_ID not set. Using default owner id=%s", SUPERADMIN_ID)
 
-DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("DATABASE_PUBLIC_URL") or os.getenv("DATABASE_URL_INTERNAL")
+DATABASE_URL = None
+DB_URL_SOURCE = "unset"
 
 CRON_TOKEN = os.getenv("CRON_TOKEN", "").strip()
 DIAG_TOKEN = os.getenv("DIAG_TOKEN", "").strip()
@@ -99,6 +105,9 @@ DIAG_TOKEN = os.getenv("DIAG_TOKEN", "").strip()
 TG_TIMEOUT = float(os.getenv("TG_TIMEOUT", "10"))
 AI_TIMEOUT = float(os.getenv("AI_TIMEOUT", "40"))
 SET_WEBHOOK_ON_START = (os.getenv("SET_WEBHOOK_ON_START") or "1").strip() not in ("0", "false", "no")
+
+AI_LAST_HTTP_STATUS: Optional[int] = None
+AI_LAST_RAW_PREVIEW: Optional[str] = None
 
 SERVICE_NAME = "Автоцентр Лира"
 SERVICE_ADDRESS = "Нижний Новгород, ул. Удмуртская, д. 10"
@@ -135,6 +144,40 @@ def _redact(s: str) -> str:
     if GROK_API_KEY:
         s = s.replace(GROK_API_KEY, "***GROK_KEY***")
     return s
+
+def _redact_db_error(err: str) -> str:
+    if not err:
+        return err
+    sanitized = re.sub(r"//([^:/?#]+):([^@]+)@", r"//\1:***@", err)
+    sanitized = re.sub(r"password=([^\s]+)", "password=***", sanitized, flags=re.IGNORECASE)
+    return sanitized
+
+def resolve_database_url() -> Tuple[Optional[str], str]:
+    direct = os.getenv("DATABASE_URL")
+    if direct:
+        return direct, "DATABASE_URL"
+    public_url = os.getenv("DATABASE_PUBLIC_URL")
+    if public_url:
+        return public_url, "DATABASE_PUBLIC_URL"
+    internal_url = os.getenv("DATABASE_URL_INTERNAL")
+    if internal_url:
+        return internal_url, "DATABASE_URL_INTERNAL"
+    pg_host = os.getenv("PGHOST")
+    pg_port = os.getenv("PGPORT") or "5432"
+    pg_user = os.getenv("PGUSER")
+    pg_password = os.getenv("PGPASSWORD")
+    pg_database = os.getenv("PGDATABASE")
+    if pg_host and pg_user and pg_database:
+        auth = f"{quote(pg_user)}:{quote(pg_password or '')}@"
+        return f"postgresql://{auth}{pg_host}:{pg_port}/{pg_database}", "PG*"
+    return None, "missing"
+
+def _append_url_params(url: str, params: Dict[str, str]) -> str:
+    parsed = urlparse(url)
+    query = dict([pair.split("=", 1) for pair in parsed.query.split("&") if pair]) if parsed.query else {}
+    query.update(params)
+    new_query = urlencode(query)
+    return urlunparse(parsed._replace(query=new_query))
 
 # -----------------------------
 # Telegram helpers
@@ -274,16 +317,33 @@ DB_ACCESS_HAS_CREATED_AT = False
 DB_ACCESS_HAS_ADDED_AT = False
 
 def _db_connect():
-    global DB_LAST_ERROR
+    global DB_LAST_ERROR, DATABASE_URL, DB_URL_SOURCE
     if not DATABASE_URL:
+        DATABASE_URL, DB_URL_SOURCE = resolve_database_url()
+    if not DATABASE_URL:
+        DB_LAST_ERROR = "DATABASE_URL missing"
         return None
     try:
         import psycopg  # type: ignore
-        conn = psycopg.connect(DATABASE_URL, autocommit=True)
+        url_with_timeout = _append_url_params(DATABASE_URL, {"connect_timeout": "5"})
+        conn = psycopg.connect(url_with_timeout, autocommit=True)
         return conn
     except Exception as e:
-        DB_LAST_ERROR = str(e)[:500]
-        logger.error("DB connect failed: %s", e)
+        err_text = str(e)[:500]
+        logger.warning("DB connect failed: %s", _redact_db_error(err_text))
+        DB_LAST_ERROR = _redact_db_error(err_text)
+        parsed = urlparse(DATABASE_URL)
+        host = parsed.hostname or ""
+        if host and host not in ("localhost", "127.0.0.1") and "sslmode=" not in (parsed.query or ""):
+            try:
+                url_with_ssl = _append_url_params(DATABASE_URL, {"sslmode": "require", "connect_timeout": "5"})
+                conn = psycopg.connect(url_with_ssl, autocommit=True)
+                logger.info("DB connect retry OK with sslmode=require")
+                return conn
+            except Exception as ssl_err:
+                ssl_text = str(ssl_err)[:500]
+                DB_LAST_ERROR = _redact_db_error(ssl_text)
+                logger.error("DB connect retry with sslmode=require failed: %s", _redact_db_error(ssl_text))
         return None
 
 def _refresh_review_columns(cur) -> None:
@@ -365,7 +425,9 @@ def db_init() -> None:
       - ensuring both `text` and `review_text` exist
       - backfilling each other
     """
-    global DB_OK, DB_LAST_ERROR
+    global DB_OK, DB_LAST_ERROR, DATABASE_URL, DB_URL_SOURCE
+    if not DATABASE_URL:
+        DATABASE_URL, DB_URL_SOURCE = resolve_database_url()
     conn = _db_connect()
     if not conn:
         DB_OK = False
@@ -545,7 +607,7 @@ def db_init() -> None:
         logger.info("DB init OK (postgres=True)")
     except Exception as e:
         DB_OK = False
-        DB_LAST_ERROR = str(e)[:500]
+        DB_LAST_ERROR = _redact_db_error(str(e)[:500])
         logger.exception("DB init failed")
     finally:
         try:
@@ -1422,12 +1484,41 @@ def _hash_review(text: str) -> str:
     return hashlib.sha256(text.strip().encode("utf-8")).hexdigest()
 
 def _guess_platform_from_url(url: str) -> str:
-    lower = url.lower()
-    if "yandex" in lower or "yandex.ru/maps" in lower:
-        return "yandex"
-    if "2gis" in lower or "2gis.ru" in lower or "2gis.com" in lower:
-        return "2gis"
-    return "unknown"
+    return detect_platform(url)
+
+def fetch_review_from_link(url: str) -> dict:
+    platform = detect_platform(url)
+    status, html, error = fetch_url(url)
+    result = {
+        "platform": platform if platform != "unknown" else None,
+        "rating": None,
+        "author_name": None,
+        "review_text": None,
+        "review_date": None,
+        "public_id": None,
+        "org_id": None,
+        "parse_status": "unknown",
+        "error": error,
+    }
+    if status in (403, 429):
+        result["parse_status"] = "blocked"
+        return result
+    if status is None or status >= 400 or not html:
+        result["parse_status"] = "fetch_failed"
+        return result
+    try:
+        if platform == "yandex":
+            parsed = parse_yandex_review(html, url)
+        elif platform == "2gis":
+            parsed = parse_2gis_review(html, url)
+        else:
+            parsed = {}
+        result.update({k: v for k, v in (parsed or {}).items() if v is not None})
+        result["parse_status"] = parsed.get("parse_status", "ok") if isinstance(parsed, dict) else "ok"
+    except Exception as e:
+        result["parse_status"] = "parse_failed"
+        result["error"] = str(e)[:200]
+    return result
 
 # -----------------------------
 # AI clients
@@ -1447,6 +1538,7 @@ def ai_chat(messages: List[Dict[str, str]]) -> str:
     raise RuntimeError(f"Unknown AI_ENGINE: {engine}")
 
 def call_deepseek(messages: List[Dict[str, str]]) -> str:
+    global AI_LAST_HTTP_STATUS, AI_LAST_RAW_PREVIEW
     if not DEEPSEEK_API_KEY:
         raise RuntimeError("DEEPSEEK_API_KEY not set")
 
@@ -1459,6 +1551,8 @@ def call_deepseek(messages: List[Dict[str, str]]) -> str:
                 temperature=0.2,
                 timeout=AI_TIMEOUT,
             )
+            AI_LAST_HTTP_STATUS = None
+            AI_LAST_RAW_PREVIEW = None
             return (resp.choices[0].message.content or "").strip()
         except Exception as e:
             logger.warning("DeepSeek via OpenAI SDK failed. err=%s", str(e)[:200])
@@ -1480,6 +1574,8 @@ def call_deepseek(messages: List[Dict[str, str]]) -> str:
     }
 
     resp = requests.post(DEEPSEEK_URL, json=payload, headers=headers, timeout=AI_TIMEOUT)
+    AI_LAST_HTTP_STATUS = resp.status_code
+    AI_LAST_RAW_PREVIEW = _redact(resp.text[:300])
     logger.info("DeepSeek status=%s body=%s", resp.status_code, _redact(resp.text[:900]))
 
     if "<html" in resp.text.lower() or "just a moment" in resp.text.lower():
@@ -1499,6 +1595,7 @@ def call_deepseek(messages: List[Dict[str, str]]) -> str:
     return (msg.get("content") or "").strip()
 
 def call_openai(messages: List[Dict[str, str]]) -> str:
+    global AI_LAST_HTTP_STATUS, AI_LAST_RAW_PREVIEW
     if not OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY not set")
     if OPENAI_SDK_AVAILABLE and OpenAI is not None:
@@ -1509,18 +1606,23 @@ def call_openai(messages: List[Dict[str, str]]) -> str:
             temperature=0.2,
             timeout=AI_TIMEOUT,
         )
+        AI_LAST_HTTP_STATUS = None
+        AI_LAST_RAW_PREVIEW = None
         return (resp.choices[0].message.content or "").strip()
 
     url = f"{OPENAI_BASE_URL}/chat/completions"
     payload = {"model": OPENAI_MODEL, "messages": messages, "temperature": 0.2}
     headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
     resp = requests.post(url, json=payload, headers=headers, timeout=AI_TIMEOUT)
+    AI_LAST_HTTP_STATUS = resp.status_code
+    AI_LAST_RAW_PREVIEW = _redact(resp.text[:300])
     logger.info("OpenAI status=%s body=%s", resp.status_code, _redact(resp.text[:700]))
     resp.raise_for_status()
     data = resp.json()
     return (data["choices"][0]["message"]["content"] or "").strip()
 
 def call_gemini(messages: List[Dict[str, str]]) -> str:
+    global AI_LAST_HTTP_STATUS, AI_LAST_RAW_PREVIEW
     if not GEMINI_API_KEY:
         raise RuntimeError("GEMINI_API_KEY not set")
 
@@ -1528,6 +1630,8 @@ def call_gemini(messages: List[Dict[str, str]]) -> str:
     payload = {"contents": [{"role": "user", "parts": [{"text": joined}]}]}
     headers = {"Content-Type": "application/json", "X-goog-api-key": GEMINI_API_KEY}
     resp = requests.post(GEMINI_URL, json=payload, headers=headers, timeout=AI_TIMEOUT)
+    AI_LAST_HTTP_STATUS = resp.status_code
+    AI_LAST_RAW_PREVIEW = _redact(resp.text[:300])
     logger.info("Gemini status=%s body=%s", resp.status_code, _redact(resp.text[:700]))
     resp.raise_for_status()
     data = resp.json()
@@ -1559,19 +1663,28 @@ def extract_first_json(text: str) -> Tuple[Optional[dict], Optional[str]]:
         return None, "json_is_not_object"
     except Exception:
         pass
-
-    start = cleaned.find("{")
-    end = cleaned.rfind("}")
-    if start != -1 and end != -1 and end > start:
-        candidate = cleaned[start:end + 1]
-        try:
-            obj = json.loads(candidate)
-            if isinstance(obj, dict):
-                return obj, None
-            return None, "json_is_not_object"
-        except Exception as e:
-            return None, f"json_parse_failed: {str(e)[:120]}"
-
+    max_len = 20000
+    brace_stack = 0
+    start_idx = None
+    for idx, ch in enumerate(cleaned):
+        if ch == "{":
+            if start_idx is None:
+                start_idx = idx
+            brace_stack += 1
+        elif ch == "}":
+            if brace_stack > 0:
+                brace_stack -= 1
+                if brace_stack == 0 and start_idx is not None:
+                    candidate = cleaned[start_idx:idx + 1]
+                    if len(candidate) > max_len:
+                        candidate = candidate[:max_len]
+                    try:
+                        obj = json.loads(candidate)
+                        if isinstance(obj, dict):
+                            return obj, None
+                        return None, "json_is_not_object"
+                    except Exception as e:
+                        return None, f"json_parse_failed: {str(e)[:120]}"
     return None, "no_json_object_found"
 
 def cx_analyze(input_obj: dict) -> Tuple[Optional[dict], str]:
@@ -1614,6 +1727,8 @@ HELP_TEXT = (
     "/engine — текущий AI_ENGINE\n"
     "/setengine — выбрать движок (кнопки)\n"
     "/setcontext — задать бизнес-контекст (текст)\n"
+    "/invite <id> [role=staff|user] [note=...] — добавить доступ (владелец)\n"
+    "/kick <id> — убрать доступ (владелец)\n"
     "/addreview — добавить отзыв (пошагово)\n"
     "/review <id> — показать отзыв\n"
     "/analyze <текст> — анализ текста (без сохранения)\n"
@@ -1627,7 +1742,7 @@ HELP_TEXT = (
 )
 
 INSTRUCTION_TEXT = (
-    f"🤖 Бот для **{SERVICE_NAME}**.\n\n"
+    f"🤖 Бот для **{SERVICE_NAME}** 🛠️🚗.\n\n"
     "**Как пользоваться (очень просто):**\n\n"
     "1. Нажми **➕ Добавить отзыв**\n"
     "2. Выбери метод: **✍️ Ручной ввод** или **🔗 По ссылке**\n"
@@ -1637,7 +1752,7 @@ INSTRUCTION_TEXT = (
     "   **✍️ Ответ** — готовый публичный ответ клиенту\n"
     "   **⚠️ Жалоба** — текст жалобы (если отзыв нарушает правила или ⭐1)\n"
     "   **🧾 JSON** — полный результат анализа (для выгрузки/отчётов)\n\n"
-    "**О сервисе 🛠️**\n"
+    "**О сервисе 🛠️🚗**\n"
     f"- {SERVICE_NAME}\n"
     f"- Адрес: {SERVICE_ADDRESS}\n"
     f"- Режим работы: {SERVICE_HOURS}\n"
@@ -1684,7 +1799,7 @@ def _matches_label(key: str, text_clean: str, text_norm: str) -> bool:
 def contacts_text() -> str:
     phones = "\n".join([f"- {p}" for p in SERVICE_PHONES])
     return (
-        f"🚗 {SERVICE_NAME}\n"
+        f"🛠️🚗 {SERVICE_NAME}\n"
         f"📍 Адрес: {SERVICE_ADDRESS}\n"
         f"🕒 Режим работы: {SERVICE_HOURS}\n"
         f"☎️ Телефоны:\n{phones}"
@@ -1719,6 +1834,18 @@ def access_manage_keyboard() -> dict:
             [{"text": "⬅️ Назад", "callback_data": "access:back"}],
         ]
     }
+
+def access_role_keyboard() -> dict:
+    return {
+        "inline_keyboard": [
+            [{"text": "👷 staff", "callback_data": "access_role:staff"}],
+            [{"text": "👤 user", "callback_data": "access_role:user"}],
+            [{"text": "⬅️ Назад", "callback_data": "access:back"}],
+        ]
+    }
+
+def access_note_keyboard() -> dict:
+    return {"inline_keyboard": [[{"text": "Пропустить", "callback_data": "access_note:skip"}]]}
 
 def engine_keyboard() -> dict:
     return {
@@ -1759,6 +1886,14 @@ def link_platform_keyboard() -> dict:
         ]
     }
 
+def link_confirm_keyboard() -> dict:
+    return {
+        "inline_keyboard": [
+            [{"text": "✅ Сохранить", "callback_data": "link_confirm:yes"}],
+            [{"text": "❌ Не сохранять", "callback_data": "link_confirm:no"}],
+        ]
+    }
+
 def find_rating_keyboard() -> dict:
     rows = [[{"text": "Любой", "callback_data": "find_rating:any"}]]
     for rating in range(5, 0, -1):
@@ -1785,6 +1920,7 @@ STATE_WAIT_LINK_PLATFORM = "WAIT_LINK_PLATFORM"
 STATE_WAIT_LINK_RATING = "WAIT_LINK_RATING"
 STATE_WAIT_LINK_AUTHOR = "WAIT_LINK_AUTHOR"
 STATE_WAIT_LINK_TEXT = "WAIT_LINK_TEXT"
+STATE_WAIT_LINK_CONFIRM = "WAIT_LINK_CONFIRM"
 STATE_WAIT_PLATFORM = "WAIT_PLATFORM"
 STATE_WAIT_RATING = "WAIT_RATING"
 STATE_WAIT_DUP_CONFIRM = "WAIT_DUP_CONFIRM"
@@ -1794,6 +1930,8 @@ STATE_FIND_PLATFORM = "FIND_PLATFORM"
 STATE_FIND_RATING = "FIND_RATING"
 STATE_FIND_DAYS = "FIND_DAYS"
 STATE_ACCESS_ADD = "ACCESS_ADD"
+STATE_ACCESS_ADD_ROLE = "ACCESS_ADD_ROLE"
+STATE_ACCESS_ADD_NOTE = "ACCESS_ADD_NOTE"
 STATE_ACCESS_REMOVE = "ACCESS_REMOVE"
 
 def _reset_state(chat_id: int) -> None:
@@ -1951,9 +2089,13 @@ def _link_meta(payload: dict) -> dict:
         "source_url": payload.get("source_url"),
         "platform_guess": payload.get("platform_guess"),
         "author_name": payload.get("author_name"),
-        "rating_source": "user_confirmed",
+        "rating_source": payload.get("rating_source") or "user_confirmed",
         "added_by": payload.get("added_by"),
         "input_method": "link",
+        "parse_status": payload.get("parse_status"),
+        "public_id": payload.get("public_id"),
+        "org_id": payload.get("org_id"),
+        "review_date": payload.get("review_date"),
     }
     return _clean_meta(meta)
 
@@ -1971,6 +2113,61 @@ def _insert_link_review(payload: dict) -> Optional[int]:
         platform=platform,
         review_hash=review_hash,
     )
+
+def _link_missing_fields(payload: dict) -> List[str]:
+    missing = []
+    if not payload.get("platform"):
+        missing.append("platform")
+    if payload.get("rating") is None:
+        missing.append("rating")
+    if not payload.get("author_name"):
+        missing.append("author_name")
+    if not payload.get("review_text"):
+        missing.append("review_text")
+    return missing
+
+def _format_link_summary(payload: dict, duplicate: Optional[dict]) -> str:
+    rating = payload.get("rating")
+    rating_display = f"⭐{rating}" if rating is not None else "не указан"
+    lines = [
+        "Проверь данные отзыва:",
+        f"- Площадка: {payload.get('platform') or payload.get('platform_guess') or 'unknown'}",
+        f"- Рейтинг: {rating_display}",
+        f"- Автор: {payload.get('author_name') or 'не указан'}",
+        f"- Текст: {payload.get('review_text') or '-'}",
+        f"- Ссылка: {payload.get('source_url') or '-'}",
+    ]
+    if duplicate:
+        lines.append(f"⚠️ Найден дубликат #{duplicate['id']} от {duplicate['created_at'][:10]}.")
+    return "\n".join(lines)
+
+def _advance_link_flow(chat_id: int, payload: dict) -> None:
+    missing = _link_missing_fields(payload)
+    if missing:
+        next_field = missing[0]
+        if next_field == "platform":
+            db_set_session(chat_id, STATE_WAIT_LINK_PLATFORM, payload)
+            send_message(chat_id, "Выбери площадку (или оставь «Другое»):", reply_markup=link_platform_keyboard())
+            return
+        if next_field == "rating":
+            db_set_session(chat_id, STATE_WAIT_LINK_RATING, payload)
+            send_message(chat_id, "Укажи рейтинг:", reply_markup=link_rating_keyboard())
+            return
+        if next_field == "author_name":
+            db_set_session(chat_id, STATE_WAIT_LINK_AUTHOR, payload)
+            send_message(chat_id, "Укажи автора (например: инкогнито 1234).")
+            return
+        if next_field == "review_text":
+            db_set_session(chat_id, STATE_WAIT_LINK_TEXT, payload)
+            send_message(chat_id, "Вставь текст отзыва (обязательно).")
+            return
+
+    review_text = (payload.get("review_text") or "").strip()
+    payload["review_hash"] = payload.get("review_hash") or _hash_review(review_text)
+    duplicate = db_find_duplicate_review(payload["review_hash"]) if DB_OK else None
+    payload["duplicate"] = duplicate
+    db_set_session(chat_id, STATE_WAIT_LINK_CONFIRM, payload)
+    send_message(chat_id, _format_link_summary(payload, duplicate), reply_markup=link_confirm_keyboard())
 
 def start_find_flow(chat_id: int) -> None:
     _reset_state(chat_id)
@@ -2036,36 +2233,100 @@ def build_csv_export(rows: List[dict]) -> bytes:
         ])
     return output.getvalue().encode("utf-8")
 
-def diag_text(current_user_id: Optional[int] = None) -> str:
+def get_webhook_info() -> dict:
+    try:
+        resp = requests.get(tg_api("getWebhookInfo"), timeout=TG_TIMEOUT)
+        if resp.status_code != 200:
+            return {"ok": False, "http_status": resp.status_code, "error": _redact(resp.text[:400])}
+        data = resp.json()
+        result = data.get("result") or {}
+        return {
+            "ok": True,
+            "url": result.get("url"),
+            "pending_update_count": result.get("pending_update_count"),
+            "last_error_message": result.get("last_error_message"),
+            "last_error_date": result.get("last_error_date"),
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:200]}
+
+def diag_payload(current_user_id: Optional[int] = None) -> dict:
+    global DATABASE_URL, DB_URL_SOURCE
+    if not DATABASE_URL:
+        DATABASE_URL, DB_URL_SOURCE = resolve_database_url()
     engine = _current_engine()
     prompt_mode = (os.getenv("CX_PROMPT_MODE") or CX_PROMPT_MODE).strip().lower()
-    base_url = DEEPSEEK_BASE_URL if engine == "deepseek" else None
     role_current = get_user_role(current_user_id) if current_user_id is not None else None
-    allowlist_empty = "yes" if not ADMIN_CHAT_IDS else "no"
+    allowlist_empty = not ADMIN_CHAT_IDS
     access_count = db_count_access_users(active_only=True) if DB_OK else 0
-    review_text_col = "yes" if DB_HAS_TEXT else "no"
-    review_review_text_col = "yes" if DB_HAS_REVIEW_TEXT else "no"
+    review_text_col = bool(DB_HAS_TEXT)
+    review_review_text_col = bool(DB_HAS_REVIEW_TEXT)
+    access_columns = {
+        "user_id": DB_ACCESS_HAS_USER_ID,
+        "chat_id": DB_ACCESS_HAS_CHAT_ID,
+        "is_active": DB_ACCESS_HAS_IS_ACTIVE,
+        "note": DB_ACCESS_HAS_NOTE,
+        "created_at": DB_ACCESS_HAS_CREATED_AT,
+        "added_at": DB_ACCESS_HAS_ADDED_AT,
+    }
+    webhook = get_webhook_info()
+    return {
+        "webhook_path": WEBHOOK_PATH,
+        "webhook_url_set": WEBHOOK_FULL_URL,
+        "webhook_info": webhook,
+        "engine": engine,
+        "prompt_mode": prompt_mode,
+        "deepseek_base_url": DEEPSEEK_BASE_URL if engine == "deepseek" else None,
+        "deepseek_key_set": bool(DEEPSEEK_API_KEY),
+        "openai_key_set": bool(OPENAI_API_KEY),
+        "gemini_key_set": bool(GEMINI_API_KEY),
+        "db": "postgres" if DB_OK else "disabled",
+        "db_configured": bool(DATABASE_URL),
+        "db_url_source": DB_URL_SOURCE,
+        "db_last_error": DB_LAST_ERROR,
+        "openai_sdk": OPENAI_SDK_AVAILABLE,
+        "admin_mode": ADMIN_MODE,
+        "admins_count": len(ADMIN_CHAT_IDS),
+        "allowlist_empty": allowlist_empty,
+        "role_current_user": role_current,
+        "access_users_count_active": access_count,
+        "access_columns": access_columns,
+        "owner_chat_id_detected": SUPERADMIN_ID,
+        "ui_labels_version": UI_VERSION,
+        "reviews_text_exists": review_text_col,
+        "reviews_review_text_exists": review_review_text_col,
+    }
+
+def diag_text(current_user_id: Optional[int] = None) -> str:
+    payload = diag_payload(current_user_id)
+    webhook = payload.get("webhook_info") or {}
     return (
         "Самодиагностика:\n"
-        f"- webhook_path: {WEBHOOK_PATH}\n"
-        f"- engine: {engine}\n"
-        f"- prompt_mode: {prompt_mode}\n"
-        f"- deepseek_base_url: {base_url}\n"
-        f"- deepseek_key_set: {'yes' if DEEPSEEK_API_KEY else 'no'}\n"
-        f"- openai_key_set: {'yes' if OPENAI_API_KEY else 'no'}\n"
-        f"- gemini_key_set: {'yes' if GEMINI_API_KEY else 'no'}\n"
-        f"- db: {'postgres' if DB_OK else 'disabled'}\n"
-        f"- db_last_error: {DB_LAST_ERROR}\n"
-        f"- openai_sdk: {OPENAI_SDK_AVAILABLE}\n"
-        f"- admin_mode: {ADMIN_MODE}\n"
-        f"- admins_count: {len(ADMIN_CHAT_IDS)}\n"
-        f"- allowlist_empty: {allowlist_empty}\n"
-        f"- role_current_user: {role_current}\n"
-        f"- access_users_count_active: {access_count}\n"
-        f"- owner_chat_id_detected: {SUPERADMIN_ID}\n"
-        f"- ui_labels_version: {UI_VERSION}\n"
-        f"- reviews.text_exists: {review_text_col}\n"
-        f"- reviews.review_text_exists: {review_review_text_col}\n"
+        f"- webhook_path: {payload.get('webhook_path')}\n"
+        f"- webhook_url_set: {payload.get('webhook_url_set')}\n"
+        f"- webhook_info_url: {webhook.get('url')}\n"
+        f"- webhook_pending: {webhook.get('pending_update_count')}\n"
+        f"- engine: {payload.get('engine')}\n"
+        f"- prompt_mode: {payload.get('prompt_mode')}\n"
+        f"- deepseek_base_url: {payload.get('deepseek_base_url')}\n"
+        f"- deepseek_key_set: {'yes' if payload.get('deepseek_key_set') else 'no'}\n"
+        f"- openai_key_set: {'yes' if payload.get('openai_key_set') else 'no'}\n"
+        f"- gemini_key_set: {'yes' if payload.get('gemini_key_set') else 'no'}\n"
+        f"- db: {payload.get('db')}\n"
+        f"- db_configured: {payload.get('db_configured')}\n"
+        f"- db_url_source: {payload.get('db_url_source')}\n"
+        f"- db_last_error: {payload.get('db_last_error')}\n"
+        f"- openai_sdk: {payload.get('openai_sdk')}\n"
+        f"- admin_mode: {payload.get('admin_mode')}\n"
+        f"- admins_count: {payload.get('admins_count')}\n"
+        f"- allowlist_empty: {'yes' if payload.get('allowlist_empty') else 'no'}\n"
+        f"- role_current_user: {payload.get('role_current_user')}\n"
+        f"- access_users_count_active: {payload.get('access_users_count_active')}\n"
+        f"- access_columns: {payload.get('access_columns')}\n"
+        f"- owner_chat_id_detected: {payload.get('owner_chat_id_detected')}\n"
+        f"- ui_labels_version: {payload.get('ui_labels_version')}\n"
+        f"- reviews.text_exists: {'yes' if payload.get('reviews_text_exists') else 'no'}\n"
+        f"- reviews.review_text_exists: {'yes' if payload.get('reviews_review_text_exists') else 'no'}\n"
     )
 
 # -----------------------------
@@ -2094,13 +2355,29 @@ def diag_ai():
 
     engine = _current_engine()
     prompt_mode = (os.getenv("CX_PROMPT_MODE") or CX_PROMPT_MODE).strip().lower()
+    model_name = DEEPSEEK_MODEL if engine == "deepseek" else (OPENAI_MODEL if engine == "openai" else (GEMINI_MODEL if engine == "gemini" else GROK_MODEL))
 
     messages = [{"role": "system", "content": "Reply with exactly: OK"}, {"role": "user", "content": "ping"}]
     try:
         raw = ai_chat(messages)
-        return jsonify({"ok": True, "engine": engine, "prompt_mode": prompt_mode, "raw_preview": raw[:300]})
+        return jsonify({
+            "ok": True,
+            "engine": engine,
+            "model": model_name,
+            "prompt_mode": prompt_mode,
+            "http_status": AI_LAST_HTTP_STATUS,
+            "raw_preview": raw[:300],
+        })
     except Exception as e:
-        return jsonify({"ok": False, "engine": engine, "prompt_mode": prompt_mode, "error": str(e)[:700]}), 500
+        return jsonify({
+            "ok": False,
+            "engine": engine,
+            "model": model_name,
+            "prompt_mode": prompt_mode,
+            "http_status": AI_LAST_HTTP_STATUS,
+            "raw_preview": AI_LAST_RAW_PREVIEW,
+            "error": str(e)[:700],
+        }), 500
 
 @app.get("/cron/weekly")
 def cron_weekly():
@@ -2268,6 +2545,54 @@ def telegram_webhook():
                     answer_callback_query(cq_id, "OK")
                     return "ok"
 
+            if data.startswith("access_role:"):
+                role = data.split(":", 1)[1]
+                _log_route(f"access_role:{role}", chat_id, user_id)
+                if not can_manage_access(user_id):
+                    if cq_id:
+                        answer_callback_query(cq_id, "Только владелец", show_alert=True)
+                    return "ok"
+                if not chat_id:
+                    return "ok"
+                payload = (sess or {}).get("payload") or {}
+                target_id = payload.get("target_id")
+                if not target_id:
+                    send_message(chat_id, "ID пользователя не найден. Начни заново.")
+                    answer_callback_query(cq_id, "OK")
+                    return "ok"
+                if role not in ("staff", "user"):
+                    send_message(chat_id, "Некорректная роль.")
+                    answer_callback_query(cq_id, "OK")
+                    return "ok"
+                payload["role"] = role
+                db_set_session(chat_id, STATE_ACCESS_ADD_NOTE, payload)
+                send_message(chat_id, "Добавь заметку (необязательно) или пропусти:", reply_markup=access_note_keyboard())
+                answer_callback_query(cq_id, "OK")
+                return "ok"
+
+            if data.startswith("access_note:"):
+                action = data.split(":", 1)[1]
+                _log_route(f"access_note:{action}", chat_id, user_id)
+                if not can_manage_access(user_id):
+                    if cq_id:
+                        answer_callback_query(cq_id, "Только владелец", show_alert=True)
+                    return "ok"
+                if not chat_id:
+                    return "ok"
+                payload = (sess or {}).get("payload") or {}
+                target_id = payload.get("target_id")
+                role = payload.get("role") or "staff"
+                if not target_id:
+                    send_message(chat_id, "ID пользователя не найден. Начни заново.")
+                    answer_callback_query(cq_id, "OK")
+                    return "ok"
+                if action == "skip":
+                    db_upsert_access_user(int(target_id), role, user_id, note=None)
+                    _reset_state(chat_id)
+                    send_message(chat_id, f"✅ Пользователь {target_id} добавлен как {role}.")
+                    answer_callback_query(cq_id, "OK")
+                    return "ok"
+
             if data.startswith("access_remove:"):
                 user_raw = data.split(":", 1)[1]
                 _log_route(f"access_remove:{user_raw}", chat_id, user_id)
@@ -2305,8 +2630,7 @@ def telegram_webhook():
                     return "ok"
                 payload = (sess or {}).get("payload") or {}
                 payload["platform"] = platform
-                db_set_session(chat_id, STATE_WAIT_LINK_RATING, payload)
-                send_message(chat_id, "Укажи рейтинг:", reply_markup=link_rating_keyboard())
+                _advance_link_flow(chat_id, payload)
                 answer_callback_query(cq_id, "OK")
                 return "ok"
 
@@ -2323,8 +2647,32 @@ def telegram_webhook():
                         payload["rating"] = int(rating_raw)
                     except Exception:
                         payload["rating"] = None
-                db_set_session(chat_id, STATE_WAIT_LINK_AUTHOR, payload)
-                send_message(chat_id, "Укажи автора (например: инкогнито 1234).")
+                payload["rating_source"] = "user_confirmed"
+                _advance_link_flow(chat_id, payload)
+                answer_callback_query(cq_id, "OK")
+                return "ok"
+
+            if data.startswith("link_confirm:"):
+                decision = data.split(":", 1)[1]
+                _log_route(f"link_confirm:{decision}", chat_id, user_id)
+                if not chat_id:
+                    return "ok"
+                if decision == "no":
+                    _reset_state(chat_id)
+                    send_message(chat_id, "Ок, не сохраняем.")
+                    answer_callback_query(cq_id, "OK")
+                    return "ok"
+                payload = (sess or {}).get("payload") or {}
+                review_id = _insert_link_review(payload)
+                _reset_state(chat_id)
+                if review_id:
+                    send_message(
+                        chat_id,
+                        f"✅ Отзыв добавлен. Номер: #{review_id}",
+                        reply_markup={"inline_keyboard": [[{"text": "🧠 Проанализировать", "callback_data": f"analyze_review:{review_id}"}]]},
+                    )
+                else:
+                    send_message(chat_id, "❌ Не удалось сохранить отзыв в БД. Проверь DATABASE_URL, миграции и /diag.")
                 answer_callback_query(cq_id, "OK")
                 return "ok"
 
@@ -2689,8 +3037,8 @@ def telegram_webhook():
             send_message(
                 chat_id,
                 (
-                    f"Привет, {name}! Бот для {SERVICE_NAME} 🛠️.\n\n"
-                    "🛠️ О сервисе:\n"
+                    f"Привет, {name}! Бот для {SERVICE_NAME} 🛠️🚗.\n\n"
+                    "🛠️🚗 О сервисе:\n"
                     f"- Адрес: {SERVICE_ADDRESS}\n"
                     f"- Режим работы: {SERVICE_HOURS}\n"
                     f"- Телефоны: {', '.join(SERVICE_PHONES)}\n\n"
@@ -2717,7 +3065,10 @@ def telegram_webhook():
 
         if cmd == "/diag":
             _log_route("diag", chat_id, user_id)
-            send_message(chat_id, diag_text(user_id))
+            if cmd_args.strip().lower().startswith("json"):
+                send_message(chat_id, json.dumps(diag_payload(user_id), ensure_ascii=False))
+            else:
+                send_message(chat_id, diag_text(user_id))
             return "ok"
 
         if cmd == "/cancel":
@@ -2740,6 +3091,51 @@ def telegram_webhook():
             _log_route("setcontext", chat_id, user_id)
             db_set_session(chat_id, STATE_WAIT_CONTEXT, {})
             send_message(chat_id, "Пришли новый бизнес-контекст одним сообщением.")
+            return "ok"
+
+        if cmd == "/invite":
+            _log_route("invite", chat_id, user_id)
+            if not can_manage_access(user_id):
+                send_message(chat_id, "⛔ Доступ запрещён.")
+                return "ok"
+            if not DB_OK:
+                send_message(chat_id, "DB disabled. Проверь DATABASE_URL или /diag.")
+                return "ok"
+            match = re.search(r"\d+", cmd_args)
+            if not match:
+                send_message(chat_id, "Формат: /invite <id> [role=staff|user] [note=...]")
+                return "ok"
+            target_id = int(match.group())
+            tail = cmd_args[match.end():].strip()
+            kv, rest = parse_kv_args(tail)
+            role = (kv.get("role") or "staff").lower()
+            if role not in ("staff", "user"):
+                role = "staff"
+            note = kv.get("note")
+            if not note and rest:
+                note = rest
+            db_upsert_access_user(target_id, role, user_id, note=note)
+            send_message(chat_id, f"✅ Пользователь {target_id} добавлен как {role}.")
+            return "ok"
+
+        if cmd == "/kick":
+            _log_route("kick", chat_id, user_id)
+            if not can_manage_access(user_id):
+                send_message(chat_id, "⛔ Доступ запрещён.")
+                return "ok"
+            if not DB_OK:
+                send_message(chat_id, "DB disabled. Проверь DATABASE_URL или /diag.")
+                return "ok"
+            match = re.search(r"\d+", cmd_args)
+            if not match:
+                send_message(chat_id, "Формат: /kick <id>")
+                return "ok"
+            target_id = int(match.group())
+            if SUPERADMIN_ID is not None and target_id == SUPERADMIN_ID:
+                send_message(chat_id, "Нельзя удалить владельца.")
+                return "ok"
+            db_deactivate_access_user(target_id)
+            send_message(chat_id, f"✅ Пользователь {target_id} отключён.")
             return "ok"
 
         if cmd == "/addreview":
@@ -2886,8 +3282,21 @@ def telegram_webhook():
             payload = sess.get("payload") or {}
             payload["source_url"] = text_clean
             payload["platform_guess"] = _guess_platform_from_url(text_clean)
-            db_set_session(chat_id, STATE_WAIT_LINK_PLATFORM, payload)
-            send_message(chat_id, "Выбери площадку (или оставь «Другое»):", reply_markup=link_platform_keyboard())
+            payload["added_by"] = user_id
+            fetched = fetch_review_from_link(text_clean)
+            payload.update({
+                "platform": fetched.get("platform") or payload.get("platform_guess"),
+                "rating": fetched.get("rating"),
+                "author_name": fetched.get("author_name"),
+                "review_text": fetched.get("review_text"),
+                "review_date": fetched.get("review_date"),
+                "public_id": fetched.get("public_id"),
+                "org_id": fetched.get("org_id"),
+                "parse_status": fetched.get("parse_status"),
+            })
+            if fetched.get("rating") is not None:
+                payload["rating_source"] = "parsed"
+            _advance_link_flow(chat_id, payload)
             return "ok"
 
         if sess and sess.get("state") == STATE_WAIT_LINK_AUTHOR:
@@ -2897,8 +3306,7 @@ def telegram_webhook():
                 return "ok"
             payload = sess.get("payload") or {}
             payload["author_name"] = text_clean
-            db_set_session(chat_id, STATE_WAIT_LINK_TEXT, payload)
-            send_message(chat_id, "Вставь текст отзыва (обязательно).")
+            _advance_link_flow(chat_id, payload)
             return "ok"
 
         if sess and sess.get("state") == STATE_WAIT_LINK_TEXT:
@@ -2908,30 +3316,8 @@ def telegram_webhook():
                 return "ok"
             payload = sess.get("payload") or {}
             payload["review_text"] = text_clean
-            payload["review_hash"] = _hash_review(text_clean)
             payload["added_by"] = user_id
-            duplicate = db_find_duplicate_review(payload["review_hash"]) if DB_OK else None
-            if duplicate:
-                db_set_session(chat_id, STATE_WAIT_DUP_CONFIRM, payload)
-                send_message(
-                    chat_id,
-                    f"⚠️ Найден дубликат #{duplicate['id']} от {duplicate['created_at'][:10]}. Сохранить всё равно?",
-                    reply_markup={"inline_keyboard": [
-                        [{"text": "Да, сохранить", "callback_data": "dup_confirm:yes"}],
-                        [{"text": "Нет", "callback_data": "dup_confirm:no"}],
-                    ]},
-                )
-                return "ok"
-            review_id = _insert_link_review(payload)
-            _reset_state(chat_id)
-            if review_id:
-                send_message(
-                    chat_id,
-                    f"✅ Отзыв добавлен. Номер: #{review_id}",
-                    reply_markup={"inline_keyboard": [[{"text": "🧠 Проанализировать", "callback_data": f"analyze_review:{review_id}"}]]},
-                )
-            else:
-                send_message(chat_id, "❌ Не удалось сохранить отзыв в БД. Проверь DATABASE_URL, миграции и /diag.")
+            _advance_link_flow(chat_id, payload)
             return "ok"
 
         if sess and sess.get("state") == STATE_WAIT_ANALYZE_ID:
@@ -2975,8 +3361,25 @@ def telegram_webhook():
             if target_id is None:
                 send_message(chat_id, "Не смог определить ID. Пришли число или пересланное сообщение.")
                 return "ok"
-            role = "staff"
-            db_upsert_access_user(target_id, role, user_id)
+            db_set_session(chat_id, STATE_ACCESS_ADD_ROLE, {"target_id": target_id})
+            send_message(chat_id, f"Выбери роль для {target_id}:", reply_markup=access_role_keyboard())
+            return "ok"
+
+        if sess and sess.get("state") == STATE_ACCESS_ADD_NOTE:
+            _log_route("state_access_add_note", chat_id, user_id)
+            if not can_manage_access(user_id):
+                send_message(chat_id, "⛔ Доступ запрещён.")
+                _reset_state(chat_id)
+                return "ok"
+            payload = sess.get("payload") or {}
+            target_id = payload.get("target_id")
+            role = payload.get("role") or "staff"
+            if not target_id:
+                send_message(chat_id, "Не удалось определить пользователя. Начни заново.")
+                _reset_state(chat_id)
+                return "ok"
+            note = text_clean if text_clean else None
+            db_upsert_access_user(int(target_id), role, user_id, note=note)
             logger.info("access_add: owner=%s target=%s role=%s", user_id, target_id, role)
             _reset_state(chat_id)
             send_message(chat_id, f"✅ Пользователь {target_id} добавлен как {role}.")
@@ -3024,6 +3427,8 @@ def telegram_webhook():
             STATE_FIND_DAYS,
             STATE_WAIT_LINK_PLATFORM,
             STATE_WAIT_LINK_RATING,
+            STATE_WAIT_LINK_CONFIRM,
+            STATE_ACCESS_ADD_ROLE,
         ):
             _log_route(f"state_pending_buttons:{sess.get('state')}", chat_id, user_id)
             send_message(chat_id, "Используй кнопки под сообщением или /cancel.")

@@ -3,3 +3,4 @@ gunicorn==22.0.0
 requests==2.32.3
 psycopg[binary]==3.2.3
 openai==1.54.3
+pytest==8.3.3
