@@ -6,7 +6,9 @@ import csv
 import io
 import hashlib
 import logging
+import random
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode, urlparse, urlunparse, quote
@@ -171,6 +173,10 @@ DIAG_TOKEN = os.getenv("DIAG_TOKEN", "").strip()
 TG_TIMEOUT = float(os.getenv("TG_TIMEOUT", "10"))
 AI_TIMEOUT = float(os.getenv("AI_TIMEOUT", "40"))
 MISSING_ANALYSIS_BATCH = int(os.getenv("MISSING_ANALYSIS_BATCH", "20"))
+MISSING_ANALYSIS_DEFAULT_DAYS = int(os.getenv("MISSING_ANALYSIS_DEFAULT_DAYS", "30"))
+MISSING_ANALYSIS_DEFAULT_LIMIT = int(os.getenv("MISSING_ANALYSIS_DEFAULT_LIMIT", "30"))
+MISSING_ANALYSIS_DELAY_MIN = float(os.getenv("MISSING_ANALYSIS_DELAY_MIN", "0.5"))
+MISSING_ANALYSIS_DELAY_MAX = float(os.getenv("MISSING_ANALYSIS_DELAY_MAX", "1.5"))
 SET_WEBHOOK_ON_START = (os.getenv("SET_WEBHOOK_ON_START") or "1").strip() not in ("0", "false", "no")
 
 AI_LAST_HTTP_STATUS: Optional[int] = None
@@ -489,6 +495,7 @@ DB_ACCESS_HAS_CREATED_AT = False
 DB_ACCESS_HAS_ADDED_AT = False
 DB_ANALYSIS_HAS_ENGINE = False
 DB_ANALYSIS_HAS_AI_ENGINE = False
+DB_ANALYSIS_HAS_INPUT_JSON = False
 
 def _db_connect():
     global DB_LAST_ERROR, DATABASE_URL, DB_URL_SOURCE, DB_OK
@@ -593,7 +600,7 @@ def _ensure_access_columns(cur) -> None:
         _refresh_access_columns(cur)
 
 def _refresh_analysis_columns(cur) -> None:
-    global DB_ANALYSIS_HAS_ENGINE, DB_ANALYSIS_HAS_AI_ENGINE
+    global DB_ANALYSIS_HAS_ENGINE, DB_ANALYSIS_HAS_AI_ENGINE, DB_ANALYSIS_HAS_INPUT_JSON
     cur.execute(
         """
         SELECT column_name
@@ -605,18 +612,21 @@ def _refresh_analysis_columns(cur) -> None:
     cols = {row[0] for row in (cur.fetchall() or [])}
     DB_ANALYSIS_HAS_ENGINE = "engine" in cols
     DB_ANALYSIS_HAS_AI_ENGINE = "ai_engine" in cols
+    DB_ANALYSIS_HAS_INPUT_JSON = "input_json" in cols
     logger.info(
-        "review_analyses columns: engine=%s ai_engine=%s",
+        "review_analyses columns: engine=%s ai_engine=%s input_json=%s",
         DB_ANALYSIS_HAS_ENGINE,
         DB_ANALYSIS_HAS_AI_ENGINE,
+        DB_ANALYSIS_HAS_INPUT_JSON,
     )
 
 def _ensure_analysis_columns(cur) -> None:
-    global DB_ANALYSIS_HAS_ENGINE, DB_ANALYSIS_HAS_AI_ENGINE
-    if not (DB_ANALYSIS_HAS_ENGINE or DB_ANALYSIS_HAS_AI_ENGINE):
+    global DB_ANALYSIS_HAS_ENGINE, DB_ANALYSIS_HAS_AI_ENGINE, DB_ANALYSIS_HAS_INPUT_JSON
+    if not (DB_ANALYSIS_HAS_ENGINE or DB_ANALYSIS_HAS_AI_ENGINE or DB_ANALYSIS_HAS_INPUT_JSON):
         if not hasattr(cur, "fetchall"):
             DB_ANALYSIS_HAS_ENGINE = True
             DB_ANALYSIS_HAS_AI_ENGINE = False
+            DB_ANALYSIS_HAS_INPUT_JSON = False
             return
         _refresh_analysis_columns(cur)
 
@@ -802,6 +812,7 @@ def db_init() -> None:
                   platform TEXT,
                   rating INT,
                   review_text TEXT NOT NULL,
+                  input_json JSONB NOT NULL DEFAULT '{}'::jsonb,
                   result_json JSONB NOT NULL DEFAULT '{}'::jsonb,
                   error TEXT,
                   model TEXT,
@@ -814,6 +825,7 @@ def db_init() -> None:
             cur.execute("ALTER TABLE public.review_analyses ADD COLUMN IF NOT EXISTS platform TEXT;")
             cur.execute("ALTER TABLE public.review_analyses ADD COLUMN IF NOT EXISTS rating INT;")
             cur.execute("ALTER TABLE public.review_analyses ADD COLUMN IF NOT EXISTS review_text TEXT;")
+            cur.execute("ALTER TABLE public.review_analyses ADD COLUMN IF NOT EXISTS input_json JSONB DEFAULT '{}'::jsonb;")
             cur.execute("ALTER TABLE public.review_analyses ADD COLUMN IF NOT EXISTS result_json JSONB NOT NULL DEFAULT '{}'::jsonb;")
             cur.execute("ALTER TABLE public.review_analyses ADD COLUMN IF NOT EXISTS error TEXT;")
             cur.execute("ALTER TABLE public.review_analyses ADD COLUMN IF NOT EXISTS model TEXT;")
@@ -822,9 +834,20 @@ def db_init() -> None:
             cur.execute("ALTER TABLE public.review_analyses ADD COLUMN IF NOT EXISTS created_by BIGINT;")
             cur.execute("ALTER TABLE public.review_analyses ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT now();")
             cur.execute("UPDATE public.review_analyses SET review_text = '' WHERE review_text IS NULL;")
+            cur.execute("UPDATE public.review_analyses SET input_json = '{}'::jsonb WHERE input_json IS NULL;")
             cur.execute("UPDATE public.review_analyses SET engine = ai_engine WHERE engine IS NULL AND ai_engine IS NOT NULL;")
             cur.execute("UPDATE public.review_analyses SET ai_engine = engine WHERE ai_engine IS NULL AND engine IS NOT NULL;")
             cur.execute("ALTER TABLE public.review_analyses ALTER COLUMN review_text SET NOT NULL;")
+            cur.execute("""
+                DO $$
+                BEGIN
+                  BEGIN
+                    ALTER TABLE public.review_analyses ALTER COLUMN input_json SET NOT NULL;
+                  EXCEPTION WHEN others THEN
+                    RAISE NOTICE 'input_json not null skipped';
+                  END;
+                END $$;
+            """)
             cur.execute("""
                 DO $$
                 BEGIN
@@ -1241,7 +1264,7 @@ def db_find_reviews(platform: Optional[str], rating: Optional[int], days: int, l
         except Exception:
             pass
 
-def db_list_reviews_without_analysis(limit: int = 20) -> List[dict]:
+def db_list_reviews_without_analysis(days: int = 30, limit: int = 20) -> List[dict]:
     conn = _db_connect()
     if not conn:
         return []
@@ -1255,10 +1278,11 @@ def db_list_reviews_without_analysis(limit: int = 20) -> List[dict]:
                 FROM reviews r
                 LEFT JOIN review_analyses a ON a.review_id = r.id
                 WHERE a.id IS NULL
+                  AND r.created_at >= now() - (%s || ' days')::interval
                 ORDER BY r.created_at ASC
                 LIMIT %s
                 """,
-                (limit,),
+                (days, limit),
             )
             rows = cur.fetchall() or []
             return [
@@ -1588,6 +1612,7 @@ def db_insert_analysis(
     platform: Optional[str],
     rating: Optional[int],
     review_text: str,
+    input_json: dict,
     result_json: dict,
     error: Optional[str],
     model: str,
@@ -1614,6 +1639,7 @@ def db_insert_analysis(
                 "platform",
                 "rating",
                 "review_text",
+                "input_json",
                 "result_json",
                 "error",
                 "model",
@@ -1623,10 +1649,14 @@ def db_insert_analysis(
                 platform,
                 rating,
                 review_text,
+                json.dumps(input_json, ensure_ascii=False),
                 json.dumps(result_json, ensure_ascii=False),
                 error,
                 model,
             ]
+            if not DB_ANALYSIS_HAS_INPUT_JSON:
+                columns.remove("input_json")
+                values.pop(4)
             if DB_ANALYSIS_HAS_ENGINE:
                 columns.append("engine")
                 values.append(engine)
@@ -1636,17 +1666,22 @@ def db_insert_analysis(
             columns.append("created_by")
             values.append(created_by)
             column_sql = ", ".join(columns)
-            placeholders = ", ".join(["%s::jsonb" if col == "result_json" else "%s" for col in columns])
+            placeholders = ", ".join(
+                ["%s::jsonb" if col in ("result_json", "input_json") else "%s" for col in columns]
+            )
             update_pairs = [
                 "platform=EXCLUDED.platform",
                 "rating=EXCLUDED.rating",
                 "review_text=EXCLUDED.review_text",
+                "input_json=EXCLUDED.input_json",
                 "result_json=EXCLUDED.result_json",
                 "error=EXCLUDED.error",
                 "model=EXCLUDED.model",
                 "created_by=EXCLUDED.created_by",
                 "created_at=now()",
             ]
+            if not DB_ANALYSIS_HAS_INPUT_JSON:
+                update_pairs.remove("input_json=EXCLUDED.input_json")
             if DB_ANALYSIS_HAS_ENGINE:
                 update_pairs.append("engine=EXCLUDED.engine")
             if DB_ANALYSIS_HAS_AI_ENGINE:
@@ -2244,7 +2279,7 @@ INSTRUCTION_TEXT = (
     f"- Адрес: {SERVICE_ADDRESS}\n"
     f"- Режим работы: {SERVICE_HOURS}\n"
     f"- Телефоны: {', '.join(SERVICE_PHONES)}\n\n"
-    "**Если что-то не работает:** нажми **🛠 Самодиагностика** и пришли результат разработчику."
+    "**Если что-то не работает:** открой **⚙️ Настройки → 🛠 Самодиагностика** и пришли результат разработчику."
 )
 
 UI = {
@@ -2357,6 +2392,25 @@ def analyze_menu_keyboard() -> dict:
         ]
     }
 
+def analyze_missing_days_keyboard() -> dict:
+    return {
+        "inline_keyboard": [
+            [{"text": "7 дней", "callback_data": "analyze_missing_days:7"}],
+            [{"text": "30 дней (по умолчанию)", "callback_data": "analyze_missing_days:30"}],
+            [{"text": "90 дней", "callback_data": "analyze_missing_days:90"}],
+        ]
+    }
+
+def analyze_missing_limit_keyboard() -> dict:
+    return {
+        "inline_keyboard": [
+            [{"text": "20", "callback_data": "analyze_missing_limit:20"}],
+            [{"text": "30 (по умолчанию)", "callback_data": "analyze_missing_limit:30"}],
+            [{"text": "50", "callback_data": "analyze_missing_limit:50"}],
+            [{"text": "100", "callback_data": "analyze_missing_limit:100"}],
+        ]
+    }
+
 def rating_keyboard(prefix: str = "rating") -> dict:
     rows = []
     for rating in range(5, 0, -1):
@@ -2431,6 +2485,8 @@ STATE_WAIT_DUP_CONFIRM = "WAIT_DUP_CONFIRM"
 STATE_WAIT_ANALYZE_ID = "WAIT_ANALYZE_ID"
 STATE_WAIT_REPLY_ID = "WAIT_REPLY_ID"
 STATE_WAIT_COMPLAINT_ID = "WAIT_COMPLAINT_ID"
+STATE_ANALYZE_MISSING_DAYS = "ANALYZE_MISSING_DAYS"
+STATE_ANALYZE_MISSING_LIMIT = "ANALYZE_MISSING_LIMIT"
 STATE_WAIT_CONTEXT = "WAIT_CONTEXT"
 STATE_FIND_PLATFORM = "FIND_PLATFORM"
 STATE_FIND_RATING = "FIND_RATING"
@@ -2518,18 +2574,35 @@ def _start_analysis_thread(
         daemon=True,
     ).start()
 
-def background_analyze(chat_id: int, user_id: int, review_text: str, platform_hint: str = "unknown",
-                      rating: Optional[int] = None, review_id: Optional[int] = None) -> None:
-    engine = _current_engine()
-    model_name = ""
+def _start_missing_analysis_thread(chat_id: int, user_id: int, days: int, limit: int) -> None:
+    threading.Thread(
+        target=background_analyze_missing,
+        args=(chat_id, user_id, days, limit),
+        daemon=True,
+    ).start()
+
+def _engine_model_name(engine: str) -> str:
     if engine == "deepseek":
-        model_name = DEEPSEEK_MODEL
-    elif engine == "openai":
-        model_name = OPENAI_MODEL
-    elif engine == "gemini":
-        model_name = GEMINI_MODEL
-    elif engine == "grok":
-        model_name = GROK_MODEL
+        return DEEPSEEK_MODEL
+    if engine == "openai":
+        return OPENAI_MODEL
+    if engine == "gemini":
+        return GEMINI_MODEL
+    if engine == "grok":
+        return GROK_MODEL
+    return ""
+
+def background_analyze(
+    chat_id: int,
+    user_id: int,
+    review_text: str,
+    platform_hint: str = "unknown",
+    rating: Optional[int] = None,
+    review_id: Optional[int] = None,
+    notify: bool = True,
+) -> bool:
+    engine = _current_engine()
+    model_name = _engine_model_name(engine)
 
     input_obj = {
         "platform": platform_hint,
@@ -2545,13 +2618,15 @@ def background_analyze(chat_id: int, user_id: int, review_text: str, platform_hi
         parsed, _raw = cx_analyze(input_obj)
         if not db_enabled():
             brief = format_analysis_brief(parsed)
-            send_message(chat_id, f"ℹ️ {_db_disabled_user_message()}\n\n{brief}")
-            return
+            if notify:
+                send_message(chat_id, f"ℹ️ {_db_disabled_user_message()}\n\n{brief}")
+            return False
         analysis_id, db_err_type, db_err_msg = db_insert_analysis(
             review_id=review_id,
             platform=parsed.get("platform_detected", {}).get("value") if isinstance(parsed.get("platform_detected"), dict) else platform_hint,
             rating=rating,
             review_text=review_text,
+            input_json=input_obj,
             result_json=parsed,
             error=None,
             model=model_name,
@@ -2562,16 +2637,19 @@ def background_analyze(chat_id: int, user_id: int, review_text: str, platform_hi
             detail = f"{db_err_type or 'unknown'}"
             if db_err_msg:
                 detail = f"{detail}: {db_err_msg}"
-            send_message(chat_id, f"❌ DB save failed: {detail}")
+            if notify:
+                send_message(chat_id, f"❌ DB save failed: {detail}")
             notify_admins(f"⚠️ DB save failed (analysis) review_id={review_id or '-'} type={db_err_type or 'unknown'}")
-            return
+            return False
 
         brief = format_analysis_brief(parsed)
-        send_message(
-            chat_id,
-            f"✅ Анализ готов. ID: {analysis_id}\n\n{brief}",
-            reply_markup=analysis_keyboard(analysis_id, include_reanalyze=bool(review_id), review_id=review_id),
-        )
+        if notify:
+            send_message(
+                chat_id,
+                f"✅ Анализ готов. ID: {analysis_id}\n\n{brief}",
+                reply_markup=analysis_keyboard(analysis_id, include_reanalyze=bool(review_id), review_id=review_id),
+            )
+        return True
     except Exception as e:
         err_text = str(e)
         logger.error("AI exception: %s", err_text)
@@ -2585,13 +2663,15 @@ def background_analyze(chat_id: int, user_id: int, review_text: str, platform_hi
             "detail": err_text[:200],
         }
         if not db_enabled():
-            send_message(chat_id, f"❌ Ошибка ИИ: {status}. {_db_disabled_user_message()}")
-            return
+            if notify:
+                send_message(chat_id, f"❌ Ошибка ИИ: {status}. {_db_disabled_user_message()}")
+            return False
         analysis_id, db_err_type, db_err_msg = db_insert_analysis(
             review_id=review_id,
             platform=platform_hint,
             rating=rating,
             review_text=review_text,
+            input_json=input_obj,
             result_json=fallback_json,
             error=err_text[:800],
             model=model_name,
@@ -2602,9 +2682,10 @@ def background_analyze(chat_id: int, user_id: int, review_text: str, platform_hi
             detail = f"{db_err_type or 'unknown'}"
             if db_err_msg:
                 detail = f"{detail}: {db_err_msg}"
-            send_message(chat_id, f"❌ DB save failed: {detail}")
+            if notify:
+                send_message(chat_id, f"❌ DB save failed: {detail}")
             notify_admins(f"⚠️ DB save failed (analysis) review_id={review_id or '-'} type={db_err_type or 'unknown'}")
-            return
+            return False
 
         error_type = "unknown"
         if "Cloudflare" in err_text or "returned HTML" in err_text or "just a moment" in err_text.lower():
@@ -2629,9 +2710,45 @@ def background_analyze(chat_id: int, user_id: int, review_text: str, platform_hi
         else:
             msg = f"❌ Ошибка ИИ: {error_type}. Анализ сохранён с ошибкой."
 
-        send_message(chat_id, msg, reply_markup=analysis_keyboard(analysis_id, include_reanalyze=bool(review_id), review_id=review_id))
+        if notify:
+            send_message(
+                chat_id,
+                msg,
+                reply_markup=analysis_keyboard(analysis_id, include_reanalyze=bool(review_id), review_id=review_id),
+            )
         notify_admins("⚠️ Ошибка ИИ при анализе #%s\nengine=%s model=%s\nтип=%s\nоткрой самодиагностику: /diag"
                       % (review_id or analysis_id, engine, model_name or "-", error_type))
+        return False
+
+def background_analyze_missing(chat_id: int, user_id: int, days: int, limit: int) -> None:
+    if not DB_OK:
+        send_message(chat_id, _db_status_message())
+        return
+    reviews = db_list_reviews_without_analysis(days=days, limit=limit)
+    if not reviews:
+        send_message(chat_id, "Нет отзывов без анализа.")
+        return
+    total = len(reviews)
+    send_message(chat_id, f"Найдено {total} без анализа. Запускаю… (0/{total})")
+    success = 0
+    errors = 0
+    for idx, review in enumerate(reviews, start=1):
+        send_message(chat_id, f"⏳ Запускаю… ({idx}/{total}) ID: #{review['id']}")
+        ok = background_analyze(
+            chat_id=chat_id,
+            user_id=user_id,
+            review_text=review.get("review_text") or "",
+            platform_hint=review.get("platform") or "unknown",
+            rating=review.get("rating"),
+            review_id=review.get("id"),
+            notify=False,
+        )
+        if ok:
+            success += 1
+        else:
+            errors += 1
+        time.sleep(random.uniform(MISSING_ANALYSIS_DELAY_MIN, MISSING_ANALYSIS_DELAY_MAX))
+    send_message(chat_id, f"✅ Готово: успешно {success}, ошибок {errors}.")
 
 # -----------------------------
 # Find flow
@@ -3155,23 +3272,43 @@ def telegram_webhook():
                         send_message(chat_id, _db_status_message())
                         answer_callback_query(cq_id, "OK")
                         return "ok"
-                    reviews = db_list_reviews_without_analysis(limit=MISSING_ANALYSIS_BATCH)
-                    if not reviews:
-                        send_message(chat_id, "Нет отзывов без анализа.")
-                        answer_callback_query(cq_id, "OK")
-                        return "ok"
-                    for review in reviews:
-                        _start_analysis_thread(
-                            chat_id,
-                            user_id,
-                            review.get("review_text") or "",
-                            review.get("platform") or "unknown",
-                            review.get("rating"),
-                            review.get("id"),
-                        )
-                    send_message(chat_id, f"⏳ Запущено анализов: {len(reviews)}")
+                    db_set_session(chat_id, STATE_ANALYZE_MISSING_DAYS, {})
+                    send_message(chat_id, "Выбери период:", reply_markup=analyze_missing_days_keyboard())
                     answer_callback_query(cq_id, "OK")
                     return "ok"
+
+            if data.startswith("analyze_missing_days:"):
+                days_raw = data.split(":", 1)[1]
+                _log_route(f"analyze_missing_days:{days_raw}", chat_id, user_id)
+                if not chat_id:
+                    return "ok"
+                try:
+                    days = int(days_raw)
+                except Exception:
+                    days = MISSING_ANALYSIS_DEFAULT_DAYS
+                payload = (sess or {}).get("payload") or {}
+                payload["days"] = days
+                db_set_session(chat_id, STATE_ANALYZE_MISSING_LIMIT, payload)
+                send_message(chat_id, "Выбери лимит:", reply_markup=analyze_missing_limit_keyboard())
+                answer_callback_query(cq_id, "OK")
+                return "ok"
+
+            if data.startswith("analyze_missing_limit:"):
+                limit_raw = data.split(":", 1)[1]
+                _log_route(f"analyze_missing_limit:{limit_raw}", chat_id, user_id)
+                if not chat_id:
+                    return "ok"
+                try:
+                    limit = int(limit_raw)
+                except Exception:
+                    limit = MISSING_ANALYSIS_DEFAULT_LIMIT
+                payload = (sess or {}).get("payload") or {}
+                days = int(payload.get("days") or MISSING_ANALYSIS_DEFAULT_DAYS)
+                _reset_state(chat_id)
+                send_message(chat_id, f"⏳ Запускаю анализ без анализа за {days} дней (лимит {limit})…")
+                _start_missing_analysis_thread(chat_id, user_id, days, limit)
+                answer_callback_query(cq_id, "OK")
+                return "ok"
 
             if data.startswith("access:"):
                 action = data.split(":", 1)[1]
@@ -4070,6 +4207,27 @@ def telegram_webhook():
             send_message(chat_id, "⏳ Анализ запущен, подожди пару секунд…")
             return "ok"
 
+        if sess and sess.get("state") == STATE_ANALYZE_MISSING_DAYS:
+            _log_route("state_analyze_missing_days", chat_id, user_id)
+            match = re.findall(r"\d+", text_clean)
+            days = int(match[0]) if match else MISSING_ANALYSIS_DEFAULT_DAYS
+            payload = sess.get("payload") or {}
+            payload["days"] = days
+            db_set_session(chat_id, STATE_ANALYZE_MISSING_LIMIT, payload)
+            send_message(chat_id, "Выбери лимит:", reply_markup=analyze_missing_limit_keyboard())
+            return "ok"
+
+        if sess and sess.get("state") == STATE_ANALYZE_MISSING_LIMIT:
+            _log_route("state_analyze_missing_limit", chat_id, user_id)
+            match = re.findall(r"\d+", text_clean)
+            limit = int(match[0]) if match else MISSING_ANALYSIS_DEFAULT_LIMIT
+            payload = sess.get("payload") or {}
+            days = int(payload.get("days") or MISSING_ANALYSIS_DEFAULT_DAYS)
+            _reset_state(chat_id)
+            send_message(chat_id, f"⏳ Запускаю анализ без анализа за {days} дней (лимит {limit})…")
+            _start_missing_analysis_thread(chat_id, user_id, days, limit)
+            return "ok"
+
         if sess and sess.get("state") in (STATE_WAIT_REPLY_ID, STATE_WAIT_COMPLAINT_ID):
             action = "reply" if sess.get("state") == STATE_WAIT_REPLY_ID else "complaint"
             _log_route(f"state_wait_{action}_id", chat_id, user_id)
@@ -4194,6 +4352,8 @@ def telegram_webhook():
             STATE_WAIT_LINK_RATING,
             STATE_WAIT_LINK_CONFIRM,
             STATE_ACCESS_ADD_ROLE,
+            STATE_ANALYZE_MISSING_DAYS,
+            STATE_ANALYZE_MISSING_LIMIT,
         ):
             _log_route(f"state_pending_buttons:{sess.get('state')}", chat_id, user_id)
             send_message(chat_id, "Используй кнопки под сообщением или /cancel.")
