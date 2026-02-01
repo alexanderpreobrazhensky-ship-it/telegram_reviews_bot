@@ -170,6 +170,7 @@ DIAG_TOKEN = os.getenv("DIAG_TOKEN", "").strip()
 
 TG_TIMEOUT = float(os.getenv("TG_TIMEOUT", "10"))
 AI_TIMEOUT = float(os.getenv("AI_TIMEOUT", "40"))
+MISSING_ANALYSIS_BATCH = int(os.getenv("MISSING_ANALYSIS_BATCH", "20"))
 SET_WEBHOOK_ON_START = (os.getenv("SET_WEBHOOK_ON_START") or "1").strip() not in ("0", "false", "no")
 
 AI_LAST_HTTP_STATUS: Optional[int] = None
@@ -486,6 +487,8 @@ DB_ACCESS_HAS_NOTE = False
 DB_ACCESS_HAS_ADDED_BY = False
 DB_ACCESS_HAS_CREATED_AT = False
 DB_ACCESS_HAS_ADDED_AT = False
+DB_ANALYSIS_HAS_ENGINE = False
+DB_ANALYSIS_HAS_AI_ENGINE = False
 
 def _db_connect():
     global DB_LAST_ERROR, DATABASE_URL, DB_URL_SOURCE, DB_OK
@@ -588,6 +591,43 @@ def _refresh_access_columns(cur) -> None:
 def _ensure_access_columns(cur) -> None:
     if not (DB_ACCESS_HAS_USER_ID or DB_ACCESS_HAS_CHAT_ID):
         _refresh_access_columns(cur)
+
+def _refresh_analysis_columns(cur) -> None:
+    global DB_ANALYSIS_HAS_ENGINE, DB_ANALYSIS_HAS_AI_ENGINE
+    cur.execute(
+        """
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema='public' AND table_name='review_analyses'
+        """,
+        None,
+    )
+    cols = {row[0] for row in (cur.fetchall() or [])}
+    DB_ANALYSIS_HAS_ENGINE = "engine" in cols
+    DB_ANALYSIS_HAS_AI_ENGINE = "ai_engine" in cols
+    logger.info(
+        "review_analyses columns: engine=%s ai_engine=%s",
+        DB_ANALYSIS_HAS_ENGINE,
+        DB_ANALYSIS_HAS_AI_ENGINE,
+    )
+
+def _ensure_analysis_columns(cur) -> None:
+    global DB_ANALYSIS_HAS_ENGINE, DB_ANALYSIS_HAS_AI_ENGINE
+    if not (DB_ANALYSIS_HAS_ENGINE or DB_ANALYSIS_HAS_AI_ENGINE):
+        if not hasattr(cur, "fetchall"):
+            DB_ANALYSIS_HAS_ENGINE = True
+            DB_ANALYSIS_HAS_AI_ENGINE = False
+            return
+        _refresh_analysis_columns(cur)
+
+def _analysis_engine_expr(prefix: str = "") -> str:
+    if DB_ANALYSIS_HAS_ENGINE and DB_ANALYSIS_HAS_AI_ENGINE:
+        return f"COALESCE({prefix}engine, {prefix}ai_engine) AS engine"
+    if DB_ANALYSIS_HAS_ENGINE:
+        return f"{prefix}engine AS engine"
+    if DB_ANALYSIS_HAS_AI_ENGINE:
+        return f"{prefix}ai_engine AS engine"
+    return "NULL AS engine"
 
 def _access_user_id_column() -> Optional[str]:
     if DB_ACCESS_HAS_USER_ID:
@@ -778,9 +818,12 @@ def db_init() -> None:
             cur.execute("ALTER TABLE public.review_analyses ADD COLUMN IF NOT EXISTS error TEXT;")
             cur.execute("ALTER TABLE public.review_analyses ADD COLUMN IF NOT EXISTS model TEXT;")
             cur.execute("ALTER TABLE public.review_analyses ADD COLUMN IF NOT EXISTS engine TEXT;")
+            cur.execute("ALTER TABLE public.review_analyses ADD COLUMN IF NOT EXISTS ai_engine TEXT;")
             cur.execute("ALTER TABLE public.review_analyses ADD COLUMN IF NOT EXISTS created_by BIGINT;")
             cur.execute("ALTER TABLE public.review_analyses ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT now();")
             cur.execute("UPDATE public.review_analyses SET review_text = '' WHERE review_text IS NULL;")
+            cur.execute("UPDATE public.review_analyses SET engine = ai_engine WHERE engine IS NULL AND ai_engine IS NOT NULL;")
+            cur.execute("UPDATE public.review_analyses SET ai_engine = engine WHERE ai_engine IS NULL AND engine IS NOT NULL;")
             cur.execute("ALTER TABLE public.review_analyses ALTER COLUMN review_text SET NOT NULL;")
             cur.execute("""
                 DO $$
@@ -833,6 +876,7 @@ def db_init() -> None:
             """)
             cur.execute("CREATE INDEX IF NOT EXISTS idx_access_users_active ON public.access_users(is_active);")
             _refresh_access_columns(cur)
+            _refresh_analysis_columns(cur)
 
             cur.execute(
                 """
@@ -1042,8 +1086,14 @@ def db_get_analysis(analysis_id: int) -> Optional[dict]:
         return None
     try:
         with conn.cursor() as cur:
+            _ensure_analysis_columns(cur)
             cur.execute(
-                "SELECT id, review_id, platform, rating, review_text, result_json, error, model, engine, created_by, created_at FROM review_analyses WHERE id=%s",
+                f"""
+                SELECT id, review_id, platform, rating, review_text, result_json, error, model,
+                       {_analysis_engine_expr()} , created_by, created_at
+                FROM review_analyses
+                WHERE id=%s
+                """,
                 (analysis_id,),
             )
             r = cur.fetchone()
@@ -1077,8 +1127,14 @@ def db_get_analysis_by_review_id(review_id: int) -> Optional[dict]:
         return None
     try:
         with conn.cursor() as cur:
+            _ensure_analysis_columns(cur)
             cur.execute(
-                "SELECT id, review_id, platform, rating, review_text, result_json, error, model, engine, created_by, created_at FROM review_analyses WHERE review_id=%s",
+                f"""
+                SELECT id, review_id, platform, rating, review_text, result_json, error, model,
+                       {_analysis_engine_expr()}, created_by, created_at
+                FROM review_analyses
+                WHERE review_id=%s
+                """,
                 (review_id,),
             )
             r = cur.fetchone()
@@ -1178,6 +1234,44 @@ def db_find_reviews(platform: Optional[str], rating: Optional[int], days: int, l
             return out
     except Exception:
         logger.exception("db_find_reviews failed")
+        return []
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+def db_list_reviews_without_analysis(limit: int = 20) -> List[dict]:
+    conn = _db_connect()
+    if not conn:
+        return []
+    try:
+        with conn.cursor() as cur:
+            _ensure_review_columns(cur)
+            cur.execute(
+                f"""
+                SELECT r.id, r.platform, r.rating,
+                       {_review_text_expr("r.")} as review_text
+                FROM reviews r
+                LEFT JOIN review_analyses a ON a.review_id = r.id
+                WHERE a.id IS NULL
+                ORDER BY r.created_at ASC
+                LIMIT %s
+                """,
+                (limit,),
+            )
+            rows = cur.fetchall() or []
+            return [
+                {
+                    "id": int(row[0]),
+                    "platform": row[1],
+                    "rating": row[2],
+                    "review_text": row[3],
+                }
+                for row in rows
+            ]
+    except Exception:
+        logger.exception("db_list_reviews_without_analysis failed")
         return []
     finally:
         try:
@@ -1514,56 +1608,72 @@ def db_insert_analysis(
         return None, DB_LAST_ANALYSIS_ERROR_TYPE, DB_LAST_ANALYSIS_ERROR
     try:
         with conn.cursor() as cur:
+            _ensure_analysis_columns(cur)
+            columns = [
+                "review_id",
+                "platform",
+                "rating",
+                "review_text",
+                "result_json",
+                "error",
+                "model",
+            ]
+            values = [
+                review_id,
+                platform,
+                rating,
+                review_text,
+                json.dumps(result_json, ensure_ascii=False),
+                error,
+                model,
+            ]
+            if DB_ANALYSIS_HAS_ENGINE:
+                columns.append("engine")
+                values.append(engine)
+            if DB_ANALYSIS_HAS_AI_ENGINE:
+                columns.append("ai_engine")
+                values.append(engine)
+            columns.append("created_by")
+            values.append(created_by)
+            column_sql = ", ".join(columns)
+            placeholders = ", ".join(["%s::jsonb" if col == "result_json" else "%s" for col in columns])
+            update_pairs = [
+                "platform=EXCLUDED.platform",
+                "rating=EXCLUDED.rating",
+                "review_text=EXCLUDED.review_text",
+                "result_json=EXCLUDED.result_json",
+                "error=EXCLUDED.error",
+                "model=EXCLUDED.model",
+                "created_by=EXCLUDED.created_by",
+                "created_at=now()",
+            ]
+            if DB_ANALYSIS_HAS_ENGINE:
+                update_pairs.append("engine=EXCLUDED.engine")
+            if DB_ANALYSIS_HAS_AI_ENGINE:
+                update_pairs.append("ai_engine=EXCLUDED.ai_engine")
+            update_sql = ",\n                        ".join(update_pairs)
             if review_id is not None:
                 cur.execute(
-                    """
+                    f"""
                     INSERT INTO review_analyses
-                    (review_id, platform, rating, review_text, result_json, error, model, engine, created_by)
-                    VALUES (%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s)
+                    ({column_sql})
+                    VALUES ({placeholders})
                     ON CONFLICT (review_id)
                     DO UPDATE SET
-                        platform=EXCLUDED.platform,
-                        rating=EXCLUDED.rating,
-                        review_text=EXCLUDED.review_text,
-                        result_json=EXCLUDED.result_json,
-                        error=EXCLUDED.error,
-                        model=EXCLUDED.model,
-                        engine=EXCLUDED.engine,
-                        created_by=EXCLUDED.created_by,
-                        created_at=now()
+                        {update_sql}
                     RETURNING id
                     """,
-                    (
-                        review_id,
-                        platform,
-                        rating,
-                        review_text,
-                        json.dumps(result_json, ensure_ascii=False),
-                        error,
-                        model,
-                        engine,
-                        created_by,
-                    ),
+                    tuple(values),
                 )
             else:
                 cur.execute(
-                    """
+                    f"""
                     INSERT INTO review_analyses
-                    (review_id, platform, rating, review_text, result_json, error, model, engine, created_by)
-                    VALUES (%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s)
+                    ({column_sql})
+                    VALUES ({placeholders})
                     RETURNING id
                     """,
-                    (
-                        review_id,
-                        platform,
-                        rating,
-                        review_text,
-                        json.dumps(result_json, ensure_ascii=False),
-                        error,
-                        model,
-                        engine,
-                        created_by,
-                    ),
+                    tuple(values),
                 )
             row = cur.fetchone()
             DB_LAST_ANALYSIS_ERROR = None
@@ -1885,15 +1995,18 @@ def fetch_review_from_link(url: str) -> dict:
 # -----------------------------
 def ai_chat(messages: List[Dict[str, str]]) -> str:
     engine = _current_engine()
-
-    if engine in ("deepseek", "deep-seek", "ds"):
-        return call_deepseek(messages)
-    if engine in ("openai", "gpt"):
-        return call_openai(messages)
-    if engine in ("gemini", "google"):
-        return call_gemini(messages)
-    if engine in ("grok", "xai"):
-        return call_grok(messages)
+    try:
+        if engine in ("deepseek", "deep-seek", "ds"):
+            return call_deepseek(messages)
+        if engine in ("openai", "gpt"):
+            return call_openai(messages)
+        if engine in ("gemini", "google"):
+            return call_gemini(messages)
+        if engine in ("grok", "xai"):
+            return call_grok(messages)
+    except Exception:
+        logger.exception("ai_chat failed engine=%s", engine)
+        raise
 
     raise RuntimeError(f"Unknown AI_ENGINE: {engine}")
 
@@ -2061,9 +2174,14 @@ def cx_analyze(input_obj: dict) -> Tuple[Optional[dict], str]:
         {"role": "system", "content": get_cx_prompt()},
         {"role": "user", "content": json.dumps(input_obj, ensure_ascii=False)},
     ]
-    raw = ai_chat(messages)
+    try:
+        raw = ai_chat(messages)
+    except Exception:
+        logger.exception("cx_analyze ai_chat error")
+        raise
     parsed, err = extract_first_json(raw)
     if parsed is None:
+        logger.error("cx_analyze JSON parse failed err=%s preview=%s", err, _redact(raw[:200]))
         raise RuntimeError(f"AI returned invalid JSON. err={err}")
     return parsed, raw
 
@@ -2131,16 +2249,18 @@ INSTRUCTION_TEXT = (
 
 UI = {
     "instruction": "📘 Инструкция",
-    "help": "📋 Список команд",
-    "myid": "🆔 Мой ID",
-    "diag": "🛠 Самодиагностика",
     "add_review": "➕ Добавить отзыв",
-    "analyze_id": "🧠 Анализ по ID",
+    "analyze_id": "🧠 ИИ Анализ",
+    "reply_by_id": "✍️ Ответ на отзыв по ID",
+    "complaint_by_id": "⚠️ Жалоба на отзыв по ID",
     "find": "🔍 Поиск отзывов",
     "weekly": "📊 Недельный отчёт",
     "export": "📤 Экспорт CSV",
     "settings": "⚙️ Настройки",
     "contacts": "☎️ Контакты",
+    "help": "📋 Список команд",
+    "myid": "🆔 Мой ID",
+    "diag": "🛠 Самодиагностика",
 }
 
 LEGACY_LABELS = {
@@ -2150,6 +2270,8 @@ LEGACY_LABELS = {
     "diag": {"Самодиагностика", "Диагностика"},
     "add_review": {"Добавить отзыв", "Добавить Отзыв"},
     "analyze_id": {"Анализ по ID", "Анализ по Id"},
+    "reply_by_id": {"Ответ по ID", "Ответ на отзыв по ID"},
+    "complaint_by_id": {"Жалоба по ID", "Жалоба на отзыв по ID"},
     "find": {"Поиск", "Поиск отзывов"},
     "weekly": {"Недельный отчет", "Недельный отчёт"},
     "export": {"Экспорт CSV", "Экспорт Csv"},
@@ -2177,8 +2299,8 @@ def contacts_text() -> str:
 def main_menu_keyboard() -> dict:
     return {
         "keyboard": [
-            [UI["instruction"], UI["help"], UI["myid"]],
-            [UI["diag"], UI["add_review"], UI["analyze_id"]],
+            [UI["instruction"], UI["add_review"], UI["analyze_id"]],
+            [UI["reply_by_id"], UI["complaint_by_id"]],
             [UI["find"], UI["weekly"], UI["export"]],
             [UI["contacts"], UI["settings"]],
         ],
@@ -2189,6 +2311,8 @@ def settings_keyboard(can_manage: bool = False) -> dict:
     rows = [
         [{"text": "Выбор ИИ", "callback_data": "settings:engine"}],
         [{"text": "Бизнес-контекст", "callback_data": "settings:context"}],
+        [{"text": "🆔 Мой ID", "callback_data": "settings:myid"}],
+        [{"text": "🛠 Самодиагностика", "callback_data": "settings:diag"}],
     ]
     if can_manage:
         rows.append([{"text": "👥 Управление доступами", "callback_data": "settings:access"}])
@@ -2225,6 +2349,14 @@ def engine_keyboard() -> dict:
         ]
     }
 
+def analyze_menu_keyboard() -> dict:
+    return {
+        "inline_keyboard": [
+            [{"text": "Анализ по ID", "callback_data": "analyze_menu:id"}],
+            [{"text": "Анализ всех отзывов без анализа", "callback_data": "analyze_menu:missing"}],
+        ]
+    }
+
 def rating_keyboard(prefix: str = "rating") -> dict:
     rows = []
     for rating in range(5, 0, -1):
@@ -2254,6 +2386,9 @@ def link_platform_keyboard() -> dict:
             [{"text": "❓ Другое", "callback_data": "link_platform:unknown"}],
         ]
     }
+
+def link_author_keyboard() -> dict:
+    return {"inline_keyboard": [[{"text": "Пропустить", "callback_data": "link_author:skip"}]]}
 
 def link_confirm_keyboard() -> dict:
     return {
@@ -2294,6 +2429,8 @@ STATE_WAIT_PLATFORM = "WAIT_PLATFORM"
 STATE_WAIT_RATING = "WAIT_RATING"
 STATE_WAIT_DUP_CONFIRM = "WAIT_DUP_CONFIRM"
 STATE_WAIT_ANALYZE_ID = "WAIT_ANALYZE_ID"
+STATE_WAIT_REPLY_ID = "WAIT_REPLY_ID"
+STATE_WAIT_COMPLAINT_ID = "WAIT_COMPLAINT_ID"
 STATE_WAIT_CONTEXT = "WAIT_CONTEXT"
 STATE_FIND_PLATFORM = "FIND_PLATFORM"
 STATE_FIND_RATING = "FIND_RATING"
@@ -2346,6 +2483,40 @@ def notify_admins(text: str) -> None:
     ids.update(ADMIN_CHAT_IDS)
     for cid in sorted({i for i in ids if i is not None}):
         send_message(int(cid), text)
+
+def _analysis_text_from_result(result_json: Any, field: str) -> Optional[str]:
+    if not isinstance(result_json, dict):
+        return None
+    payload = result_json.get(field)
+    if isinstance(payload, dict):
+        return payload.get("text")
+    return None
+
+def _resolve_analysis_for_input(input_id: int) -> Tuple[Optional[dict], Optional[dict], str]:
+    analysis = db_get_analysis(input_id)
+    if analysis:
+        return analysis, None, "analysis"
+    review = db_get_review(input_id)
+    if not review:
+        return None, None, "not_found"
+    analysis = db_get_analysis_by_review_id(input_id)
+    if analysis:
+        return analysis, review, "review_analysis"
+    return None, review, "missing_analysis"
+
+def _start_analysis_thread(
+    chat_id: int,
+    user_id: int,
+    review_text: str,
+    platform: Optional[str],
+    rating: Optional[int],
+    review_id: Optional[int],
+) -> None:
+    threading.Thread(
+        target=background_analyze,
+        args=(chat_id, user_id, review_text, platform or "unknown", rating, review_id),
+        daemon=True,
+    ).start()
 
 def background_analyze(chat_id: int, user_id: int, review_text: str, platform_hint: str = "unknown",
                       rating: Optional[int] = None, review_id: Optional[int] = None) -> None:
@@ -2438,6 +2609,8 @@ def background_analyze(chat_id: int, user_id: int, review_text: str, platform_hi
         error_type = "unknown"
         if "Cloudflare" in err_text or "returned HTML" in err_text or "just a moment" in err_text.lower():
             error_type = "cloudflare_block"
+        elif "fallback disabled" in err_text.lower():
+            error_type = "fallback_disabled"
         elif "status=403" in err_text:
             error_type = "http_403"
         elif "status=429" in err_text:
@@ -2447,6 +2620,8 @@ def background_analyze(chat_id: int, user_id: int, review_text: str, platform_hi
 
         if error_type == "cloudflare_block":
             msg = "❌ Ошибка ИИ: cloudflare_block. Попробуй позже или переключи движок."
+        elif error_type == "fallback_disabled":
+            msg = "❌ Ошибка ИИ: fallback_disabled. Разреши DEEPSEEK_ALLOW_REQUESTS_FALLBACK=1 или переключи движок."
         elif error_type in ("http_403", "http_429"):
             msg = f"❌ Ошибка ИИ: {error_type}. Попробуй позже или переключи движок."
         elif error_type == "parse_error":
@@ -2483,6 +2658,7 @@ def _link_meta(payload: dict) -> dict:
         "source_url": payload.get("source_url"),
         "platform_guess": payload.get("platform_guess"),
         "author_name": payload.get("author_name"),
+        "author_name_skipped": payload.get("author_name_skipped"),
         "rating_source": payload.get("rating_source") or "user_confirmed",
         "added_by": payload.get("added_by"),
         "input_method": "link",
@@ -2514,7 +2690,7 @@ def _link_missing_fields(payload: dict) -> List[str]:
         missing.append("platform")
     if payload.get("rating") is None:
         missing.append("rating")
-    if not payload.get("author_name"):
+    if not payload.get("author_name") and not payload.get("author_name_skipped"):
         missing.append("author_name")
     if not payload.get("review_text"):
         missing.append("review_text")
@@ -2523,11 +2699,17 @@ def _link_missing_fields(payload: dict) -> List[str]:
 def _format_link_summary(payload: dict, duplicate: Optional[dict]) -> str:
     rating = payload.get("rating")
     rating_display = f"⭐{rating}" if rating is not None else "не указан"
+    if payload.get("author_name"):
+        author_display = payload.get("author_name")
+    elif payload.get("author_name_skipped"):
+        author_display = "пропущен"
+    else:
+        author_display = "не указан"
     lines = [
         "Проверь данные отзыва:",
         f"- Площадка: {payload.get('platform') or payload.get('platform_guess') or 'unknown'}",
         f"- Рейтинг: {rating_display}",
-        f"- Автор: {payload.get('author_name') or 'не указан'}",
+        f"- Автор: {author_display}",
         f"- Текст: {payload.get('review_text') or '-'}",
         f"- Ссылка: {payload.get('source_url') or '-'}",
     ]
@@ -2549,7 +2731,7 @@ def _advance_link_flow(chat_id: int, payload: dict) -> None:
             return
         if next_field == "author_name":
             db_set_session(chat_id, STATE_WAIT_LINK_AUTHOR, payload)
-            send_message(chat_id, "Укажи автора (например: инкогнито 1234).")
+            send_message(chat_id, "Укажи автора (например: инкогнито 1234) или пропусти:", reply_markup=link_author_keyboard())
             return
         if next_field == "review_text":
             db_set_session(chat_id, STATE_WAIT_LINK_TEXT, payload)
@@ -2899,6 +3081,20 @@ def telegram_webhook():
                 answer_callback_query(cq_id, "OK")
                 return "ok"
 
+            if data.startswith("settings:myid"):
+                _log_route("settings_myid", chat_id, user_id)
+                if chat_id:
+                    send_message(chat_id, f"Ваш ID: {user_id}")
+                answer_callback_query(cq_id, "OK")
+                return "ok"
+
+            if data.startswith("settings:diag"):
+                _log_route("settings_diag", chat_id, user_id)
+                if chat_id:
+                    send_message(chat_id, diag_text(user_id))
+                answer_callback_query(cq_id, "OK")
+                return "ok"
+
             if data.startswith("settings:access"):
                 _log_route("settings_access", chat_id, user_id)
                 if not can_manage_access(user_id):
@@ -2941,6 +3137,39 @@ def telegram_webhook():
                 if method == "link":
                     db_set_session(chat_id, STATE_WAIT_REVIEW_LINK, payload)
                     send_message(chat_id, "Вставь ссылку на отзыв одним сообщением.")
+                    answer_callback_query(cq_id, "OK")
+                    return "ok"
+
+            if data.startswith("analyze_menu:"):
+                action = data.split(":", 1)[1]
+                _log_route(f"analyze_menu:{action}", chat_id, user_id)
+                if not chat_id:
+                    return "ok"
+                if action == "id":
+                    db_set_session(chat_id, STATE_WAIT_ANALYZE_ID, {})
+                    send_message(chat_id, "Введи ID отзыва для анализа.")
+                    answer_callback_query(cq_id, "OK")
+                    return "ok"
+                if action == "missing":
+                    if not DB_OK:
+                        send_message(chat_id, _db_status_message())
+                        answer_callback_query(cq_id, "OK")
+                        return "ok"
+                    reviews = db_list_reviews_without_analysis(limit=MISSING_ANALYSIS_BATCH)
+                    if not reviews:
+                        send_message(chat_id, "Нет отзывов без анализа.")
+                        answer_callback_query(cq_id, "OK")
+                        return "ok"
+                    for review in reviews:
+                        _start_analysis_thread(
+                            chat_id,
+                            user_id,
+                            review.get("review_text") or "",
+                            review.get("platform") or "unknown",
+                            review.get("rating"),
+                            review.get("id"),
+                        )
+                    send_message(chat_id, f"⏳ Запущено анализов: {len(reviews)}")
                     answer_callback_query(cq_id, "OK")
                     return "ok"
 
@@ -3108,6 +3337,19 @@ def telegram_webhook():
                 answer_callback_query(cq_id, "OK")
                 return "ok"
 
+            if data.startswith("link_author:"):
+                action = data.split(":", 1)[1]
+                _log_route(f"link_author:{action}", chat_id, user_id)
+                if not chat_id:
+                    return "ok"
+                payload = (sess or {}).get("payload") or {}
+                if action == "skip":
+                    payload["author_name"] = None
+                    payload["author_name_skipped"] = True
+                    _advance_link_flow(chat_id, payload)
+                    answer_callback_query(cq_id, "OK")
+                    return "ok"
+
             if data.startswith("link_confirm:"):
                 decision = data.split(":", 1)[1]
                 _log_route(f"link_confirm:{decision}", chat_id, user_id)
@@ -3122,10 +3364,14 @@ def telegram_webhook():
                 review_id = _insert_link_review(payload)
                 _reset_state(chat_id)
                 if review_id:
-                    send_message(
+                    send_message(chat_id, f"✅ Отзыв добавлен. Номер: #{review_id}\n⏳ Запускаю ИИ-анализ…")
+                    _start_analysis_thread(
                         chat_id,
-                        f"✅ Отзыв добавлен. Номер: #{review_id}",
-                        reply_markup={"inline_keyboard": [[{"text": "🧠 Проанализировать", "callback_data": f"analyze_review:{review_id}"}]]},
+                        user_id,
+                        (payload.get("review_text") or "").strip(),
+                        payload.get("platform") or payload.get("platform_guess") or "unknown",
+                        payload.get("rating"),
+                        review_id,
                     )
                 else:
                     msg = _db_disabled_user_message() if not db_enabled() else "❌ Не удалось сохранить отзыв в БД. Проверь DATABASE_URL, миграции и /diag."
@@ -3198,10 +3444,14 @@ def telegram_webhook():
                     review_id = _insert_link_review(payload)
                     _reset_state(chat_id)
                     if review_id:
-                        send_message(
+                        send_message(chat_id, f"✅ Отзыв добавлен. Номер: #{review_id}\n⏳ Запускаю ИИ-анализ…")
+                        _start_analysis_thread(
                             chat_id,
-                            f"✅ Отзыв добавлен. Номер: #{review_id}",
-                            reply_markup={"inline_keyboard": [[{"text": "🧠 Проанализировать", "callback_data": f"analyze_review:{review_id}"}]]},
+                            user_id,
+                            (payload.get("review_text") or "").strip(),
+                            payload.get("platform") or payload.get("platform_guess") or "unknown",
+                            payload.get("rating"),
+                            review_id,
                         )
                     else:
                         msg = _db_disabled_user_message() if not db_enabled() else "❌ Не удалось сохранить отзыв в БД. Проверь DATABASE_URL, миграции и /diag."
@@ -3318,11 +3568,14 @@ def telegram_webhook():
                 if not review:
                     send_message(chat_id, "Отзыв не найден.")
                     return "ok"
-                threading.Thread(
-                    target=background_analyze,
-                    args=(chat_id, user_id, review.get("review_text") or "", review.get("platform") or "unknown", review.get("rating"), review_id),
-                    daemon=True,
-                ).start()
+                _start_analysis_thread(
+                    chat_id,
+                    user_id,
+                    review.get("review_text") or "",
+                    review.get("platform") or "unknown",
+                    review.get("rating"),
+                    review_id,
+                )
                 send_message(chat_id, "⏳ Анализ запущен, подожди пару секунд…")
                 answer_callback_query(cq_id, "OK")
                 return "ok"
@@ -3341,11 +3594,14 @@ def telegram_webhook():
                 if not review:
                     send_message(chat_id, "Отзыв не найден.")
                     return "ok"
-                threading.Thread(
-                    target=background_analyze,
-                    args=(chat_id, user_id, review.get("review_text") or "", review.get("platform") or "unknown", review.get("rating"), review_id),
-                    daemon=True,
-                ).start()
+                _start_analysis_thread(
+                    chat_id,
+                    user_id,
+                    review.get("review_text") or "",
+                    review.get("platform") or "unknown",
+                    review.get("rating"),
+                    review_id,
+                )
                 send_message(chat_id, "🔄 Пересчёт запущен.")
                 answer_callback_query(cq_id, "OK")
                 return "ok"
@@ -3418,7 +3674,7 @@ def telegram_webhook():
 
         if _matches_label("instruction", text_clean, text_norm):
             _log_route("menu_instruction", chat_id, user_id)
-            send_message(chat_id, INSTRUCTION_TEXT, parse_mode="Markdown")
+            send_message(chat_id, f"{INSTRUCTION_TEXT}\n\n{HELP_TEXT}", parse_mode="Markdown")
             return "ok"
         if _matches_label("help", text_clean, text_norm):
             _log_route("menu_help", chat_id, user_id)
@@ -3438,8 +3694,17 @@ def telegram_webhook():
             return "ok"
         if _matches_label("analyze_id", text_clean, text_norm):
             _log_route("menu_analyze_id", chat_id, user_id)
-            db_set_session(chat_id, STATE_WAIT_ANALYZE_ID, {})
-            send_message(chat_id, "Введи ID отзыва для анализа.")
+            send_message(chat_id, "Выберите режим анализа:", reply_markup=analyze_menu_keyboard())
+            return "ok"
+        if _matches_label("reply_by_id", text_clean, text_norm):
+            _log_route("menu_reply_by_id", chat_id, user_id)
+            db_set_session(chat_id, STATE_WAIT_REPLY_ID, {})
+            send_message(chat_id, "Введи ID анализа или отзыва для ответа.")
+            return "ok"
+        if _matches_label("complaint_by_id", text_clean, text_norm):
+            _log_route("menu_complaint_by_id", chat_id, user_id)
+            db_set_session(chat_id, STATE_WAIT_COMPLAINT_ID, {})
+            send_message(chat_id, "Введи ID анализа или отзыва для жалобы.")
             return "ok"
         if _matches_label("find", text_clean, text_norm):
             _log_route("menu_find", chat_id, user_id)
@@ -3669,11 +3934,7 @@ def telegram_webhook():
             if not review_text:
                 send_message(chat_id, "Укажи текст: /analyze <текст>")
                 return "ok"
-            threading.Thread(
-                target=background_analyze,
-                args=(chat_id, user_id, review_text, "unknown", None, None),
-                daemon=True,
-            ).start()
+            _start_analysis_thread(chat_id, user_id, review_text, "unknown", None, None)
             send_message(chat_id, "⏳ Анализ запущен, подожди пару секунд…")
             return "ok"
 
@@ -3691,11 +3952,14 @@ def telegram_webhook():
             if not review:
                 send_message(chat_id, "Отзыв не найден.")
                 return "ok"
-            threading.Thread(
-                target=background_analyze,
-                args=(chat_id, user_id, review.get("review_text") or "", review.get("platform") or "unknown", review.get("rating"), review_id),
-                daemon=True,
-            ).start()
+            _start_analysis_thread(
+                chat_id,
+                user_id,
+                review.get("review_text") or "",
+                review.get("platform") or "unknown",
+                review.get("rating"),
+                review_id,
+            )
             send_message(chat_id, "⏳ Анализ запущен, подожди пару секунд…")
             return "ok"
 
@@ -3744,7 +4008,7 @@ def telegram_webhook():
             payload["added_by"] = user_id
             fetched = fetch_review_from_link(text_clean)
             payload.update({
-                "platform": fetched.get("platform") or payload.get("platform_guess"),
+                "platform": fetched.get("platform"),
                 "rating": fetched.get("rating"),
                 "author_name": fetched.get("author_name"),
                 "review_text": fetched.get("review_text"),
@@ -3760,11 +4024,15 @@ def telegram_webhook():
 
         if sess and sess.get("state") == STATE_WAIT_LINK_AUTHOR:
             _log_route("state_wait_link_author", chat_id, user_id)
-            if not text_clean:
-                send_message(chat_id, "Укажи автора текста (можно «неизвестно»).")
-                return "ok"
             payload = sess.get("payload") or {}
-            payload["author_name"] = text_clean
+            if not text_clean:
+                send_message(chat_id, "Укажи автора текста или пропусти:", reply_markup=link_author_keyboard())
+                return "ok"
+            if text_clean.lower() in ("пропустить", "skip"):
+                payload["author_name"] = None
+                payload["author_name_skipped"] = True
+            else:
+                payload["author_name"] = text_clean
             _advance_link_flow(chat_id, payload)
             return "ok"
 
@@ -3790,13 +4058,51 @@ def telegram_webhook():
             if not review:
                 send_message(chat_id, "Отзыв не найден.")
                 return "ok"
-            threading.Thread(
-                target=background_analyze,
-                args=(chat_id, user_id, review.get("review_text") or "", review.get("platform") or "unknown", review.get("rating"), review_id),
-                daemon=True,
-            ).start()
+            _start_analysis_thread(
+                chat_id,
+                user_id,
+                review.get("review_text") or "",
+                review.get("platform") or "unknown",
+                review.get("rating"),
+                review_id,
+            )
             _reset_state(chat_id)
             send_message(chat_id, "⏳ Анализ запущен, подожди пару секунд…")
+            return "ok"
+
+        if sess and sess.get("state") in (STATE_WAIT_REPLY_ID, STATE_WAIT_COMPLAINT_ID):
+            action = "reply" if sess.get("state") == STATE_WAIT_REPLY_ID else "complaint"
+            _log_route(f"state_wait_{action}_id", chat_id, user_id)
+            if not DB_OK:
+                send_message(chat_id, _db_status_message())
+                _reset_state(chat_id)
+                return "ok"
+            match = re.findall(r"\d+", text_clean)
+            if not match:
+                send_message(chat_id, "Укажи числовой ID анализа или отзыва.")
+                return "ok"
+            input_id = int(match[0])
+            analysis, review, status = _resolve_analysis_for_input(input_id)
+            if status == "not_found":
+                send_message(chat_id, "Анализ или отзыв не найден.")
+                _reset_state(chat_id)
+                return "ok"
+            if status == "missing_analysis":
+                send_message(
+                    chat_id,
+                    "Анализ для этого отзыва не найден. Запустить анализ?",
+                    reply_markup={"inline_keyboard": [[{"text": "🧠 Запустить анализ", "callback_data": f"analyze_review:{input_id}"}]]},
+                )
+                _reset_state(chat_id)
+                return "ok"
+            result_json = (analysis or {}).get("result_json") or {}
+            if action == "reply":
+                text_value = _analysis_text_from_result(result_json, "public_reply")
+                send_message(chat_id, text_value or "Ответ не найден.")
+            else:
+                text_value = _analysis_text_from_result(result_json, "complaint")
+                send_message(chat_id, text_value or "Жалоба не найдена.")
+            _reset_state(chat_id)
             return "ok"
 
         if sess and sess.get("state") == STATE_ACCESS_ADD:
