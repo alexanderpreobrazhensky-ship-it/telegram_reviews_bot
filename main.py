@@ -1,5 +1,6 @@
 import os
 import re
+import sys
 import json
 import csv
 import io
@@ -99,6 +100,12 @@ GROK_MODEL = os.getenv("GROK_MODEL") or "grok-beta"
 REPORT_CHAT_IDS = os.getenv("REPORT_CHAT_IDS", "").strip()
 EXTRA_ADMIN_CHAT_IDS = os.getenv("ADMIN_CHAT_IDS", "").strip()
 
+def _env_flag(name: str, default: str = "1") -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        raw = default
+    return raw.strip().lower() not in ("0", "false", "no", "off", "disabled")
+
 def _parse_id_list(raw: str) -> List[int]:
     return sorted({int(x) for x in re.findall(r"\d+", raw or "")})
 
@@ -168,6 +175,32 @@ SET_WEBHOOK_ON_START = (os.getenv("SET_WEBHOOK_ON_START") or "1").strip() not in
 AI_LAST_HTTP_STATUS: Optional[int] = None
 AI_LAST_RAW_PREVIEW: Optional[str] = None
 DEEPSEEK_TRANSPORT: Optional[str] = None
+_OPENAI_CLIENT_LOGGED = False
+
+def _openai_sdk_version() -> str:
+    if not OPENAI_SDK_AVAILABLE:
+        return "unavailable"
+    module = sys.modules.get("openai")
+    return getattr(module, "__version__", "unknown") if module else "unknown"
+
+def _openai_proxy_mode() -> str:
+    if os.getenv("OPENAI_PROXY"):
+        return "openai_proxy_env"
+    if os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY"):
+        return "http_proxy_env"
+    return "none"
+
+def _log_openai_client_context(label: str) -> None:
+    global _OPENAI_CLIENT_LOGGED
+    if _OPENAI_CLIENT_LOGGED:
+        return
+    logger.info(
+        "OpenAI SDK context: label=%s version=%s proxy=%s",
+        label,
+        _openai_sdk_version(),
+        _openai_proxy_mode(),
+    )
+    _OPENAI_CLIENT_LOGGED = True
 
 SERVICE_NAME = "Автоцентр Лира"
 SERVICE_ADDRESS = "Нижний Новгород, ул. Удмуртская, д. 10"
@@ -245,11 +278,40 @@ def _append_url_params(url: str, params: Dict[str, str]) -> str:
     new_query = urlencode(query)
     return urlunparse(parsed._replace(query=new_query))
 
+def db_enabled() -> bool:
+    global DATABASE_URL, DB_URL_SOURCE
+    if not DATABASE_URL:
+        DATABASE_URL, DB_URL_SOURCE = resolve_database_url()
+    if not _env_flag("DB_ENABLED", "1"):
+        return False
+    return bool(DATABASE_URL)
+
 # -----------------------------
 # Telegram helpers
 # -----------------------------
 def tg_api(method: str) -> str:
     return f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{method}"
+
+def extract_chat_user(update: dict) -> Tuple[Optional[int], Optional[int]]:
+    if not update:
+        return None, None
+    message = update.get("message") or {}
+    if message:
+        chat_id = (message.get("chat") or {}).get("id")
+        user_id = (message.get("from") or {}).get("id")
+        return chat_id, user_id
+    callback = update.get("callback_query") or {}
+    if callback:
+        msg = callback.get("message") or {}
+        chat_id = (msg.get("chat") or {}).get("id")
+        user_id = (callback.get("from") or {}).get("id")
+        return chat_id, user_id
+    membership = update.get("my_chat_member") or {}
+    if membership:
+        chat_id = (membership.get("chat") or {}).get("id")
+        user_id = (membership.get("from") or {}).get("id")
+        return chat_id, user_id
+    return None, None
 
 def send_message(chat_id: int, text: str, reply_markup: Optional[dict] = None, parse_mode: Optional[str] = None) -> None:
     payload = {"chat_id": chat_id, "text": text}
@@ -429,6 +491,10 @@ def _db_connect():
     global DB_LAST_ERROR, DATABASE_URL, DB_URL_SOURCE, DB_OK
     if not DATABASE_URL:
         DATABASE_URL, DB_URL_SOURCE = resolve_database_url()
+    if not _env_flag("DB_ENABLED", "1"):
+        DB_LAST_ERROR = "DB disabled by DB_ENABLED"
+        DB_OK = False
+        return None
     if not DATABASE_URL:
         DB_LAST_ERROR = "DATABASE_URL missing"
         DB_OK = False
@@ -576,6 +642,8 @@ def _classify_db_error(err_text: Optional[str]) -> str:
     return "unknown"
 
 def _db_status_message() -> str:
+    if not _env_flag("DB_ENABLED", "1"):
+        return "БД отключена (DB_ENABLED=0)."
     if not DATABASE_URL:
         return "DB disabled. Проверь DATABASE_URL или /diag."
     if not DB_OK_MIGRATIONS:
@@ -585,6 +653,9 @@ def _db_status_message() -> str:
         err = _short_error(DB_LAST_ERROR) or "unknown"
         return f"DB connection failed: {err}"
     return "DB disabled. Проверь DATABASE_URL или /diag."
+
+def _db_disabled_user_message() -> str:
+    return "БД отключена, показал без сохранения."
 
 def db_init() -> None:
     """
@@ -597,6 +668,17 @@ def db_init() -> None:
     global OWNER_SEED_STATUS, OWNER_SEED_ERROR
     if not DATABASE_URL:
         DATABASE_URL, DB_URL_SOURCE = resolve_database_url()
+    if not db_enabled():
+        DB_OK = False
+        DB_OK_MIGRATIONS = False
+        if not _env_flag("DB_ENABLED", "1"):
+            DB_MIGRATION_ERROR = "DB disabled by DB_ENABLED"
+            DB_LAST_ERROR = "DB disabled by DB_ENABLED"
+        else:
+            DB_MIGRATION_ERROR = "DATABASE_URL missing"
+            DB_LAST_ERROR = "DATABASE_URL missing"
+        logger.warning("DB init skipped (db disabled)")
+        return
     conn = _db_connect()
     if not conn:
         DB_OK = False
@@ -870,6 +952,8 @@ def db_init() -> None:
 
 def db_insert_review(source: str, rating: Optional[int], review_text: str, meta: dict,
                      platform: Optional[str] = None, review_hash: Optional[str] = None) -> Optional[int]:
+    if not db_enabled():
+        return None
     conn = _db_connect()
     if not conn:
         return None
@@ -1204,7 +1288,10 @@ def db_set_setting(key: str, value: dict) -> None:
         except Exception:
             pass
 
-def db_upsert_access_user(chat_id: int, role: str, added_by: Optional[int], note: Optional[str] = None) -> None:
+def db_upsert_access_user(chat_id: Optional[int], role: str, added_by: Optional[int], note: Optional[str] = None) -> None:
+    if chat_id is None:
+        logger.warning("db_upsert_access_user skipped: chat_id missing")
+        return
     conn = _db_connect()
     if not conn:
         return
@@ -1414,6 +1501,12 @@ def db_insert_analysis(
     created_by: Optional[int],
 ) -> Tuple[Optional[int], Optional[str], Optional[str]]:
     global DB_LAST_ANALYSIS_ERROR, DB_LAST_ANALYSIS_ERROR_TYPE
+    resolved_engine = (engine or "").strip().lower() or _current_engine() or AI_ENGINE or "deepseek"
+    engine = resolved_engine
+    if not db_enabled():
+        DB_LAST_ANALYSIS_ERROR = "db_disabled"
+        DB_LAST_ANALYSIS_ERROR_TYPE = "disabled"
+        return None, DB_LAST_ANALYSIS_ERROR_TYPE, DB_LAST_ANALYSIS_ERROR
     conn = _db_connect()
     if not conn:
         DB_LAST_ANALYSIS_ERROR = _short_error(DB_LAST_ERROR)
@@ -1812,6 +1905,7 @@ def call_deepseek(messages: List[Dict[str, str]]) -> str:
     force_requests_fallback = False
     if OPENAI_SDK_AVAILABLE and OpenAI is not None:
         try:
+            _log_openai_client_context("deepseek")
             client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
             resp = client.chat.completions.create(
                 model=DEEPSEEK_MODEL,
@@ -1873,6 +1967,7 @@ def call_openai(messages: List[Dict[str, str]]) -> str:
     if not OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY not set")
     if OPENAI_SDK_AVAILABLE and OpenAI is not None:
+        _log_openai_client_context("openai")
         client = OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_BASE_URL)
         resp = client.chat.completions.create(
             model=OPENAI_MODEL,
@@ -2277,6 +2372,10 @@ def background_analyze(chat_id: int, user_id: int, review_text: str, platform_hi
 
     try:
         parsed, _raw = cx_analyze(input_obj)
+        if not db_enabled():
+            brief = format_analysis_brief(parsed)
+            send_message(chat_id, f"ℹ️ {_db_disabled_user_message()}\n\n{brief}")
+            return
         analysis_id, db_err_type, db_err_msg = db_insert_analysis(
             review_id=review_id,
             platform=parsed.get("platform_detected", {}).get("value") if isinstance(parsed.get("platform_detected"), dict) else platform_hint,
@@ -2307,7 +2406,16 @@ def background_analyze(chat_id: int, user_id: int, review_text: str, platform_hi
         logger.error("AI exception: %s", err_text)
         logger.exception("AI exception traceback")
 
-        fallback_json = {"_error": "AI failed or returned invalid JSON (see logs)", "engine": engine}
+        status = "timeout" if "timeout" in err_text.lower() else "ai_error"
+        fallback_json = {
+            "_error": "AI failed or returned invalid JSON (see logs)",
+            "engine": engine,
+            "status": status,
+            "detail": err_text[:200],
+        }
+        if not db_enabled():
+            send_message(chat_id, f"❌ Ошибка ИИ: {status}. {_db_disabled_user_message()}")
+            return
         analysis_id, db_err_type, db_err_msg = db_insert_analysis(
             review_id=review_id,
             platform=platform_hint,
@@ -2583,6 +2691,8 @@ def diag_payload(current_user_id: Optional[int] = None) -> dict:
         "gemini_key_set": bool(GEMINI_API_KEY),
         "db": "postgres" if DB_OK else "disabled",
         "db_status": "ok" if DB_OK else "failed",
+        "db_enabled": db_enabled(),
+        "db_enabled_env": _env_flag("DB_ENABLED", "1"),
         "db_configured": bool(DATABASE_URL),
         "db_ok_global": DB_OK,
         "db_migrations_ok": DB_OK_MIGRATIONS,
@@ -2635,6 +2745,8 @@ def diag_text(current_user_id: Optional[int] = None) -> str:
         f"- gemini_key_set: {'yes' if payload.get('gemini_key_set') else 'no'}\n"
         f"- db: {payload.get('db')}\n"
         f"- db_status: {payload.get('db_status')}\n"
+        f"- db_enabled: {payload.get('db_enabled')}\n"
+        f"- db_enabled_env: {payload.get('db_enabled_env')}\n"
         f"- db_configured: {payload.get('db_configured')}\n"
         f"- db_ok_global: {payload.get('db_ok_global')}\n"
         f"- db_migrations_ok: {payload.get('db_migrations_ok')}\n"
@@ -3016,7 +3128,8 @@ def telegram_webhook():
                         reply_markup={"inline_keyboard": [[{"text": "🧠 Проанализировать", "callback_data": f"analyze_review:{review_id}"}]]},
                     )
                 else:
-                    send_message(chat_id, "❌ Не удалось сохранить отзыв в БД. Проверь DATABASE_URL, миграции и /diag.")
+                    msg = _db_disabled_user_message() if not db_enabled() else "❌ Не удалось сохранить отзыв в БД. Проверь DATABASE_URL, миграции и /diag."
+                    send_message(chat_id, msg)
                 answer_callback_query(cq_id, "OK")
                 return "ok"
 
@@ -3065,7 +3178,8 @@ def telegram_webhook():
                         reply_markup={"inline_keyboard": [[{"text": "🧠 Проанализировать", "callback_data": f"analyze_review:{review_id}"}]]},
                     )
                 else:
-                    send_message(chat_id, "❌ Не удалось сохранить отзыв в БД. Проверь DATABASE_URL, миграции и /diag.")
+                    msg = _db_disabled_user_message() if not db_enabled() else "❌ Не удалось сохранить отзыв в БД. Проверь DATABASE_URL, миграции и /diag."
+                    send_message(chat_id, msg)
                 answer_callback_query(cq_id, "OK")
                 return "ok"
 
@@ -3090,7 +3204,8 @@ def telegram_webhook():
                             reply_markup={"inline_keyboard": [[{"text": "🧠 Проанализировать", "callback_data": f"analyze_review:{review_id}"}]]},
                         )
                     else:
-                        send_message(chat_id, "❌ Не удалось сохранить отзыв в БД. Проверь DATABASE_URL, миграции и /diag.")
+                        msg = _db_disabled_user_message() if not db_enabled() else "❌ Не удалось сохранить отзыв в БД. Проверь DATABASE_URL, миграции и /diag."
+                        send_message(chat_id, msg)
                     answer_callback_query(cq_id, "OK")
                     return "ok"
                 db_set_session(chat_id, STATE_WAIT_PLATFORM, payload)
