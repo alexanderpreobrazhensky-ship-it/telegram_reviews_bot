@@ -238,7 +238,7 @@ DEFAULT_BUSINESS_CONTEXT = (
     "ожидание в зоне клиента, парковка, коммуникация мастеров, сроки работ, "
     "согласование стоимости, качество ремонта и сервиса."
 )
-UI_VERSION = "2025-02-15"
+UI_VERSION = "2025-03-05"
 
 # -----------------------------
 # Flask
@@ -355,6 +355,10 @@ def send_message(chat_id: int, text: str, reply_markup: Optional[dict] = None, p
             )
     except Exception as e:
         logger.exception("sendMessage exception chat_id=%s text=%s err=%s", chat_id, _redact(text[:200]), e)
+
+def _access_denied_text(user_id: Optional[int]) -> str:
+    suffix = f"Ваш ID: {user_id}." if user_id is not None else "Ваш ID неизвестен."
+    return f"⛔ Доступ запрещён. {suffix} Обратитесь к администратору."
 
 def answer_callback_query(callback_query_id: str, text: str = "", show_alert: bool = False) -> None:
     payload = {"callback_query_id": callback_query_id, "text": text, "show_alert": show_alert}
@@ -881,6 +885,7 @@ def db_init() -> None:
             cur.execute("ALTER TABLE public.review_analyses ADD COLUMN IF NOT EXISTS ai_engine TEXT;")
             cur.execute("ALTER TABLE public.review_analyses ADD COLUMN IF NOT EXISTS created_by BIGINT;")
             cur.execute("ALTER TABLE public.review_analyses ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT now();")
+            cur.execute("ALTER TABLE public.review_analyses ALTER COLUMN input_json SET DEFAULT '{}'::jsonb;")
             cur.execute("UPDATE public.review_analyses SET review_text = '' WHERE review_text IS NULL;")
             cur.execute("UPDATE public.review_analyses SET input_json = '{}'::jsonb WHERE input_json IS NULL;")
             cur.execute("UPDATE public.review_analyses SET engine = ai_engine WHERE engine IS NULL AND ai_engine IS NOT NULL;")
@@ -1710,6 +1715,8 @@ def db_insert_analysis(
     global DB_LAST_ANALYSIS_ERROR, DB_LAST_ANALYSIS_ERROR_TYPE
     resolved_engine = (engine or "").strip().lower() or _current_engine() or AI_ENGINE or "deepseek"
     engine = resolved_engine
+    if not isinstance(input_json, dict):
+        input_json = {}
     if not db_enabled():
         DB_LAST_ANALYSIS_ERROR = "db_disabled"
         DB_LAST_ANALYSIS_ERROR_TYPE = "disabled"
@@ -2891,14 +2898,14 @@ def _insert_link_review(payload: dict) -> Optional[int]:
 
 def _link_missing_fields(payload: dict) -> List[str]:
     missing = []
-    if not payload.get("platform"):
-        missing.append("platform")
-    if payload.get("rating") is None:
-        missing.append("rating")
-    if not payload.get("author_name") and not payload.get("author_name_skipped"):
-        missing.append("author_name")
     if not payload.get("review_text"):
         missing.append("review_text")
+    if payload.get("rating") is None:
+        missing.append("rating")
+    if not payload.get("platform"):
+        missing.append("platform")
+    if not payload.get("author_name") and not payload.get("author_name_skipped"):
+        missing.append("author_name")
     return missing
 
 def _format_link_summary(payload: dict, duplicate: Optional[dict]) -> str:
@@ -2928,7 +2935,12 @@ def _advance_link_flow(chat_id: int, payload: dict) -> None:
         next_field = missing[0]
         if next_field == "platform":
             db_set_session(chat_id, STATE_WAIT_LINK_PLATFORM, payload)
-            send_message(chat_id, "Выбери площадку (или оставь «Другое»):", reply_markup=link_platform_keyboard())
+            guess = payload.get("platform_guess")
+            if guess and guess != "unknown":
+                prompt = f"Выбери площадку (предположительно {guess}) или оставь «Другое»:"
+            else:
+                prompt = "Выбери площадку (или оставь «Другое»):"
+            send_message(chat_id, prompt, reply_markup=link_platform_keyboard())
             return
         if next_field == "rating":
             db_set_session(chat_id, STATE_WAIT_LINK_RATING, payload)
@@ -3268,7 +3280,7 @@ def telegram_webhook():
             if not can_use_bot(chat_id, user_id):
                 _log_route("blocked_callback", chat_id, user_id)
                 if chat_id:
-                    send_message(chat_id, "⛔ Доступ запрещён. Обратитесь к администратору.")
+                    send_message(chat_id, _access_denied_text(user_id))
                 if cq_id:
                     answer_callback_query(cq_id, "Доступ запрещён", show_alert=True)
                 return "ok"
@@ -3885,32 +3897,59 @@ def telegram_webhook():
 
         if not chat_id or not user_id:
             return "ok"
-        ensure_admin_seed(chat_id, user_id)
-        if not can_use_bot(chat_id, user_id):
-            _log_route("blocked_message", chat_id, user_id)
-            send_message(chat_id, "⛔ Доступ запрещён. Обратитесь к администратору.")
-            return "ok"
+        cmd_token = text_clean.split()[0] if text_clean else ""
+        cmd = cmd_token.split("@")[0].lower() if cmd_token.startswith("/") else ""
+        cmd_args = text_clean[len(cmd_token):].strip() if cmd_token else ""
 
         if text_clean == "OK":
             _log_route("ignore_ok", chat_id, user_id)
             return "ok"
 
-        cmd_token = text_clean.split()[0] if text_clean else ""
-        cmd = cmd_token.split("@")[0].lower() if cmd_token.startswith("/") else ""
-        cmd_args = text_clean[len(cmd_token):].strip() if cmd_token else ""
+        if cmd == "/start":
+            _log_route("start", chat_id, user_id)
+            logger.info("Dispatch: matched=/start")
+            _reset_state(chat_id)
+            name = _display_name(user)
+            send_message(
+                chat_id,
+                (
+                    f"Привет, {name}! Бот для {SERVICE_NAME} 🛠️🚗.\n\n"
+                    "🛠️🚗 О сервисе:\n"
+                    f"- Адрес: {SERVICE_ADDRESS}\n"
+                    f"- Режим работы: {SERVICE_HOURS}\n"
+                    f"- Телефоны: {', '.join(SERVICE_PHONES)}\n\n"
+                    "Выбери действие в меню ниже."
+                ),
+                reply_markup=main_menu_keyboard(),
+            )
+            return "ok"
 
         if _matches_label("instruction", text_clean, text_norm):
             _log_route("menu_instruction", chat_id, user_id)
             send_message(chat_id, f"{INSTRUCTION_TEXT}\n\n{HELP_TEXT}", parse_mode="Markdown")
             return "ok"
-        if _matches_label("help", text_clean, text_norm):
+
+        if cmd == "/help" or _matches_label("help", text_clean, text_norm):
             _log_route("menu_help", chat_id, user_id)
             send_message(chat_id, HELP_TEXT)
             return "ok"
-        if _matches_label("myid", text_clean, text_norm):
+
+        if cmd == "/myid" or _matches_label("myid", text_clean, text_norm):
             _log_route("menu_myid", chat_id, user_id)
             send_message(chat_id, f"Ваш ID: {user_id}")
             return "ok"
+
+        if cmd == "/contacts" or _matches_label("contacts", text_clean, text_norm):
+            _log_route("menu_contacts", chat_id, user_id)
+            send_message(chat_id, contacts_text())
+            return "ok"
+
+        ensure_admin_seed(chat_id, user_id)
+        if not can_use_bot(chat_id, user_id):
+            _log_route("blocked_message", chat_id, user_id)
+            send_message(chat_id, _access_denied_text(user_id))
+            return "ok"
+
         if _matches_label("diag", text_clean, text_norm):
             _log_route("menu_diag", chat_id, user_id)
             send_message(chat_id, diag_text(chat_id, user_id))
@@ -3974,44 +4013,6 @@ def telegram_webhook():
         if _matches_label("settings", text_clean, text_norm):
             _log_route("menu_settings", chat_id, user_id)
             send_message(chat_id, "Настройки:", reply_markup=settings_keyboard(can_manage_access(chat_id, user_id)))
-            return "ok"
-        if _matches_label("contacts", text_clean, text_norm):
-            _log_route("menu_contacts", chat_id, user_id)
-            send_message(chat_id, contacts_text())
-            return "ok"
-
-        if cmd == "/start":
-            _log_route("start", chat_id, user_id)
-            logger.info("Dispatch: matched=/start")
-            _reset_state(chat_id)
-            name = _display_name(user)
-            send_message(
-                chat_id,
-                (
-                    f"Привет, {name}! Бот для {SERVICE_NAME} 🛠️🚗.\n\n"
-                    "🛠️🚗 О сервисе:\n"
-                    f"- Адрес: {SERVICE_ADDRESS}\n"
-                    f"- Режим работы: {SERVICE_HOURS}\n"
-                    f"- Телефоны: {', '.join(SERVICE_PHONES)}\n\n"
-                    "Выбери действие в меню ниже."
-                ),
-                reply_markup=main_menu_keyboard(),
-            )
-            return "ok"
-
-        if cmd == "/help":
-            _log_route("help", chat_id, user_id)
-            send_message(chat_id, HELP_TEXT)
-            return "ok"
-
-        if cmd == "/myid":
-            _log_route("myid", chat_id, user_id)
-            send_message(chat_id, f"Ваш ID: {user_id}")
-            return "ok"
-
-        if cmd == "/contacts":
-            _log_route("contacts", chat_id, user_id)
-            send_message(chat_id, contacts_text())
             return "ok"
 
         if cmd == "/diag":
