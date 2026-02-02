@@ -1,46 +1,120 @@
 <!DOCTYPE html>
 <html lang="ru">
 <head>
-  <meta charset="UTF-8">
-  <title>Лира — оставить отзыв</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Автосервис «Лира» — оставить отзыв</title>
   <style>
+    :root {
+      --bg: #f6f7f9;
+      --text: #111;
+      --muted: #555;
+      --card: #fff;
+      --shadow: rgba(0,0,0,.08);
+      --yandex: #ffcc00;
+      --gis: #00a550;
+    }
     body {
-      font-family: Arial, sans-serif;
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      padding: 24px 16px;
+    }
+    .wrap {
+      width: 100%;
+      max-width: 520px;
+    }
+    .card {
+      background: var(--card);
+      border-radius: 14px;
+      box-shadow: 0 10px 30px var(--shadow);
+      padding: 26px 18px;
       text-align: center;
-      background: #f7f7f7;
-      padding: 40px 20px;
     }
-    h1 { margin-bottom: 10px; }
-    p { margin-bottom: 30px; color: #555; }
-    a {
+    h1 {
+      margin: 0 0 8px;
+      font-size: 22px;
+      letter-spacing: .2px;
+    }
+    .sub {
+      margin: 0 0 18px;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.35;
+    }
+    .hint {
+      margin: 0 0 18px;
+      font-size: 15px;
+      line-height: 1.35;
+    }
+    .btn {
       display: block;
-      margin: 15px auto;
-      padding: 15px;
-      max-width: 300px;
-      border-radius: 8px;
-      font-size: 18px;
+      width: 100%;
+      border: 0;
       text-decoration: none;
-      color: #fff;
+      padding: 16px 14px;
+      border-radius: 12px;
+      font-size: 18px;
+      font-weight: 700;
+      margin: 12px 0;
+      transition: transform .05s ease-in-out, filter .15s ease-in-out;
     }
-    .yandex { background: #ffcc00; color: #000; }
-    .gis { background: #00a550; }
+    .btn:active { transform: scale(0.99); }
+    .btn-yandex { background: var(--yandex); color: #000; }
+    .btn-gis { background: var(--gis); color: #fff; }
+    .small {
+      margin-top: 14px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.35;
+    }
+    .divider {
+      height: 1px;
+      background: rgba(0,0,0,.08);
+      margin: 18px 0;
+    }
+    .footer {
+      margin-top: 10px;
+      text-align: center;
+      color: var(--muted);
+      font-size: 12px;
+    }
   </style>
 </head>
 <body>
-  <h1>Лира</h1>
-  <p>Пожалуйста, выберите где оставить отзыв</p>
+  <div class="wrap">
+    <div class="card">
+      <h1>Оставить отзыв об автосервисе «Лира»</h1>
+      <p class="sub">Выберите удобную площадку ниже</p>
 
-  <a class="yandex"
-     href="https://yandex.ru/maps/org/lira/1014791361"
-     target="_blank">
-    ⭐ Яндекс Карты
-  </a>
+      <p class="hint"><b>Нажмите кнопку — затем выберите «Оставить отзыв»</b></p>
 
-  <a class="gis"
-     href="https://2gis.ru/n_novgorod/geo/2674540559836449"
-     target="_blank">
-    ⭐ 2ГИС
-  </a>
+      <a class="btn btn-yandex"
+         href="https://yandex.ru/maps/org/lira/1014791361"
+         target="_blank" rel="noopener">
+        Оставить отзыв в Яндекс Картах
+      </a>
+
+      <a class="btn btn-gis"
+         href="https://2gis.ru/n_novgorod/geo/2674540559836449"
+         target="_blank" rel="noopener">
+        Оставить отзыв в 2ГИС
+      </a>
+
+      <div class="divider"></div>
+
+      <div class="small">
+        Если приложение не установлено, откроется веб-версия.<br/>
+        Кнопка <b>«Оставить отзыв»</b> будет на странице организации.
+      </div>
+    </div>
+
+    <div class="footer">Спасибо за вашу обратную связь 🤝</div>
+  </div>
 </body>
 </html>
