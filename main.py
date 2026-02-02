@@ -109,13 +109,28 @@ def _env_flag(name: str, default: str = "1") -> bool:
     return raw.strip().lower() not in ("0", "false", "no", "off", "disabled")
 
 def _parse_id_list(raw: str) -> List[int]:
-    return sorted({int(x) for x in re.findall(r"\d+", raw or "")})
+    seen = set()
+    ordered: List[int] = []
+    for match in re.findall(r"\d+", raw or ""):
+        value = int(match)
+        if value in seen:
+            continue
+        seen.add(value)
+        ordered.append(value)
+    return ordered
 
-def normalize_access_config(superadmin_raw: str, report_chat_ids_raw: str, owner_chat_id_raw: str = "",
-                            extra_admin_ids_raw: str = "") -> Dict[str, Any]:
+def normalize_access_config(
+    superadmin_raw: str,
+    report_chat_ids_raw: str,
+    owner_chat_id_raw: str = "",
+    extra_admin_ids_raw: str = "",
+) -> Dict[str, Any]:
     report_ids = _parse_id_list(report_chat_ids_raw)
     extra_admin_ids = _parse_id_list(extra_admin_ids_raw)
-    admin_ids = sorted({*report_ids, *extra_admin_ids})
+    admin_ids = list(report_ids)
+    for admin_id in extra_admin_ids:
+        if admin_id not in admin_ids:
+            admin_ids.append(admin_id)
     admin_sources = []
     if report_ids:
         admin_sources.append("REPORT_CHAT_IDS")
@@ -125,18 +140,20 @@ def normalize_access_config(superadmin_raw: str, report_chat_ids_raw: str, owner
     superadmin_id = int(superadmin_raw) if (superadmin_raw or "").isdigit() else None
     if superadmin_id is not None:
         superadmin_source = "SUPERADMIN_ID"
-    elif report_ids:
-        superadmin_id = report_ids[0]
-        superadmin_source = "REPORT_CHAT_IDS"
     else:
         superadmin_source = "unset"
 
     owner_chat_id = int(owner_chat_id_raw) if (owner_chat_id_raw or "").isdigit() else None
     if owner_chat_id is not None:
         owner_source = "OWNER_CHAT_ID"
-    else:
+    elif superadmin_id is not None:
         owner_chat_id = superadmin_id
         owner_source = superadmin_source
+    elif report_ids:
+        owner_chat_id = report_ids[0]
+        owner_source = "REPORT_CHAT_IDS"
+    else:
+        owner_source = "unset"
 
     return {
         "superadmin_id": superadmin_id,
@@ -161,8 +178,8 @@ if ADMIN_CHAT_IDS:
     logger.info("Admins parsed: count=%s sample=%s", len(ADMIN_CHAT_IDS), ADMIN_CHAT_IDS[:3])
 else:
     logger.warning("Admins parsed: count=0 (REPORT_CHAT_IDS is empty or invalid)")
-if SUPERADMIN_ID is None:
-    logger.warning("SUPERADMIN_ID not set and REPORT_CHAT_IDS empty; owner seed will be skipped.")
+if SUPERADMIN_ID is None and OWNER_CHAT_ID is None:
+    logger.warning("SUPERADMIN_ID/OWNER_CHAT_ID not set and REPORT_CHAT_IDS empty; owner seed will be skipped.")
 
 DATABASE_URL = None
 DB_URL_SOURCE = "unset"
@@ -364,11 +381,19 @@ def _owner_ids() -> set:
 def _is_owner_id(user_id: Optional[int]) -> bool:
     return user_id is not None and user_id in _owner_ids()
 
-def get_user_role(user_id: Optional[int]) -> str:
-    if user_id is None:
-        return "none"
-    if _is_owner_id(user_id):
+def _is_owner(chat_id: Optional[int], user_id: Optional[int]) -> bool:
+    return _is_owner_id(chat_id) or _is_owner_id(user_id)
+
+def is_env_admin(chat_id: Optional[int], user_id: Optional[int]) -> bool:
+    if _is_owner(chat_id, user_id):
+        return True
+    return (chat_id in ADMIN_CHAT_IDS) or (user_id in ADMIN_CHAT_IDS)
+
+def get_user_role(chat_id: Optional[int], user_id: Optional[int]) -> str:
+    if _is_owner(chat_id, user_id):
         return "owner"
+    if is_env_admin(chat_id, user_id):
+        return "staff"
     if not DB_OK:
         return "none"
     conn = _db_connect()
@@ -377,13 +402,20 @@ def get_user_role(user_id: Optional[int]) -> str:
     try:
         with conn.cursor() as cur:
             _ensure_access_columns(cur)
-            user_id_col = _access_user_id_column()
-            if not user_id_col:
+            conditions = []
+            values: List[Any] = []
+            if DB_ACCESS_HAS_USER_ID and user_id is not None:
+                conditions.append("user_id=%s")
+                values.append(user_id)
+            if DB_ACCESS_HAS_CHAT_ID and chat_id is not None:
+                conditions.append("chat_id=%s")
+                values.append(chat_id)
+            if not conditions:
                 return "none"
             active_clause = " AND is_active=true" if DB_ACCESS_HAS_IS_ACTIVE else ""
             cur.execute(
-                f"SELECT role FROM access_users WHERE {user_id_col}=%s{active_clause}",
-                (user_id,),
+                f"SELECT role FROM access_users WHERE ({' OR '.join(conditions)}){active_clause}",
+                tuple(values),
             )
             row = cur.fetchone()
             return row[0] if row else "none"
@@ -396,11 +428,22 @@ def get_user_role(user_id: Optional[int]) -> str:
         except Exception:
             pass
 
-def can_use_bot(user_id: Optional[int]) -> bool:
-    return get_user_role(user_id) in ("owner", "staff", "user")
+def can_use_bot(chat_id: Optional[int], user_id: Optional[int]) -> bool:
+    return get_user_role(chat_id, user_id) in ("owner", "staff", "user")
 
-def can_manage_access(user_id: Optional[int]) -> bool:
-    return get_user_role(user_id) == "owner"
+def can_manage_access(chat_id: Optional[int], user_id: Optional[int]) -> bool:
+    return get_user_role(chat_id, user_id) == "owner"
+
+def ensure_admin_seed(chat_id: Optional[int], user_id: Optional[int]) -> None:
+    if not is_env_admin(chat_id, user_id):
+        return
+    if not db_enabled():
+        return
+    role = "owner" if _is_owner(chat_id, user_id) else "staff"
+    try:
+        db_upsert_access_user(chat_id, user_id, role, added_by=user_id, note="seed from env")
+    except Exception:
+        logger.exception("ensure_admin_seed failed")
 
 def _display_name(user: dict) -> str:
     username = (user.get("username") or "").strip()
@@ -493,6 +536,7 @@ DB_ACCESS_HAS_NOTE = False
 DB_ACCESS_HAS_ADDED_BY = False
 DB_ACCESS_HAS_CREATED_AT = False
 DB_ACCESS_HAS_ADDED_AT = False
+DB_ACCESS_CHAT_ID_NOT_NULL = False
 DB_ANALYSIS_HAS_ENGINE = False
 DB_ANALYSIS_HAS_AI_ENGINE = False
 DB_ANALYSIS_HAS_INPUT_JSON = False
@@ -568,15 +612,17 @@ def _review_text_expr(prefix: str = "") -> str:
 def _refresh_access_columns(cur) -> None:
     global DB_ACCESS_HAS_USER_ID, DB_ACCESS_HAS_CHAT_ID, DB_ACCESS_HAS_IS_ACTIVE, DB_ACCESS_HAS_NOTE
     global DB_ACCESS_HAS_ADDED_BY
-    global DB_ACCESS_HAS_CREATED_AT, DB_ACCESS_HAS_ADDED_AT
+    global DB_ACCESS_HAS_CREATED_AT, DB_ACCESS_HAS_ADDED_AT, DB_ACCESS_CHAT_ID_NOT_NULL
     cur.execute(
         """
-        SELECT column_name
+        SELECT column_name, is_nullable
         FROM information_schema.columns
         WHERE table_schema='public' AND table_name='access_users'
         """
     )
-    cols = {row[0] for row in (cur.fetchall() or [])}
+    rows = cur.fetchall() or []
+    cols = {row[0] for row in rows}
+    nullable_map = {row[0]: row[1] for row in rows}
     DB_ACCESS_HAS_USER_ID = "user_id" in cols
     DB_ACCESS_HAS_CHAT_ID = "chat_id" in cols
     DB_ACCESS_HAS_IS_ACTIVE = "is_active" in cols
@@ -584,10 +630,12 @@ def _refresh_access_columns(cur) -> None:
     DB_ACCESS_HAS_ADDED_BY = "added_by" in cols
     DB_ACCESS_HAS_CREATED_AT = "created_at" in cols
     DB_ACCESS_HAS_ADDED_AT = "added_at" in cols
+    DB_ACCESS_CHAT_ID_NOT_NULL = nullable_map.get("chat_id") == "NO"
     logger.info(
-        "access_users columns: user_id=%s chat_id=%s is_active=%s note=%s added_by=%s created_at=%s added_at=%s",
+        "access_users columns: user_id=%s chat_id=%s chat_id_not_null=%s is_active=%s note=%s added_by=%s created_at=%s added_at=%s",
         DB_ACCESS_HAS_USER_ID,
         DB_ACCESS_HAS_CHAT_ID,
+        DB_ACCESS_CHAT_ID_NOT_NULL,
         DB_ACCESS_HAS_IS_ACTIVE,
         DB_ACCESS_HAS_NOTE,
         DB_ACCESS_HAS_ADDED_BY,
@@ -928,29 +976,34 @@ def db_init() -> None:
     OWNER_SEED_STATUS = "skipped"
     OWNER_SEED_ERROR = None
     try:
-        owner_seed_id = SUPERADMIN_ID or OWNER_CHAT_ID
-        owner_chat_id_for_seed = OWNER_CHAT_ID or owner_seed_id
-        if owner_seed_id is None:
+        owner_chat_id_for_seed = OWNER_CHAT_ID or SUPERADMIN_ID
+        owner_user_id_for_seed = OWNER_CHAT_ID or SUPERADMIN_ID
+        if owner_chat_id_for_seed is None and owner_user_id_for_seed is None:
             OWNER_SEED_STATUS = "skipped"
-            logger.error("Owner seed skipped: SUPERADMIN_ID/REPORT_CHAT_IDS not configured")
-        elif DB_ACCESS_HAS_CHAT_ID and owner_chat_id_for_seed is None:
+            logger.error("Owner seed skipped: OWNER_CHAT_ID/SUPERADMIN_ID/REPORT_CHAT_IDS not configured")
+        elif DB_ACCESS_HAS_CHAT_ID and DB_ACCESS_CHAT_ID_NOT_NULL and owner_chat_id_for_seed is None:
             OWNER_SEED_STATUS = "skipped"
-            logger.error("Owner seed skipped: OWNER_CHAT_ID/SUPERADMIN_ID not configured")
+            logger.error("Owner seed skipped: OWNER_CHAT_ID/SUPERADMIN_ID not configured for chat_id")
         else:
             column_parts = []
-            if DB_ACCESS_HAS_CHAT_ID:
+            if DB_ACCESS_HAS_CHAT_ID and owner_chat_id_for_seed is not None:
                 column_parts.append(("chat_id", "%s", owner_chat_id_for_seed))
-            if DB_ACCESS_HAS_USER_ID:
-                column_parts.append(("user_id", "%s", owner_seed_id))
+            if DB_ACCESS_HAS_USER_ID and owner_user_id_for_seed is not None:
+                column_parts.append(("user_id", "%s", owner_user_id_for_seed))
             column_parts.append(("role", "%s", "owner"))
             if DB_ACCESS_HAS_IS_ACTIVE:
                 column_parts.append(("is_active", "%s", True))
             if DB_ACCESS_HAS_ADDED_BY:
-                column_parts.append(("added_by", "%s", owner_seed_id))
+                column_parts.append(("added_by", "%s", owner_user_id_for_seed))
             if DB_ACCESS_HAS_CREATED_AT:
                 column_parts.append(("created_at", "NOW()", None))
             if DB_ACCESS_HAS_ADDED_AT:
                 column_parts.append(("added_at", "NOW()", None))
+
+            if not any(col in ("chat_id", "user_id") for col, _, _ in column_parts):
+                OWNER_SEED_STATUS = "skipped"
+                logger.error("Owner seed skipped: access_users has no id columns to seed")
+                return
 
             columns = ", ".join([col for col, _, _ in column_parts])
             placeholders = ", ".join([ph for _, ph, _ in column_parts])
@@ -1406,9 +1459,15 @@ def db_set_setting(key: str, value: dict) -> None:
         except Exception:
             pass
 
-def db_upsert_access_user(chat_id: Optional[int], role: str, added_by: Optional[int], note: Optional[str] = None) -> None:
-    if chat_id is None:
-        logger.warning("db_upsert_access_user skipped: chat_id missing")
+def db_upsert_access_user(
+    chat_id: Optional[int],
+    user_id: Optional[int],
+    role: str,
+    added_by: Optional[int],
+    note: Optional[str] = None,
+) -> None:
+    if chat_id is None and user_id is None:
+        logger.warning("db_upsert_access_user skipped: missing chat_id and user_id")
         return
     conn = _db_connect()
     if not conn:
@@ -1416,14 +1475,26 @@ def db_upsert_access_user(chat_id: Optional[int], role: str, added_by: Optional[
     try:
         with conn.cursor() as cur:
             _ensure_access_columns(cur)
-            user_id_col = _access_user_id_column() or "user_id"
-            columns = [user_id_col, "role", "added_by"]
-            placeholders = ["%s", "%s", "%s"]
-            values: List[Any] = [chat_id, role, added_by]
-            if DB_ACCESS_HAS_CHAT_ID and user_id_col != "chat_id":
+            if not (DB_ACCESS_HAS_USER_ID or DB_ACCESS_HAS_CHAT_ID):
+                logger.warning("db_upsert_access_user skipped: no id columns in access_users")
+                return
+            columns = []
+            placeholders = []
+            values: List[Any] = []
+            if DB_ACCESS_HAS_USER_ID and user_id is not None:
+                columns.append("user_id")
+                placeholders.append("%s")
+                values.append(user_id)
+            if DB_ACCESS_HAS_CHAT_ID and chat_id is not None:
                 columns.append("chat_id")
                 placeholders.append("%s")
                 values.append(chat_id)
+            if not columns:
+                logger.warning("db_upsert_access_user skipped: no matching id values for schema")
+                return
+            columns.extend(["role", "added_by"])
+            placeholders.extend(["%s", "%s"])
+            values.extend([role, added_by])
             if DB_ACCESS_HAS_NOTE:
                 columns.append("note")
                 placeholders.append("%s")
@@ -1446,15 +1517,32 @@ def db_upsert_access_user(chat_id: Optional[int], role: str, added_by: Optional[
                 set_parts.append("note=EXCLUDED.note")
             if DB_ACCESS_HAS_IS_ACTIVE:
                 set_parts.append("is_active=TRUE")
-            cur.execute(
-                f"""
-                INSERT INTO access_users ({col_list})
-                VALUES ({ph_list})
-                ON CONFLICT ({user_id_col})
-                DO UPDATE SET {', '.join(set_parts)}
-                """,
-                tuple(values),
-            )
+            conflict_col = None
+            if DB_ACCESS_HAS_USER_ID and user_id is not None:
+                conflict_col = "user_id"
+            elif DB_ACCESS_HAS_CHAT_ID and chat_id is not None:
+                conflict_col = "chat_id"
+            else:
+                conflict_col = _access_unique_column(cur)
+            if conflict_col:
+                cur.execute(
+                    f"""
+                    INSERT INTO access_users ({col_list})
+                    VALUES ({ph_list})
+                    ON CONFLICT ({conflict_col})
+                    DO UPDATE SET {', '.join(set_parts)}
+                    """,
+                    tuple(values),
+                )
+            else:
+                cur.execute(
+                    f"""
+                    INSERT INTO access_users ({col_list})
+                    VALUES ({ph_list})
+                    ON CONFLICT DO NOTHING
+                    """,
+                    tuple(values),
+                )
     except Exception:
         logger.exception("db_upsert_access_user failed")
     finally:
@@ -2943,7 +3031,7 @@ def get_webhook_info() -> dict:
     except Exception as e:
         return {"ok": False, "error": str(e)[:200]}
 
-def diag_payload(current_user_id: Optional[int] = None) -> dict:
+def diag_payload(chat_id: Optional[int] = None, user_id: Optional[int] = None) -> dict:
     global DATABASE_URL, DB_URL_SOURCE
     if not DATABASE_URL:
         DATABASE_URL, DB_URL_SOURCE = resolve_database_url()
@@ -2961,7 +3049,7 @@ def diag_payload(current_user_id: Optional[int] = None) -> dict:
         db_connect_error = _short_error(DB_LAST_ERROR)
     engine = _current_engine()
     prompt_mode = (os.getenv("CX_PROMPT_MODE") or CX_PROMPT_MODE).strip().lower()
-    role_current = get_user_role(current_user_id) if current_user_id is not None else None
+    role_current = get_user_role(chat_id, user_id) if (chat_id is not None or user_id is not None) else None
     allowlist_empty = not ADMIN_CHAT_IDS
     access_count = db_count_access_users(active_only=True) if DB_OK else 0
     review_text_col = bool(DB_HAS_TEXT)
@@ -3025,8 +3113,8 @@ def diag_payload(current_user_id: Optional[int] = None) -> dict:
         "reviews_review_text_exists": review_review_text_col,
     }
 
-def diag_text(current_user_id: Optional[int] = None) -> str:
-    payload = diag_payload(current_user_id)
+def diag_text(chat_id: Optional[int] = None, user_id: Optional[int] = None) -> str:
+    payload = diag_payload(chat_id, user_id)
     webhook = payload.get("webhook_info") or {}
     return (
         "Самодиагностика:\n"
@@ -3176,7 +3264,8 @@ def telegram_webhook():
                 sess.get("state") if sess else None,
             )
 
-            if not can_use_bot(user_id):
+            ensure_admin_seed(chat_id, user_id)
+            if not can_use_bot(chat_id, user_id):
                 _log_route("blocked_callback", chat_id, user_id)
                 if chat_id:
                     send_message(chat_id, "⛔ Доступ запрещён. Обратитесь к администратору.")
@@ -3208,13 +3297,13 @@ def telegram_webhook():
             if data.startswith("settings:diag"):
                 _log_route("settings_diag", chat_id, user_id)
                 if chat_id:
-                    send_message(chat_id, diag_text(user_id))
+                    send_message(chat_id, diag_text(chat_id, user_id))
                 answer_callback_query(cq_id, "OK")
                 return "ok"
 
             if data.startswith("settings:access"):
                 _log_route("settings_access", chat_id, user_id)
-                if not can_manage_access(user_id):
+                if not can_manage_access(chat_id, user_id):
                     if cq_id:
                         answer_callback_query(cq_id, "Только владелец", show_alert=True)
                     return "ok"
@@ -3313,7 +3402,7 @@ def telegram_webhook():
             if data.startswith("access:"):
                 action = data.split(":", 1)[1]
                 _log_route(f"access:{action}", chat_id, user_id)
-                if not can_manage_access(user_id):
+                if not can_manage_access(chat_id, user_id):
                     if cq_id:
                         answer_callback_query(cq_id, "Только владелец", show_alert=True)
                     return "ok"
@@ -3363,14 +3452,14 @@ def telegram_webhook():
                     answer_callback_query(cq_id, "OK")
                     return "ok"
                 if action == "back":
-                    send_message(chat_id, "Настройки:", reply_markup=settings_keyboard(can_manage_access(user_id)))
+                    send_message(chat_id, "Настройки:", reply_markup=settings_keyboard(can_manage_access(chat_id, user_id)))
                     answer_callback_query(cq_id, "OK")
                     return "ok"
 
             if data.startswith("access_role:"):
                 role = data.split(":", 1)[1]
                 _log_route(f"access_role:{role}", chat_id, user_id)
-                if not can_manage_access(user_id):
+                if not can_manage_access(chat_id, user_id):
                     if cq_id:
                         answer_callback_query(cq_id, "Только владелец", show_alert=True)
                     return "ok"
@@ -3395,7 +3484,7 @@ def telegram_webhook():
             if data.startswith("access_note:"):
                 action = data.split(":", 1)[1]
                 _log_route(f"access_note:{action}", chat_id, user_id)
-                if not can_manage_access(user_id):
+                if not can_manage_access(chat_id, user_id):
                     if cq_id:
                         answer_callback_query(cq_id, "Только владелец", show_alert=True)
                     return "ok"
@@ -3409,7 +3498,7 @@ def telegram_webhook():
                     answer_callback_query(cq_id, "OK")
                     return "ok"
                 if action == "skip":
-                    db_upsert_access_user(int(target_id), role, user_id, note=None)
+                    db_upsert_access_user(int(target_id), int(target_id), role, user_id, note=None)
                     _reset_state(chat_id)
                     send_message(chat_id, f"✅ Пользователь {target_id} добавлен как {role}.")
                     answer_callback_query(cq_id, "OK")
@@ -3418,7 +3507,7 @@ def telegram_webhook():
             if data.startswith("access_remove:"):
                 user_raw = data.split(":", 1)[1]
                 _log_route(f"access_remove:{user_raw}", chat_id, user_id)
-                if not can_manage_access(user_id):
+                if not can_manage_access(chat_id, user_id):
                     if cq_id:
                         answer_callback_query(cq_id, "Только владелец", show_alert=True)
                     return "ok"
@@ -3796,7 +3885,8 @@ def telegram_webhook():
 
         if not chat_id or not user_id:
             return "ok"
-        if not can_use_bot(user_id):
+        ensure_admin_seed(chat_id, user_id)
+        if not can_use_bot(chat_id, user_id):
             _log_route("blocked_message", chat_id, user_id)
             send_message(chat_id, "⛔ Доступ запрещён. Обратитесь к администратору.")
             return "ok"
@@ -3823,7 +3913,7 @@ def telegram_webhook():
             return "ok"
         if _matches_label("diag", text_clean, text_norm):
             _log_route("menu_diag", chat_id, user_id)
-            send_message(chat_id, diag_text(user_id))
+            send_message(chat_id, diag_text(chat_id, user_id))
             return "ok"
         if _matches_label("add_review", text_clean, text_norm):
             _log_route("menu_addreview", chat_id, user_id)
@@ -3883,7 +3973,7 @@ def telegram_webhook():
             return "ok"
         if _matches_label("settings", text_clean, text_norm):
             _log_route("menu_settings", chat_id, user_id)
-            send_message(chat_id, "Настройки:", reply_markup=settings_keyboard(can_manage_access(user_id)))
+            send_message(chat_id, "Настройки:", reply_markup=settings_keyboard(can_manage_access(chat_id, user_id)))
             return "ok"
         if _matches_label("contacts", text_clean, text_norm):
             _log_route("menu_contacts", chat_id, user_id)
@@ -3927,9 +4017,9 @@ def telegram_webhook():
         if cmd == "/diag":
             _log_route("diag", chat_id, user_id)
             if cmd_args.strip().lower().startswith("json"):
-                send_message(chat_id, json.dumps(diag_payload(user_id), ensure_ascii=False))
+                send_message(chat_id, json.dumps(diag_payload(chat_id, user_id), ensure_ascii=False))
             else:
-                send_message(chat_id, diag_text(user_id))
+                send_message(chat_id, diag_text(chat_id, user_id))
             return "ok"
 
         if cmd == "/cancel":
@@ -3956,7 +4046,7 @@ def telegram_webhook():
 
         if cmd == "/invite":
             _log_route("invite", chat_id, user_id)
-            if not can_manage_access(user_id):
+            if not can_manage_access(chat_id, user_id):
                 send_message(chat_id, "⛔ Доступ запрещён.")
                 return "ok"
             if not DB_OK:
@@ -3975,13 +4065,13 @@ def telegram_webhook():
             note = kv.get("note")
             if not note and rest:
                 note = rest
-            db_upsert_access_user(target_id, role, user_id, note=note)
+            db_upsert_access_user(target_id, target_id, role, user_id, note=note)
             send_message(chat_id, f"✅ Пользователь {target_id} добавлен как {role}.")
             return "ok"
 
         if cmd == "/kick":
             _log_route("kick", chat_id, user_id)
-            if not can_manage_access(user_id):
+            if not can_manage_access(chat_id, user_id):
                 send_message(chat_id, "⛔ Доступ запрещён.")
                 return "ok"
             if not DB_OK:
@@ -4265,7 +4355,7 @@ def telegram_webhook():
 
         if sess and sess.get("state") == STATE_ACCESS_ADD:
             _log_route("state_access_add", chat_id, user_id)
-            if not can_manage_access(user_id):
+            if not can_manage_access(chat_id, user_id):
                 send_message(chat_id, "⛔ Доступ запрещён.")
                 _reset_state(chat_id)
                 return "ok"
@@ -4290,7 +4380,7 @@ def telegram_webhook():
 
         if sess and sess.get("state") == STATE_ACCESS_ADD_NOTE:
             _log_route("state_access_add_note", chat_id, user_id)
-            if not can_manage_access(user_id):
+            if not can_manage_access(chat_id, user_id):
                 send_message(chat_id, "⛔ Доступ запрещён.")
                 _reset_state(chat_id)
                 return "ok"
@@ -4302,7 +4392,7 @@ def telegram_webhook():
                 _reset_state(chat_id)
                 return "ok"
             note = text_clean if text_clean else None
-            db_upsert_access_user(int(target_id), role, user_id, note=note)
+            db_upsert_access_user(int(target_id), int(target_id), role, user_id, note=note)
             logger.info("access_add: owner=%s target=%s role=%s", user_id, target_id, role)
             _reset_state(chat_id)
             send_message(chat_id, f"✅ Пользователь {target_id} добавлен как {role}.")
@@ -4310,7 +4400,7 @@ def telegram_webhook():
 
         if sess and sess.get("state") == STATE_ACCESS_REMOVE:
             _log_route("state_access_remove", chat_id, user_id)
-            if not can_manage_access(user_id):
+            if not can_manage_access(chat_id, user_id):
                 send_message(chat_id, "⛔ Доступ запрещён.")
                 _reset_state(chat_id)
                 return "ok"
@@ -4366,7 +4456,7 @@ def telegram_webhook():
 
     except Exception:
         logger.exception("telegram_webhook exception")
-        if chat_id and can_use_bot(user_id):
+        if chat_id and can_use_bot(chat_id, user_id):
             send_message(chat_id, "⚠️ Ошибка обработки. См. /diag")
         notify_admins("⚠️ Ошибка обработки. См. /diag")
         return "ok"
