@@ -1,4 +1,5 @@
 import csv
+import importlib.util
 import logging
 import os
 import threading
@@ -73,7 +74,6 @@ AI_ASK_BLOCKLIST = {
     "booking_time",
     "last_visit_category",
 }
-CAR_MAKE_SKIP_WORDS = {"-", "нет", "не знаю", "пропуск"}
 LAST_VISIT_CATEGORIES = {"Гарантия", "Повтор проблемы", "Документы", "Уточнение", "Другое"}
 
 
@@ -155,11 +155,7 @@ def build_yes_no_keyboard() -> dict:
 
 
 def is_openpyxl_available() -> bool:
-    try:
-        import openpyxl  # noqa: F401
-    except ImportError:
-        return False
-    return True
+    return importlib.util.find_spec("openpyxl") is not None
 
 
 def build_last_visit_category_keyboard() -> dict:
@@ -380,7 +376,6 @@ def stage_description(stage: str | None) -> str:
         "pdn": "ожидаем согласие ПДн",
         "was_here": "ожидаем ответ про прошлые визиты",
         "car_plate": "ожидаем госномер",
-        "car_make_optional": "ожидаем марку/модель (опционально)",
         "car_vin": "ожидаем VIN",
         "car_make_required": "ожидаем марку/модель",
         "booking_purpose": "ожидаем цель визита",
@@ -1238,16 +1233,10 @@ def ask_current_step(token: str, chat_id: int, session: dict) -> None:
         )
     elif stage == "car_plate":
         send_message(token, chat_id, "Укажите госномер автомобиля.")
-    elif stage == "car_make_optional":
-        send_message(
-            token,
-            chat_id,
-            "Если знаете, напишите марку и модель. Или отправьте '-' чтобы пропустить.",
-        )
     elif stage == "car_vin":
         send_message(token, chat_id, "Укажите VIN автомобиля.")
     elif stage == "car_make_required":
-        send_message(token, chat_id, "Укажите марку и модель автомобиля.")
+        send_message(token, chat_id, "Подскажите, пожалуйста, марку и модель автомобиля")
     elif stage == "booking_purpose":
         send_message(token, chat_id, "Кратко опишите цель визита.")
     elif stage == "booking_date":
@@ -1348,8 +1337,6 @@ def compute_next_stage(session: dict) -> str:
     if data.get("was_here_before") in {"yes", "unknown"}:
         if not data.get("car_plate"):
             return "car_plate"
-        if not data.get("car_make_model") and not data.get("car_make_optional_skipped"):
-            return "car_make_optional"
     else:
         if not data.get("vin"):
             return "car_vin"
@@ -1417,8 +1404,6 @@ def list_missing_fields(session: dict) -> list[str]:
     if data.get("was_here_before") in {"yes", "unknown"}:
         if not data.get("car_plate"):
             missing.append("car_plate")
-        if not data.get("car_make_model") and not data.get("car_make_optional_skipped"):
-            missing.append("car_make_model")
     elif data.get("was_here_before") == "no":
         if not data.get("vin"):
             missing.append("vin")
@@ -1500,9 +1485,7 @@ def apply_ai_fields(
                 data["car_plate"] = cleaned
         elif key == "car_make_model" and not data.get("car_make_model"):
             cleaned = normalize_text(str(value))
-            if cleaned in CAR_MAKE_SKIP_WORDS:
-                data["car_make_optional_skipped"] = True
-            elif cleaned:
+            if cleaned:
                 data["car_make_model"] = cleaned
         elif key == "vin" and not data.get("vin"):
             cleaned = normalize_text(str(value))
@@ -1586,9 +1569,6 @@ def handle_ai_message(
     if not ai_result.used:
         return False
     data = session.setdefault("data", {})
-    if stage == "car_make_optional":
-        if normalize_text(text).lower() in CAR_MAKE_SKIP_WORDS:
-            data["car_make_optional_skipped"] = True
     if stage == "booking_purpose" and "problem_text" in ai_result.fields:
         cleaned = normalize_text(str(ai_result.fields["problem_text"]))
         if cleaned:
@@ -2501,7 +2481,10 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
             send_message(token, chat_id, "Введите госномер автомобиля.")
             return
         data["car_plate"] = normalize_text(text)
-        session["stage"] = "car_make_optional"
+        if data.get("was_here_before") == "no":
+            session["stage"] = "car_vin"
+        else:
+            session["stage"] = determine_next_stage_after_car(session)
         update_session_ttl(session, timezone)
         save_session(storage, chat_id, session)
         save_storage(storage)
@@ -2509,11 +2492,6 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
         return
 
     if stage == "car_make_optional":
-        cleaned = normalize_text(text)
-        if cleaned and cleaned not in CAR_MAKE_SKIP_WORDS:
-            data["car_make_model"] = cleaned
-        if cleaned in CAR_MAKE_SKIP_WORDS:
-            data["car_make_optional_skipped"] = True
         session["stage"] = determine_next_stage_after_car(session)
         update_session_ttl(session, timezone)
         save_session(storage, chat_id, session)
@@ -2535,7 +2513,7 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
 
     if stage == "car_make_required":
         if not normalize_text(text):
-            send_message(token, chat_id, "Введите марку и модель.")
+            send_message(token, chat_id, "Подскажите, пожалуйста, марку и модель автомобиля")
             return
         data["car_make_model"] = normalize_text(text)
         session["stage"] = determine_next_stage_after_car(session)
@@ -2808,7 +2786,7 @@ def delete_webhook(
 def main() -> None:
     timezone = os.getenv("TIMEZONE", "Europe/Moscow")
     logger = build_logger(timezone)
-    logger.info("openpyxl available: %s", is_openpyxl_available())
+    logger.info("[client_bot] openpyxl available: %s", is_openpyxl_available())
     token, token_source = get_client_token()
     configure_telegram(token)
     logger.info("client_bot token source: %s", token_source)
