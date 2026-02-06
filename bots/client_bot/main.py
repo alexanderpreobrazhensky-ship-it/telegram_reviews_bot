@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 
 import requests
 
+from services.ai_service import AIService, normalize_date_string
 from storage import (
     clear_session,
     get_session,
@@ -31,6 +32,17 @@ MENU_MASTER = "👨‍🔧 Связаться с мастером / Написа
 
 YES_OPTIONS = {"да", "yes", "ага"}
 NO_OPTIONS = {"нет", "no"}
+AI_ASK_BLOCKLIST = {
+    "pdn",
+    "was_here",
+    "parts_offer_booking",
+    "repair_offer_booking",
+    "booking_date",
+    "booking_time",
+    "last_visit_category",
+}
+CAR_MAKE_SKIP_WORDS = {"-", "нет", "не знаю", "пропуск"}
+LAST_VISIT_CATEGORIES = {"Гарантия", "Повтор проблемы", "Документы", "Уточнение", "Другое"}
 
 
 def build_logger(timezone: str) -> logging.Logger:
@@ -317,6 +329,7 @@ def build_master_card(ticket: dict, timezone: str) -> str:
     if ticket.get("vin"):
         car_bits.append(f"VIN: {ticket['vin']}")
     car_line = " / ".join(car_bits) if car_bits else "—"
+    tldr = ticket.get("tldr") or "—"
     return "\n".join(
         [
             "КАРТОЧКА ЗАЯВКИ",
@@ -332,7 +345,7 @@ def build_master_card(ticket: dict, timezone: str) -> str:
             f"Описание: {description}",
             f"Запись: {booking}",
             f"Вложения: {ticket.get('attachments_count', 0)}",
-            'TL;DR: "—"',
+            f"TL;DR: {tldr}",
         ]
     )
 
@@ -561,6 +574,29 @@ def build_summary(ticket: dict) -> str:
     return "\n".join(lines)
 
 
+def build_tldr_fallback(ticket: dict) -> str:
+    parts = []
+    scenario = format_scenario(ticket.get("scenario_type"))
+    parts.append(f"{scenario}: {ticket.get('problem_text') or ticket.get('parts_text') or ticket.get('last_visit_text') or '—'}")
+    car_bits = []
+    if ticket.get("car_make_model"):
+        car_bits.append(ticket["car_make_model"])
+    if ticket.get("car_plate"):
+        car_bits.append(f"госномер {ticket['car_plate']}")
+    if ticket.get("vin"):
+        car_bits.append(f"VIN {ticket['vin']}")
+    if car_bits:
+        parts.append(", ".join(car_bits))
+    booking = []
+    if ticket.get("booking_date"):
+        booking.append(ticket["booking_date"])
+    if ticket.get("booking_time"):
+        booking.append(ticket["booking_time"])
+    if booking:
+        parts.append(f"Запись: {' '.join(booking)}")
+    return "\n".join(parts[:3])
+
+
 def ask_current_step(token: str, chat_id: int, session: dict) -> None:
     stage = session.get("stage")
     if stage == "fio":
@@ -680,6 +716,286 @@ def build_ticket_from_session(session: dict, timezone: str, storage: dict) -> di
     }
 
 
+def compute_next_stage(session: dict) -> str:
+    data = session.get("data", {})
+    if not data.get("fio"):
+        return "fio"
+    if not data.get("phone"):
+        return "phone"
+    if "pdn_consent" not in data:
+        return "pdn"
+    if not data.get("was_here_before"):
+        return "was_here"
+    if data.get("was_here_before") in {"yes", "unknown"}:
+        if not data.get("car_plate"):
+            return "car_plate"
+        if not data.get("car_make_model") and not data.get("car_make_optional_skipped"):
+            return "car_make_optional"
+    else:
+        if not data.get("vin"):
+            return "car_vin"
+        if not data.get("car_make_model"):
+            return "car_make_required"
+    scenario = session.get("scenario")
+    if scenario == "booking":
+        if not data.get("problem_text"):
+            return "booking_purpose"
+        if not data.get("booking_date"):
+            return "booking_date"
+        if not data.get("booking_time"):
+            return "booking_time"
+        return "done"
+    if scenario == "last_visit":
+        if not data.get("last_visit_date"):
+            return "last_visit_date"
+        if not data.get("last_visit_category"):
+            return "last_visit_category"
+        if not data.get("last_visit_text"):
+            return "last_visit_description"
+        return "done"
+    if scenario == "parts":
+        if not data.get("parts_text"):
+            return "parts_text"
+        if data.get("wants_booking") is None:
+            return "parts_offer_booking"
+        if data.get("wants_booking"):
+            if not data.get("problem_text"):
+                return "booking_purpose"
+            if not data.get("booking_date"):
+                return "booking_date"
+            if not data.get("booking_time"):
+                return "booking_time"
+        return "done"
+    if scenario == "repair":
+        if not data.get("problem_text"):
+            return "repair_text"
+        if data.get("wants_booking") is None:
+            return "repair_offer_booking"
+        if data.get("wants_booking"):
+            if not data.get("booking_date"):
+                return "booking_date"
+            if not data.get("booking_time"):
+                return "booking_time"
+        return "done"
+    if scenario == "other":
+        if not data.get("problem_text"):
+            return "other_text"
+        return "done"
+    return "done"
+
+
+def list_missing_fields(session: dict) -> list[str]:
+    data = session.get("data", {})
+    missing = []
+    if not data.get("fio"):
+        missing.append("fio")
+    if not data.get("phone"):
+        missing.append("phone")
+    if "pdn_consent" not in data:
+        missing.append("pdn_consent")
+    if not data.get("was_here_before"):
+        missing.append("was_here_before")
+    if data.get("was_here_before") in {"yes", "unknown"}:
+        if not data.get("car_plate"):
+            missing.append("car_plate")
+        if not data.get("car_make_model") and not data.get("car_make_optional_skipped"):
+            missing.append("car_make_model")
+    elif data.get("was_here_before") == "no":
+        if not data.get("vin"):
+            missing.append("vin")
+        if not data.get("car_make_model"):
+            missing.append("car_make_model")
+    scenario = session.get("scenario")
+    if scenario == "booking":
+        if not data.get("problem_text"):
+            missing.append("problem_text")
+        if not data.get("booking_date"):
+            missing.append("booking_date")
+        if not data.get("booking_time"):
+            missing.append("booking_time")
+    if scenario == "last_visit":
+        if not data.get("last_visit_date"):
+            missing.append("last_visit_date")
+        if not data.get("last_visit_category"):
+            missing.append("last_visit_category")
+        if not data.get("last_visit_text"):
+            missing.append("last_visit_text")
+    if scenario == "parts":
+        if not data.get("parts_text"):
+            missing.append("parts_text")
+        if data.get("wants_booking") is None:
+            missing.append("wants_booking")
+        if data.get("wants_booking"):
+            if not data.get("problem_text"):
+                missing.append("problem_text")
+            if not data.get("booking_date"):
+                missing.append("booking_date")
+            if not data.get("booking_time"):
+                missing.append("booking_time")
+    if scenario == "repair":
+        if not data.get("problem_text"):
+            missing.append("problem_text")
+        if data.get("wants_booking") is None:
+            missing.append("wants_booking")
+        if data.get("wants_booking"):
+            if not data.get("booking_date"):
+                missing.append("booking_date")
+            if not data.get("booking_time"):
+                missing.append("booking_time")
+    if scenario == "other":
+        if not data.get("problem_text"):
+            missing.append("problem_text")
+    return missing
+
+
+def apply_ai_fields(
+    data: dict,
+    fields: dict,
+    timezone: str,
+    logger: logging.Logger,
+) -> None:
+    for key, value in fields.items():
+        if key == "fio" and not data.get("fio"):
+            cleaned = normalize_text(str(value))
+            if cleaned:
+                data["fio"] = cleaned
+        elif key == "phone" and not data.get("phone"):
+            cleaned = normalize_text(str(value))
+            if cleaned:
+                data["phone"] = cleaned
+        elif key == "pdn_consent" and "pdn_consent" not in data:
+            if isinstance(value, bool):
+                data["pdn_consent"] = value
+            elif str(value).strip().lower() in {"true", "да", "согласен"}:
+                data["pdn_consent"] = True
+            elif str(value).strip().lower() in {"false", "нет", "не согласен"}:
+                data["pdn_consent"] = False
+        elif key == "was_here_before" and not data.get("was_here_before"):
+            normalized = str(value).strip().lower()
+            mapping = {"yes": "yes", "да": "yes", "no": "no", "нет": "no", "unknown": "unknown"}
+            if normalized in mapping:
+                data["was_here_before"] = mapping[normalized]
+        elif key == "car_plate" and not data.get("car_plate"):
+            cleaned = normalize_text(str(value))
+            if cleaned:
+                data["car_plate"] = cleaned
+        elif key == "car_make_model" and not data.get("car_make_model"):
+            cleaned = normalize_text(str(value))
+            if cleaned in CAR_MAKE_SKIP_WORDS:
+                data["car_make_optional_skipped"] = True
+            elif cleaned:
+                data["car_make_model"] = cleaned
+        elif key == "vin" and not data.get("vin"):
+            cleaned = normalize_text(str(value))
+            if cleaned:
+                data["vin"] = cleaned
+        elif key == "problem_text" and not data.get("problem_text"):
+            cleaned = normalize_text(str(value))
+            if cleaned:
+                data["problem_text"] = cleaned
+        elif key == "parts_text" and not data.get("parts_text"):
+            cleaned = normalize_text(str(value))
+            if cleaned:
+                data["parts_text"] = cleaned
+        elif key == "last_visit_text" and not data.get("last_visit_text"):
+            cleaned = normalize_text(str(value))
+            if cleaned:
+                data["last_visit_text"] = cleaned
+        elif key == "last_visit_category" and not data.get("last_visit_category"):
+            cleaned = normalize_text(str(value))
+            if cleaned in LAST_VISIT_CATEGORIES:
+                data["last_visit_category"] = cleaned
+        elif key == "last_visit_date" and not data.get("last_visit_date"):
+            cleaned = normalize_text(str(value))
+            if cleaned:
+                data["last_visit_date"] = cleaned
+        elif key == "booking_date" and not data.get("booking_date"):
+            normalized = normalize_date_string(str(value))
+            if normalized:
+                try:
+                    parsed = datetime.strptime(normalized, "%Y-%m-%d").date()
+                except ValueError:
+                    parsed = None
+                if parsed:
+                    error = validate_booking_date(parsed, timezone)
+                    if not error:
+                        data["booking_date"] = parsed.strftime("%Y-%m-%d")
+                    else:
+                        logger.info("ai_booking_date_invalid reason=%s", error)
+        elif key == "booking_time" and not data.get("booking_time"):
+            value_str = normalize_text(str(value))
+            parsed_time, error = parse_time_value(value_str)
+            if parsed_time and not error:
+                data["booking_time"] = parsed_time
+            elif error:
+                logger.info("ai_booking_time_invalid reason=%s", error)
+        elif key == "wants_booking" and data.get("wants_booking") is None:
+            if isinstance(value, bool):
+                data["wants_booking"] = value
+            elif str(value).strip().lower() in {"yes", "да", "true"}:
+                data["wants_booking"] = True
+            elif str(value).strip().lower() in {"no", "нет", "false"}:
+                data["wants_booking"] = False
+
+
+def handle_ai_message(
+    token: str,
+    chat_id: int,
+    session: dict,
+    storage: dict,
+    timezone: str,
+    logger: logging.Logger,
+    ai_service: AIService,
+    text: str,
+    master_usernames: list[str],
+) -> bool:
+    stage = session.get("stage")
+    if not stage:
+        return False
+    if stage in AI_ASK_BLOCKLIST:
+        logger.info("ai_used=%s reason=%s", False, "blocked_stage")
+        return False
+    missing_fields = list_missing_fields(session)
+    known_fields = {
+        key: value
+        for key, value in session.get("data", {}).items()
+        if key in {"fio", "phone", "pdn_consent", "was_here_before", "car_plate", "car_make_model", "vin"}
+    }
+    ai_result = ai_service.generate_reply(stage, missing_fields, known_fields, text)
+    logger.info("ai_used=%s reason=%s", ai_result.used, ai_result.reason)
+    if not ai_result.used:
+        return False
+    data = session.setdefault("data", {})
+    if stage == "car_make_optional":
+        if normalize_text(text).lower() in CAR_MAKE_SKIP_WORDS:
+            data["car_make_optional_skipped"] = True
+    if stage == "booking_purpose" and "problem_text" in ai_result.fields:
+        cleaned = normalize_text(str(ai_result.fields["problem_text"]))
+        if cleaned:
+            if session.get("scenario") == "repair" and data.get("problem_text"):
+                data["problem_text"] = f"{data['problem_text']}; Цель визита: {cleaned}"
+                ai_result.fields.pop("problem_text", None)
+    apply_ai_fields(data, ai_result.fields, timezone, logger)
+    next_stage = compute_next_stage(session)
+    if next_stage == "done":
+        update_session_ttl(session, timezone)
+        save_session(storage, chat_id, session)
+        finalize_ticket(
+            token, chat_id, session, storage, timezone, logger, master_usernames
+        )
+        return True
+    session["stage"] = next_stage
+    update_session_ttl(session, timezone)
+    save_session(storage, chat_id, session)
+    save_storage(storage)
+    if next_stage in AI_ASK_BLOCKLIST or not ai_result.reply:
+        ask_current_step(token, chat_id, session)
+        return True
+    send_message(token, chat_id, ai_result.reply)
+    return True
+
+
+
 def finalize_ticket(
     token: str,
     chat_id: int,
@@ -690,6 +1006,21 @@ def finalize_ticket(
     master_usernames: list[str],
 ) -> None:
     ticket = build_ticket_from_session(session, timezone, storage)
+    ai_service = AIService(logger)
+    tldr_payload = {
+        "scenario": format_scenario(ticket.get("scenario_type")),
+        "description": ticket.get("problem_text")
+        or ticket.get("parts_text")
+        or ticket.get("last_visit_text"),
+        "car_make_model": ticket.get("car_make_model"),
+        "car_plate": ticket.get("car_plate"),
+        "vin": ticket.get("vin"),
+        "booking_date": ticket.get("booking_date"),
+        "booking_time": ticket.get("booking_time"),
+    }
+    tldr_result = ai_service.generate_tldr(tldr_payload)
+    logger.info("ai_used=%s reason=%s", tldr_result.used, tldr_result.reason)
+    ticket["tldr"] = tldr_result.reply or build_tldr_fallback(ticket)
     storage.setdefault("tickets", []).append(ticket)
     clear_session(storage, chat_id)
     save_storage(storage)
@@ -937,6 +1268,7 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
     storage = load_storage()
     session = ensure_session(storage, chat_id, timezone)
     master_usernames = parse_master_usernames()
+    ai_service = AIService(logger)
 
     if process_callback(token, update, storage, timezone, logger):
         return
@@ -1086,6 +1418,19 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
     stage = session.get("stage")
     data = session.setdefault("data", {})
 
+    if stage and handle_ai_message(
+        token,
+        chat_id,
+        session,
+        storage,
+        timezone,
+        logger,
+        ai_service,
+        text,
+        master_usernames,
+    ):
+        return
+
     if stage == "fio":
         if not normalize_text(text):
             send_message(token, chat_id, "Введите имя и фамилию.")
@@ -1170,8 +1515,10 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
 
     if stage == "car_make_optional":
         cleaned = normalize_text(text)
-        if cleaned and cleaned not in {"-", "нет", "не знаю", "пропуск"}:
+        if cleaned and cleaned not in CAR_MAKE_SKIP_WORDS:
             data["car_make_model"] = cleaned
+        if cleaned in CAR_MAKE_SKIP_WORDS:
+            data["car_make_optional_skipped"] = True
         session["stage"] = determine_next_stage_after_car(session)
         update_session_ttl(session, timezone)
         save_session(storage, chat_id, session)
@@ -1262,7 +1609,7 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
         return
 
     if stage == "last_visit_category":
-        if text not in {"Гарантия", "Повтор проблемы", "Документы", "Уточнение", "Другое"}:
+        if text not in LAST_VISIT_CATEGORIES:
             send_message(token, chat_id, "Пожалуйста, выберите вариант кнопкой.")
             return
         data["last_visit_category"] = text
@@ -1300,8 +1647,10 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
     if stage == "parts_offer_booking":
         lower = text.strip().lower()
         if lower in YES_OPTIONS:
+            data["wants_booking"] = True
             session["stage"] = "booking_purpose"
         elif lower in NO_OPTIONS:
+            data["wants_booking"] = False
             update_session_ttl(session, timezone)
             save_session(storage, chat_id, session)
             finalize_ticket(
@@ -1332,8 +1681,10 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
     if stage == "repair_offer_booking":
         lower = text.strip().lower()
         if lower in YES_OPTIONS:
+            data["wants_booking"] = True
             session["stage"] = "booking_purpose"
         elif lower in NO_OPTIONS:
+            data["wants_booking"] = False
             update_session_ttl(session, timezone)
             save_session(storage, chat_id, session)
             finalize_ticket(
