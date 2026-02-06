@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+echo "Starting reviews_bot..."
 python main.py &
 reviews_pid=$!
 
+echo "Starting client_bot (polling)..."
 python bots/client_bot/main.py &
 client_pid=$!
 
