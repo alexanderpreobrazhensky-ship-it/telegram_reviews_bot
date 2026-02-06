@@ -65,6 +65,12 @@ ADMIN_STATE_EXPORT_RANGE = "await_export_range"
 ADMIN_STATE_EXPORT_STATUS = "await_export_status"
 ADMIN_STATE_EXPORT_FORMAT = "await_export_format"
 
+CALLBACK_DEBOUNCE_WINDOW_SECONDS = 2
+CALLBACK_DEBOUNCE_TTL_SECONDS = 60
+CALLBACK_DEBOUNCE_LIMIT = 5000
+
+CALLBACK_DEBOUNCE_CACHE: dict[tuple[int, str], float] = {}
+
 AI_ASK_BLOCKLIST = {
     "pdn",
     "was_here",
@@ -521,6 +527,44 @@ def build_master_status_keyboard(ticket: dict) -> dict:
     return {"inline_keyboard": keyboard} if keyboard else {}
 
 
+def should_skip_ticket_reuse(text: str) -> bool:
+    cleaned = text.strip().lower()
+    if cleaned.startswith("/cancel"):
+        return True
+    if cleaned.startswith("/start") and "reset" in cleaned:
+        return True
+    return False
+
+
+def _prune_debounce_cache(now_value: float) -> None:
+    if len(CALLBACK_DEBOUNCE_CACHE) <= CALLBACK_DEBOUNCE_LIMIT:
+        cutoff = now_value - CALLBACK_DEBOUNCE_TTL_SECONDS
+        stale_keys = [key for key, timestamp in CALLBACK_DEBOUNCE_CACHE.items() if timestamp < cutoff]
+        for key in stale_keys:
+            CALLBACK_DEBOUNCE_CACHE.pop(key, None)
+        return
+    sorted_items = sorted(CALLBACK_DEBOUNCE_CACHE.items(), key=lambda item: item[1])
+    for key, _ in sorted_items[: len(sorted_items) - CALLBACK_DEBOUNCE_LIMIT]:
+        CALLBACK_DEBOUNCE_CACHE.pop(key, None)
+
+
+def is_callback_debounced(callback: dict, logger: logging.Logger) -> bool:
+    from_user = callback.get("from", {})
+    user_id = from_user.get("id")
+    data = callback.get("data") or ""
+    if not user_id or not data:
+        return False
+    now_value = time.time()
+    key = (int(user_id), data)
+    last_seen = CALLBACK_DEBOUNCE_CACHE.get(key)
+    if last_seen is not None and now_value - last_seen < CALLBACK_DEBOUNCE_WINDOW_SECONDS:
+        logger.info("debounce_hit: callback_data=%s user_id=%s", data, user_id)
+        return True
+    CALLBACK_DEBOUNCE_CACHE[key] = now_value
+    _prune_debounce_cache(now_value)
+    return False
+
+
 def build_master_card(ticket: dict, timezone: str) -> str:
     created_at = ticket.get("created_at")
     created_display = "—"
@@ -578,6 +622,38 @@ def build_master_card(ticket: dict, timezone: str) -> str:
             f"TL;DR: {tldr}",
         ]
     )
+
+
+def summarize_ticket_changes(fields_changed: list[str]) -> list[str]:
+    summary: list[str] = []
+    if "phone" in fields_changed:
+        summary.append("телефон")
+    if any(field in fields_changed for field in ("car_plate", "car_make_model", "vin")):
+        summary.append("авто")
+    if any(field in fields_changed for field in ("problem_text", "parts_text", "last_visit_text")):
+        summary.append("описание")
+    if any(field in fields_changed for field in ("booking_date", "booking_time")):
+        summary.append("время")
+    if "last_visit_category" in fields_changed:
+        summary.append("категория")
+    if "fio" in fields_changed:
+        summary.append("фио")
+    return summary
+
+
+def build_ticket_update_card(ticket: dict, fields_changed: list[str], timezone: str) -> str:
+    summary = summarize_ticket_changes(fields_changed)
+    summary_text = ", ".join(summary) if summary else "—"
+    card = build_master_card(ticket, timezone)
+    return "\n".join(
+        [
+            f"UPDATE по заявке {ticket.get('ticket_id', '—')}",
+            f"Изменения: {summary_text}",
+            "",
+            "Актуальная карточка:",
+            card,
+        ]
+    ).strip()
 
 
 def format_ticket_status(value: str | None) -> str:
@@ -1221,6 +1297,30 @@ def notify_masters(
             logger.error("failed to send message to master %s ticket_id=%s", master, ticket_id)
 
 
+def notify_ticket_update(
+    token: str,
+    master_usernames: list[str],
+    ticket: dict,
+    fields_changed: list[str],
+    logger: logging.Logger,
+    storage: dict,
+    timezone: str,
+) -> None:
+    update_text = build_ticket_update_card(ticket, fields_changed, timezone)
+    notify_masters(
+        token,
+        master_usernames,
+        update_text,
+        logger,
+        storage,
+        timezone,
+        "ticket_update",
+        reply_markup=build_master_status_keyboard(ticket),
+        ticket_id=ticket.get("ticket_id"),
+    )
+    logger.info("ticket_update: fields_changed=%s", fields_changed)
+
+
 def run_tg_send_test(
     token: str,
     chat_id: int,
@@ -1259,6 +1359,139 @@ def run_tg_send_test(
 
 def normalize_text(text: str) -> str:
     return " ".join(text.split()).strip()
+
+
+def parse_ticket_expiry(ticket: dict, timezone: str) -> datetime | None:
+    ttl_str = ticket.get("ttl_expires_at")
+    if ttl_str:
+        try:
+            return datetime.fromisoformat(ttl_str).astimezone(ZoneInfo(timezone))
+        except ValueError:
+            return None
+    created_at = ticket.get("created_at")
+    if not created_at:
+        return None
+    try:
+        created_dt = datetime.fromisoformat(created_at).astimezone(ZoneInfo(timezone))
+    except ValueError:
+        return None
+    return created_dt + timedelta(hours=TTL_HOURS)
+
+
+def is_ticket_active(ticket: dict, timezone: str) -> bool:
+    status = ticket.get("status", "new")
+    if status not in {"new", "in_work"}:
+        return False
+    expires_at = parse_ticket_expiry(ticket, timezone)
+    if not expires_at:
+        return True
+    return expires_at >= datetime.now(ZoneInfo(timezone))
+
+
+def find_active_ticket(storage: dict, chat_id: int, timezone: str) -> dict | None:
+    if not chat_id:
+        return None
+    for ticket in reversed(storage.get("tickets", [])):
+        if ticket.get("client_chat_id") != chat_id:
+            continue
+        if is_ticket_active(ticket, timezone):
+            return ticket
+    return None
+
+
+def build_last_visit_text_from_data(data: dict) -> str | None:
+    last_visit_text = data.get("last_visit_text")
+    last_visit_date = data.get("last_visit_date")
+    if last_visit_date:
+        if last_visit_text:
+            return f"{last_visit_date}; {last_visit_text}"
+        return last_visit_date
+    return last_visit_text
+
+
+def parse_phone_candidate(text: str) -> str | None:
+    digits = "".join(symbol for symbol in text if symbol.isdigit() or symbol == "+")
+    if sum(symbol.isdigit() for symbol in digits) < 9:
+        return None
+    return digits
+
+
+def append_text(existing: str | None, extra: str) -> str:
+    extra_value = normalize_text(extra)
+    if not extra_value:
+        return existing or ""
+    if not existing:
+        return extra_value
+    if extra_value.lower() in existing.lower():
+        return existing
+    return f"{existing}; {extra_value}"
+
+
+def apply_ticket_updates(ticket: dict, updates: dict, timezone: str) -> list[str]:
+    fields_changed: list[str] = []
+    for field, value in updates.items():
+        if value is None or value == "":
+            continue
+        if ticket.get(field) != value:
+            ticket[field] = value
+            fields_changed.append(field)
+    if fields_changed:
+        ticket["updated_at"] = now_iso(timezone)
+    return fields_changed
+
+
+def build_updates_from_session(session: dict) -> dict:
+    data = session.get("data", {})
+    last_visit_text = build_last_visit_text_from_data(data)
+    return {
+        "fio": data.get("fio"),
+        "phone": data.get("phone"),
+        "pdn_consent": data.get("pdn_consent"),
+        "was_here_before": data.get("was_here_before"),
+        "car_plate": data.get("car_plate"),
+        "car_make_model": data.get("car_make_model"),
+        "vin": data.get("vin"),
+        "problem_text": data.get("problem_text"),
+        "parts_text": data.get("parts_text"),
+        "last_visit_text": last_visit_text,
+        "last_visit_category": data.get("last_visit_category"),
+        "booking_date": data.get("booking_date"),
+        "booking_time": data.get("booking_time"),
+        "attachments_count": data.get("attachments_count"),
+    }
+
+
+def build_updates_from_text(text: str, ticket: dict, timezone: str) -> dict:
+    normalized = normalize_text(text)
+    lower = normalized.lower()
+    updates: dict[str, str] = {}
+    phone_candidate = parse_phone_candidate(normalized)
+    if phone_candidate:
+        updates["phone"] = phone_candidate
+    parsed_date, date_error = parse_date_value(normalized, timezone)
+    if parsed_date and not date_error:
+        updates["booking_date"] = parsed_date.strftime("%Y-%m-%d")
+    parsed_time, time_error = parse_time_value(normalized)
+    if parsed_time and not time_error:
+        updates["booking_time"] = parsed_time
+    if "vin" in lower or "вин" in lower:
+        cleaned = normalized.replace("vin", "").replace("VIN", "").replace("вин", "").strip()
+        updates["vin"] = cleaned or normalized
+    if "гос" in lower or "номер" in lower:
+        updates["car_plate"] = normalized
+    if "марка" in lower or "модель" in lower:
+        updates["car_make_model"] = normalized
+    if "фио" in lower:
+        updates["fio"] = normalized
+    if not updates:
+        scenario = ticket.get("scenario_type")
+        if scenario == "parts":
+            updates["parts_text"] = append_text(ticket.get("parts_text"), normalized)
+        elif scenario == "last_visit":
+            updates["last_visit_text"] = append_text(ticket.get("last_visit_text"), normalized)
+        else:
+            updates["problem_text"] = append_text(ticket.get("problem_text"), normalized)
+    return updates
 
 
 def parse_date_value(raw_text: str, timezone: str) -> tuple[date | None, str | None]:
@@ -1768,6 +2001,32 @@ def finalize_ticket(
     ai_service: AIService,
 ) -> None:
     ai_logger = logging.getLogger("ai")
+    active_ticket = find_active_ticket(storage, chat_id, timezone)
+    if active_ticket and (active_ticket.get("finalized_at") or active_ticket.get("last_master_notify_at")):
+        updates = build_updates_from_session(session)
+        fields_changed = apply_ticket_updates(active_ticket, updates, timezone)
+        if fields_changed:
+            active_ticket["last_master_notify_at"] = now_iso(timezone)
+            save_storage(storage)
+            notify_ticket_update(
+                token,
+                master_usernames,
+                active_ticket,
+                fields_changed,
+                logger,
+                storage,
+                timezone,
+            )
+            send_message(token, chat_id, "Спасибо! Обновление передано мастеру.")
+        else:
+            send_message(
+                token,
+                chat_id,
+                "Заявка уже отправлена мастеру. Если хотите — можете дополнить, я передам обновление.",
+            )
+        clear_session(storage, chat_id)
+        save_storage(storage)
+        return
     ticket = build_ticket_from_session(session, timezone, storage)
     tldr_payload = {
         "scenario": format_scenario(ticket.get("scenario_type")),
@@ -1797,6 +2056,7 @@ def finalize_ticket(
     summary = build_summary(ticket)
     send_message(token, chat_id, summary)
     send_message(token, chat_id, "Спасибо! Заявка сохранена.")
+    ticket["finalized_at"] = now_iso(timezone)
     ticket["last_master_notify_at"] = now_iso(timezone)
     save_storage(storage)
     notify_masters(
@@ -2299,6 +2559,11 @@ def process_callback(
     callback = update.get("callback_query")
     if not callback:
         return False
+    if is_callback_debounced(callback, logger):
+        callback_id = callback.get("id")
+        if callback_id:
+            answer_callback_query(token, callback_id)
+        return True
     data = callback.get("data") or ""
     master_usernames = parse_master_usernames()
     if handle_admin_callback(token, callback, storage, timezone, logger, master_usernames):
@@ -2380,6 +2645,22 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
     master_usernames = parse_master_usernames()
     settings = get_settings(storage)
     ai_service = AIService(logging.getLogger("ai"), settings=settings)
+    active_ticket: dict | None = None
+    if chat_id and not should_skip_ticket_reuse(text):
+        active_ticket = find_active_ticket(storage, chat_id, timezone)
+        if active_ticket:
+            if session.get("active_ticket_id") != active_ticket.get("ticket_id"):
+                session["active_ticket_id"] = active_ticket.get("ticket_id")
+                save_session(storage, chat_id, session)
+                save_storage(storage)
+                logger.info(
+                    "ticket_reuse: reused ticket_id=%s reason=ttl_active",
+                    active_ticket.get("ticket_id"),
+                )
+        elif session.get("active_ticket_id"):
+            session.pop("active_ticket_id", None)
+            save_session(storage, chat_id, session)
+            save_storage(storage)
 
     if process_callback(token, update, storage, timezone, logger):
         return
@@ -2391,6 +2672,21 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
         return
 
     update_session_client_context(session, chat)
+
+    if active_ticket and not session.get("stage") and text in {
+        MENU_BOOKING,
+        MENU_LAST_VISIT,
+        MENU_PARTS,
+        MENU_REPAIR,
+        MENU_OTHER,
+    }:
+        send_message(
+            token,
+            chat_id,
+            "У вас уже есть активная заявка. Напишите, что хотите дополнить, "
+            "я передам обновление мастеру.",
+        )
+        return
 
     if text.startswith("/whoami"):
         username = chat.get("username")
@@ -2493,13 +2789,14 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
         return
 
     if text.startswith("/start"):
-        if session.get("stage"):
+        if session.get("stage") or active_ticket:
             send_message(
                 token,
                 chat_id,
                 "У вас уже есть активная заявка. Давайте продолжим.",
             )
-            ask_current_step(token, chat_id, session)
+            if session.get("stage"):
+                ask_current_step(token, chat_id, session)
             return
         send_message(
             token,
@@ -2520,6 +2817,30 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
             master_usernames,
             logger,
         )
+        return
+
+    if active_ticket and not session.get("stage") and text and not text.startswith("/"):
+        updates = build_updates_from_text(text, active_ticket, timezone)
+        fields_changed = apply_ticket_updates(active_ticket, updates, timezone)
+        if fields_changed:
+            active_ticket["last_master_notify_at"] = now_iso(timezone)
+            save_storage(storage)
+            notify_ticket_update(
+                token,
+                master_usernames,
+                active_ticket,
+                fields_changed,
+                logger,
+                storage,
+                timezone,
+            )
+            send_message(token, chat_id, "Спасибо! Обновление передано мастеру.")
+        else:
+            send_message(
+                token,
+                chat_id,
+                "Заявка уже отправлена мастеру. Если хотите — можете дополнить, я передам обновление.",
+            )
         return
 
     if session.get("stage") and text in {
