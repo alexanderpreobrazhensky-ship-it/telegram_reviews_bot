@@ -1,5 +1,4 @@
 import csv
-import importlib.util
 import logging
 import os
 import threading
@@ -153,7 +152,11 @@ def build_yes_no_keyboard() -> dict:
 
 
 def is_openpyxl_available() -> bool:
-    return importlib.util.find_spec("openpyxl") is not None
+    try:
+        import openpyxl  # noqa: F401
+    except ImportError:
+        return False
+    return True
 
 
 def build_last_visit_category_keyboard() -> dict:
