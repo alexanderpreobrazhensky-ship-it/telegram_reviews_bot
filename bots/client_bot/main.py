@@ -1,6 +1,7 @@
 import csv
 import logging
 import os
+import threading
 import time
 from collections import deque
 from datetime import date, datetime, timedelta
@@ -10,6 +11,22 @@ import requests
 from openpyxl import Workbook
 
 from services.ai_service import AIService, normalize_date_string
+from services.outgoing_queue import (
+    enqueue_document,
+    enqueue_message,
+    get_last_queue_error,
+    get_queue_stats,
+    is_queue_enabled,
+    process_outgoing_queue,
+    store_outgoing_file,
+)
+from services.telegram_api import (
+    answer_callback_query as safe_answer_callback_query,
+    configure_telegram,
+    send_document as safe_send_document,
+    send_message as safe_send_message,
+    tg_request,
+)
 from storage import (
     clear_session,
     get_session,
@@ -25,6 +42,7 @@ VERSION = "0.4.0"
 POLLING_TIMEOUT = 30
 POLLING_SLEEP_SECONDS = 1
 TTL_HOURS = 24
+OUTGOING_QUEUE_INTERVAL_SECONDS = 3
 
 MENU_BOOKING = "🗓 Записаться на сервис"
 MENU_LAST_VISIT = "🧾 Вопрос по прошлому визиту"
@@ -198,57 +216,16 @@ def sanitize_reply_markup(reply_markup: dict | None) -> dict | None:
 
 
 def send_message(token: str, chat_id: int, text: str, reply_markup: dict | None = None) -> bool:
-    logger = logging.getLogger("client_bot")
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    payload: dict = {"chat_id": chat_id, "text": text}
     sanitized_markup = sanitize_reply_markup(reply_markup)
-    if sanitized_markup:
-        payload["reply_markup"] = sanitized_markup
-    try:
-        response = requests.post(url, json=payload, timeout=10)
-        if response.status_code in {400, 403}:
-            logger.error(
-                "telegram sendMessage rejected chat_id=%s status_code=%s response=%s",
-                chat_id,
-                response.status_code,
-                response.text,
-            )
-            return False
-        response.raise_for_status()
-    except requests.RequestException as exc:
-        logger.error("telegram sendMessage error chat_id=%s error=%s", chat_id, exc)
-        return False
-    return True
+    return safe_send_message(chat_id, text, reply_markup=sanitized_markup)
 
 
 def send_document(token: str, chat_id: int, file_path: str, caption: str | None = None) -> bool:
-    logger = logging.getLogger("client_bot")
-    url = f"https://api.telegram.org/bot{token}/sendDocument"
-    data = {"chat_id": chat_id}
-    if caption:
-        data["caption"] = caption
-    try:
-        with open(file_path, "rb") as file_handle:
-            response = requests.post(url, data=data, files={"document": file_handle}, timeout=20)
-        response.raise_for_status()
-    except (OSError, requests.RequestException) as exc:
-        logger.error("telegram sendDocument error chat_id=%s error=%s", chat_id, exc)
-        return False
-    return True
+    return safe_send_document(chat_id, file_path, caption=caption)
 
 
 def answer_callback_query(token: str, callback_query_id: str, text: str | None = None) -> None:
-    logger = logging.getLogger("client_bot")
-    url = f"https://api.telegram.org/bot{token}/answerCallbackQuery"
-    payload: dict = {"callback_query_id": callback_query_id}
-    if text:
-        payload["text"] = text
-        payload["show_alert"] = False
-    try:
-        response = requests.post(url, json=payload, timeout=10)
-        response.raise_for_status()
-    except requests.RequestException as exc:
-        logger.warning("telegram answerCallbackQuery error callback_id=%s error=%s", callback_query_id, exc)
+    safe_answer_callback_query(callback_query_id, text=text)
 
 
 def parse_master_usernames() -> list[str]:
@@ -310,6 +287,7 @@ def ensure_storage_defaults(storage: dict) -> None:
     storage.setdefault("admins", [])
     storage.setdefault("settings", {})
     storage.setdefault("blocklist", [])
+    storage.setdefault("outgoing_messages", [])
     env_admins = parse_csv_ints(os.getenv("CLIENT_ADMIN_IDS", ""))
     if env_admins:
         merged = {int(value) for value in storage.get("admins", []) if str(value).isdigit()}
@@ -876,7 +854,15 @@ def send_reminders_now(
             continue
         text = f"Напоминание: заявка {ticket.get('ticket_id')} всё ещё новая"
         reminder_card = build_reminder_card(ticket)
-        notify_masters(token, master_usernames, f"{text}\n{reminder_card}".strip(), logger)
+        notify_masters(
+            token,
+            master_usernames,
+            f"{text}\n{reminder_card}".strip(),
+            logger,
+            storage,
+            timezone,
+            "reminder",
+        )
         ticket["reminded_at"] = now_iso(timezone)
         count += 1
     save_storage(storage)
@@ -1010,24 +996,32 @@ def download_file(token: str, file_id: str) -> tuple[bytes, str] | None:
 
 
 def send_attachment_to_master(
-    token: str, master_username: str, filename: str, content: bytes, caption: str
+    token: str,
+    master_username: str,
+    filename: str,
+    content: bytes,
+    caption: str,
+    storage: dict,
+    timezone: str,
 ) -> bool:
     logger = logging.getLogger("client_bot")
-    url = f"https://api.telegram.org/bot{token}/sendDocument"
-    files = {"document": (filename, content)}
-    data = {"chat_id": master_username, "caption": caption}
-    try:
-        response = requests.post(url, data=data, files=files, timeout=20)
-        response.raise_for_status()
-    except requests.RequestException as exc:
+    file_path = store_outgoing_file(content, filename)
+    if is_queue_enabled():
+        enqueue_document(storage, master_username, "media", file_path, caption, timezone=timezone)
+        save_storage(storage)
+        return True
+    sent = send_document(token, master_username, file_path, caption=caption)
+    if not sent:
         logger.error(
-            "telegram sendDocument error master=%s filename=%s error=%s",
+            "telegram sendDocument error master=%s filename=%s",
             master_username,
             filename,
-            exc,
         )
-        return False
-    return True
+    try:
+        os.remove(file_path)
+    except OSError:
+        logger.warning("failed to remove temp attachment path=%s", file_path)
+    return sent
 
 
 def notify_masters(
@@ -1035,15 +1029,71 @@ def notify_masters(
     master_usernames: list[str],
     text: str,
     logger: logging.Logger,
+    storage: dict,
+    timezone: str,
+    kind: str,
     reply_markup: dict | None = None,
     ticket_id: str | None = None,
 ) -> None:
+    sanitized_markup = sanitize_reply_markup(reply_markup)
+    if is_queue_enabled():
+        for master in master_usernames:
+            enqueue_message(
+                storage,
+                master,
+                kind,
+                text,
+                reply_markup=sanitized_markup,
+                disable_web_page_preview=True,
+                timezone=timezone,
+            )
+            if ticket_id:
+                logger.info("queued ticket %s for master %s", ticket_id, master)
+        save_storage(storage)
+        return
+
     for master in master_usernames:
         if ticket_id:
             logger.info("Sending ticket %s to master %s", ticket_id, master)
-        success = send_message(token, master, text, reply_markup=reply_markup)
+        success = send_message(token, master, text, reply_markup=sanitized_markup)
         if not success:
             logger.error("failed to send message to master %s ticket_id=%s", master, ticket_id)
+
+
+def run_tg_send_test(
+    token: str,
+    chat_id: int,
+    storage: dict,
+    timezone: str,
+    master_usernames: list[str],
+    logger: logging.Logger,
+) -> None:
+    total = 0
+    queued = 0
+    sent = 0
+    failed = 0
+    for index in range(5):
+        text = f"TG SEND TEST {index + 1}/5 ({now_iso(timezone)})"
+        if is_queue_enabled():
+            for master in master_usernames:
+                enqueue_message(storage, master, "test", text, timezone=timezone)
+                queued += 1
+            total += len(master_usernames)
+        else:
+            for master in master_usernames:
+                total += 1
+                if send_message(token, master, text):
+                    sent += 1
+                else:
+                    failed += 1
+    if is_queue_enabled():
+        save_storage(storage)
+    logger.info("tg send test result total=%s queued=%s sent=%s failed=%s", total, queued, sent, failed)
+    send_message(
+        token,
+        chat_id,
+        f"Тест отправки: всего={total}, отправлено={sent}, в очереди={queued}, ошибки={failed}",
+    )
 
 
 def normalize_text(text: str) -> str:
@@ -1590,6 +1640,9 @@ def finalize_ticket(
         master_usernames,
         build_master_card(ticket, timezone),
         logger,
+        storage,
+        timezone,
+        "ticket",
         reply_markup=build_master_status_keyboard(ticket),
         ticket_id=ticket["ticket_id"],
     )
@@ -1646,7 +1699,7 @@ def process_master_request(
     save_session(storage, chat_id, session)
     save_storage(storage)
     draft = build_draft_card(session, chat)
-    notify_masters(token, master_usernames, draft, logger)
+    notify_masters(token, master_usernames, draft, logger, storage, timezone, "draft")
     logger.info("sent draft to masters %s", draft_id)
     send_master_contact(token, chat_id, master_usernames[0])
 
@@ -1684,7 +1737,15 @@ def handle_attachment(
     content, filename = download
     caption = f"Вложение к заявке {draft_id} от {data.get('fio') or data.get('client_username') or chat_id}"
     for master in master_usernames:
-        if not send_attachment_to_master(token, master, filename, content, caption):
+        if not send_attachment_to_master(
+            token,
+            master,
+            filename,
+            content,
+            caption,
+            storage,
+            timezone,
+        ):
             logger.error("attachment forward failed master=%s draft=%s", master, draft_id)
     logger.info(
         "attachment received type=%s size=%s draft=%s",
@@ -1793,6 +1854,8 @@ def handle_admin_callback(
         masters_count = len(master_ids) if master_ids else len(master_usernames)
         log_path = os.path.join(os.path.dirname(__file__), "logs", "client_bot.log")
         last_error = get_last_error_line(log_path)
+        queue_stats = get_queue_stats(storage, timezone)
+        queue_last_error = get_last_queue_error(storage)
         text = "\n".join(
             [
                 "Самодиагностика:",
@@ -1802,6 +1865,8 @@ def handle_admin_callback(
                 f"режим: {mode}",
                 "storage: OK",
                 f"masters configured: count={masters_count}",
+                f"outgoing queue: enabled={int(is_queue_enabled())} pending={queue_stats['pending']} sent={queue_stats['sent']} failed={queue_stats['failed']}",
+                f"queue last error: {queue_last_error}",
                 f"последняя ошибка: {last_error}",
             ]
         )
@@ -2107,7 +2172,15 @@ def check_reminders(
                 pass
         text = f"Напоминание: заявка {ticket.get('ticket_id')} всё ещё новая"
         reminder_card = build_reminder_card(ticket)
-        notify_masters(token, master_usernames, f"{text}\n{reminder_card}".strip(), logger)
+        notify_masters(
+            token,
+            master_usernames,
+            f"{text}\n{reminder_card}".strip(),
+            logger,
+            storage,
+            timezone,
+            "reminder",
+        )
         ticket["reminded_at"] = now_iso(timezone)
         save_storage(storage)
         logger.info("reminder sent %s", ticket.get("ticket_id"))
@@ -2152,6 +2225,13 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
             send_message(token, chat_id, "Недостаточно прав доступа")
             return
         send_message(token, chat_id, "Админ-меню:", reply_markup=build_admin_main_keyboard())
+        return
+
+    if text.startswith("/tgsendtest"):
+        if not is_admin(chat_id, storage):
+            send_message(token, chat_id, "Недостаточно прав доступа")
+            return
+        run_tg_send_test(token, chat_id, storage, timezone, master_usernames, logger)
         return
 
     if is_admin(chat_id, storage):
@@ -2625,6 +2705,16 @@ def determine_next_stage_after_car(session: dict) -> str:
     return "other_text"
 
 
+def outgoing_queue_worker(timezone: str, logger: logging.Logger) -> None:
+    while True:
+        try:
+            storage = load_storage()
+            process_outgoing_queue(storage, timezone, logger)
+        except Exception as exc:  # noqa: BLE001 - keep worker alive
+            logger.exception("outgoing queue error: %s", exc)
+        time.sleep(OUTGOING_QUEUE_INTERVAL_SECONDS)
+
+
 def poll_updates(token: str, logger: logging.Logger) -> None:
     polling_logger = logging.getLogger("polling")
     offset = 0
@@ -2684,27 +2774,24 @@ def get_client_token() -> tuple[str, str]:
 def delete_webhook(
     token: str, logger: logging.Logger, drop_pending_updates: bool = False
 ) -> None:
-    url = f"https://api.telegram.org/bot{token}/deleteWebhook"
     payload = {"drop_pending_updates": drop_pending_updates}
-    try:
-        response = requests.post(url, json=payload, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-        if data.get("ok"):
-            logger.info(
-                "client_bot deleteWebhook ok: result=%s",
-                data.get("result"),
-            )
-        else:
-            logger.warning("client_bot deleteWebhook failed: %s", data)
-    except requests.RequestException as exc:
-        logger.warning("client_bot deleteWebhook error: %s", exc)
+    result = tg_request("deleteWebhook", payload)
+    if result.ok and result.response_json:
+        logger.info(
+            "client_bot deleteWebhook ok: result=%s",
+            result.response_json.get("result"),
+        )
+    elif result.response_json:
+        logger.warning("client_bot deleteWebhook failed: %s", result.response_json)
+    else:
+        logger.warning("client_bot deleteWebhook error: %s", result.error)
 
 
 def main() -> None:
     timezone = os.getenv("TIMEZONE", "Europe/Moscow")
     logger = build_logger(timezone)
     token, token_source = get_client_token()
+    configure_telegram(token)
     logger.info("client_bot token source: %s", token_source)
     storage = load_storage()
     ensure_storage_defaults(storage)
@@ -2713,6 +2800,19 @@ def main() -> None:
         len(storage.get("tickets", [])),
         len(storage.get("sessions", {})),
     )
+    queue_stats = get_queue_stats(storage, timezone)
+    logger.info(
+        "outgoing queue: enabled=%s pending=%s",
+        int(is_queue_enabled()),
+        queue_stats.get("pending"),
+    )
+    if is_queue_enabled():
+        worker = threading.Thread(
+            target=outgoing_queue_worker,
+            args=(timezone, logger),
+            daemon=True,
+        )
+        worker.start()
     settings = get_settings(storage)
     ai_service = AIService(logging.getLogger("ai"), settings=settings)
     logger.info(
