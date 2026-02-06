@@ -57,6 +57,7 @@ MENU_PARTS = "🧩 Запчасти"
 MENU_REPAIR = "🔧 Ремонт"
 MENU_OTHER = "❓ Другое"
 MENU_MASTER = "👨‍🔧 Связаться с мастером / Написать мастеру"
+UNIVERSAL_QUESTION = "Опишите, пожалуйста, коротко, с чем вы обращаетесь."
 
 YES_OPTIONS = {"да", "yes", "ага"}
 NO_OPTIONS = {"нет", "no"}
@@ -414,10 +415,8 @@ def ensure_storage_defaults(storage: dict) -> None:
     storage.setdefault("outgoing_messages", [])
     storage.setdefault("callback_debounce", {})
     settings = storage.setdefault("settings", {})
-    settings.setdefault(
-        "force_fallback",
-        1 if get_client_env_value("CLIENT_FORCE_FALLBACK", "0") == "1" else 0,
-    )
+    force_fallback_env = get_env_value("CLIENT_FORCE_FALLBACK", "FORCE_FALLBACK", "0")
+    settings.setdefault("force_fallback", 1 if force_fallback_env == "1" else 0)
     settings.setdefault(
         "ai_timeout_seconds",
         get_client_env_int("CLIENT_AI_TIMEOUT_SECONDS", 10),
@@ -1957,19 +1956,19 @@ def ask_current_step(token: str, chat_id: int, session: dict) -> None:
     elif stage == "car_make_required":
         send_message(token, chat_id, "Подскажите, пожалуйста, марку и модель автомобиля")
     elif stage == "booking_purpose":
-        send_message(token, chat_id, "Кратко опишите цель визита.")
+        send_message(token, chat_id, UNIVERSAL_QUESTION)
     elif stage == "booking_date":
         send_message(
             token,
             chat_id,
-            "Укажите желаемую дату записи (ДД.ММ.ГГГГ). Минимум — следующий день.",
+            "Укажите желаемую дату и время визита.\n"
+            "График работы: Пн–Пт с 09:00 до 19:00.",
         )
     elif stage == "booking_time":
         send_message(
             token,
             chat_id,
-            "Укажите желаемое время (например, 10:30). Работаем 09:00–19:00, "
-            "последняя запись в 18:00.",
+            "Укажите желаемое время визита (например, 10:30).",
         )
     elif stage == "last_visit_date":
         send_message(token, chat_id, "Укажите примерную дату или месяц визита.")
@@ -1981,7 +1980,7 @@ def ask_current_step(token: str, chat_id: int, session: dict) -> None:
             reply_markup=build_last_visit_category_keyboard(),
         )
     elif stage == "last_visit_description":
-        send_message(token, chat_id, "Опишите вопрос по прошлому визиту.")
+        send_message(token, chat_id, UNIVERSAL_QUESTION)
     elif stage == "parts_text":
         send_message(token, chat_id, "Какие запчасти нужны? Можно списком.")
     elif stage == "parts_offer_booking":
@@ -1992,7 +1991,7 @@ def ask_current_step(token: str, chat_id: int, session: dict) -> None:
             reply_markup=build_yes_no_keyboard(),
         )
     elif stage == "repair_text":
-        send_message(token, chat_id, "Опишите симптомы или что беспокоит.")
+        send_message(token, chat_id, UNIVERSAL_QUESTION)
     elif stage == "repair_offer_booking":
         send_message(
             token,
@@ -2001,7 +2000,7 @@ def ask_current_step(token: str, chat_id: int, session: dict) -> None:
             reply_markup=build_yes_no_keyboard(),
         )
     elif stage == "other_text":
-        send_message(token, chat_id, "Кратко опишите ваш вопрос.")
+        send_message(token, chat_id, UNIVERSAL_QUESTION)
 
 
 def build_ticket_from_session(session: dict, timezone: str, storage: dict) -> dict:
@@ -2390,7 +2389,22 @@ def finalize_ticket(
     save_storage(storage)
     summary = build_summary(ticket)
     send_message(token, chat_id, summary)
-    send_message(token, chat_id, "Спасибо! Заявка сохранена.")
+    now_value = datetime.now(ZoneInfo(timezone))
+    if now_value.weekday() >= 5:
+        send_message(
+            token,
+            chat_id,
+            "Заявка принята.\n"
+            "Сейчас выходной день, мастер свяжется с вами\n"
+            "в рабочее время для подтверждения записи.",
+        )
+    else:
+        send_message(
+            token,
+            chat_id,
+            "Спасибо! Я передал вашу заявку мастеру.\n"
+            "Мастер свяжется с вами в рабочее время.",
+        )
     ticket["finalized_at"] = now_iso(timezone)
     ticket["last_master_notify_at"] = now_iso(timezone)
     save_storage(storage)
@@ -3305,8 +3319,8 @@ def check_reminders(
                     send_message(
                         token,
                         client_chat_id,
-                        "Мы получили вашу заявку и уже передали мастеру. "
-                        "Если ответ задерживается, мы вернёмся с уточнением.",
+                        "Мастер получил вашу заявку.\n"
+                        "Ответ может занять немного времени.",
                     )
                     ticket["auto_reply_at"] = now_iso(timezone)
                     save_storage(storage)
@@ -3524,10 +3538,24 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
         send_message(
             token,
             chat_id,
-            "Привет! Выберите, пожалуйста, нужный пункт меню.",
+            "Здравствуйте 👋\n"
+            "Я онлайн-помощник автоцентра „Лира“.\n"
+            "Помогу записаться на сервис, передать вопрос мастеру\n"
+            "или уточнить информацию по прошлому визиту.",
             reply_markup=build_main_menu_keyboard(),
         )
         return
+
+    if text and not text.startswith("/"):
+        normalized = text.strip().lower()
+        if "подтвер" in normalized and ("запис" in normalized or "заявк" in normalized):
+            send_message(
+                token,
+                chat_id,
+                "Подтверждение записи выполняет мастер. "
+                "Я передаю информацию и помогаю с обработкой.",
+            )
+            return
 
     if text and not text.startswith("/"):
         if handle_clarification_response(
@@ -3765,7 +3793,7 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
 
     if stage == "booking_purpose":
         if not normalize_text(text):
-            send_message(token, chat_id, "Опишите цель визита.")
+            send_message(token, chat_id, UNIVERSAL_QUESTION)
             return
         purpose = normalize_text(text)
         if session.get("scenario") == "repair" and data.get("problem_text"):
@@ -3835,7 +3863,7 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
 
     if stage == "last_visit_description":
         if not normalize_text(text):
-            send_message(token, chat_id, "Опишите ваш вопрос.")
+            send_message(token, chat_id, UNIVERSAL_QUESTION)
             return
         data["last_visit_text"] = normalize_text(text)
         update_session_ttl(session, timezone)
@@ -3881,7 +3909,7 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
 
     if stage == "repair_text":
         if not normalize_text(text):
-            send_message(token, chat_id, "Опишите симптомы.")
+            send_message(token, chat_id, UNIVERSAL_QUESTION)
             return
         data["problem_text"] = normalize_text(text)
         session["stage"] = "repair_offer_booking"
@@ -3915,7 +3943,7 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
 
     if stage == "other_text":
         if not normalize_text(text):
-            send_message(token, chat_id, "Опишите вопрос.")
+            send_message(token, chat_id, UNIVERSAL_QUESTION)
             return
         data["problem_text"] = normalize_text(text)
         update_session_ttl(session, timezone)
