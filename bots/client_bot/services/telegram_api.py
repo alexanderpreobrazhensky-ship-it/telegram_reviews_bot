@@ -47,6 +47,7 @@ class TgRequestResult:
     retryable: bool
     status_code: int | None
     error: str | None
+    retry_after_seconds: int | None = None
     response_json: dict[str, Any] | None = None
 
 
@@ -85,6 +86,7 @@ def tg_request(
     elif data and "chat_id" in data:
         payload_chat_id = data.get("chat_id")
 
+    retry_after_seconds: int | None = None
     for attempt in range(1, retries + 1):
         try:
             response = requests.post(
@@ -98,7 +100,7 @@ def tg_request(
             reason = f"request_error={exc}"
             _log_attempt(logger, method, payload_chat_id, None, attempt, reason)
             if attempt >= retries:
-                return TgRequestResult(False, True, None, reason)
+                return TgRequestResult(False, True, None, reason, retry_after_seconds)
             sleep_seconds = base_sleep * (2 ** (attempt - 1))
             time.sleep(sleep_seconds + random.uniform(0.05, 0.3))
             continue
@@ -117,8 +119,9 @@ def tg_request(
                 retry_after = int(response_json.get("parameters", {}).get("retry_after", 1))
             reason = f"http_429 retry_after={retry_after}"
             _log_attempt(logger, method, payload_chat_id, status_code, attempt, reason)
+            retry_after_seconds = retry_after
             if attempt >= retries:
-                return TgRequestResult(False, True, status_code, reason, response_json)
+                return TgRequestResult(False, True, status_code, reason, retry_after_seconds, response_json)
             time.sleep(retry_after + random.uniform(0.1, 0.4))
             continue
 
@@ -126,7 +129,7 @@ def tg_request(
             reason = f"http_{status_code}"
             _log_attempt(logger, method, payload_chat_id, status_code, attempt, reason)
             if attempt >= retries:
-                return TgRequestResult(False, True, status_code, reason, response_json)
+                return TgRequestResult(False, True, status_code, reason, retry_after_seconds, response_json)
             sleep_seconds = base_sleep * (2 ** (attempt - 1))
             time.sleep(sleep_seconds + random.uniform(0.05, 0.3))
             continue
@@ -134,18 +137,18 @@ def tg_request(
         if status_code in {400, 403}:
             reason = f"http_{status_code} body={response_text}"
             _log_attempt(logger, method, payload_chat_id, status_code, attempt, reason)
-            return TgRequestResult(False, False, status_code, reason, response_json)
+            return TgRequestResult(False, False, status_code, reason, retry_after_seconds, response_json)
 
         if status_code >= 400:
             reason = f"http_{status_code}"
             _log_attempt(logger, method, payload_chat_id, status_code, attempt, reason)
-            return TgRequestResult(False, False, status_code, reason, response_json)
+            return TgRequestResult(False, False, status_code, reason, retry_after_seconds, response_json)
 
         reason = "ok"
         _log_attempt(logger, method, payload_chat_id, status_code, attempt, reason)
-        return TgRequestResult(True, False, status_code, None, response_json)
+        return TgRequestResult(True, False, status_code, None, retry_after_seconds, response_json)
 
-    return TgRequestResult(False, True, None, "unknown_error")
+    return TgRequestResult(False, True, None, "unknown_error", retry_after_seconds)
 
 
 def send_message(
