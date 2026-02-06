@@ -50,11 +50,11 @@ class AIResult:
 class AIService:
     def __init__(self, logger: logging.Logger, settings: dict | None = None) -> None:
         self.logger = logger
-        self.api_key = self._get_env_value("CLIENT_DEEPSEEK_API_KEY", "DEEPSEEK_API_KEY")
-        self.base_url = self._get_env_value("CLIENT_DEEPSEEK_BASE_URL", "DEEPSEEK_BASE_URL")
-        self.model = self._get_env_value("CLIENT_DEEPSEEK_MODEL", "DEEPSEEK_MODEL")
+        self.api_key = self._get_env_value("CLIENT_DEEPSEEK_API_KEY")
+        self.base_url = self._get_env_value("CLIENT_DEEPSEEK_BASE_URL")
+        self.model = self._get_env_value("CLIENT_DEEPSEEK_MODEL")
         self.timeout = self._get_timeout_seconds()
-        self.force_fallback = self._get_env_value("CLIENT_FORCE_FALLBACK", "FORCE_FALLBACK") == "1"
+        self.force_fallback = self._get_env_value("CLIENT_FORCE_FALLBACK") == "1"
         if settings:
             if "ai_timeout_seconds" in settings and settings["ai_timeout_seconds"] is not None:
                 try:
@@ -69,17 +69,14 @@ class AIService:
         self._client: Optional[OpenAI] = None
 
     @staticmethod
-    def _get_env_value(primary: str, fallback: str) -> str:
+    def _get_env_value(primary: str) -> str:
         primary_value = os.getenv(primary)
-        if primary_value is not None:
-            return primary_value.strip()
-        fallback_value = os.getenv(fallback)
-        if fallback_value is None:
+        if primary_value is None:
             return ""
-        return fallback_value.strip()
+        return primary_value.strip()
 
     def _get_timeout_seconds(self) -> int:
-        raw_value = self._get_env_value("CLIENT_AI_TIMEOUT_SECONDS", "AI_TIMEOUT_SECONDS")
+        raw_value = self._get_env_value("CLIENT_AI_TIMEOUT_SECONDS")
         if not raw_value:
             return 10
         try:
@@ -129,6 +126,15 @@ class AIService:
         )
         content = response.choices[0].message.content or ""
         return content.strip()
+
+    @staticmethod
+    def _is_unauthorized(exc: Exception) -> bool:
+        status_code = getattr(exc, "status_code", None)
+        if status_code == 401:
+            return True
+        response = getattr(exc, "response", None)
+        response_status = getattr(response, "status_code", None)
+        return response_status == 401
 
     def _parse_json(self, content: str) -> dict[str, Any] | None:
         try:
@@ -224,6 +230,9 @@ class AIService:
                 return AIResult(reply="", fields={}, used=False, reason="safeguard_violation")
             return AIResult(reply=reply, fields=fields, used=True, reason="ai_success")
         except Exception as exc:  # noqa: BLE001
+            if self._is_unauthorized(exc):
+                self.logger.warning("ai_unauthorized: %s", exc)
+                return AIResult(reply="", fields={}, used=False, reason="unauthorized")
             self.logger.exception("ai_error: %s", exc)
             return AIResult(reply="", fields={}, used=False, reason="ai_error")
 
@@ -244,6 +253,9 @@ class AIService:
                 return AIResult(reply="", fields={}, used=False, reason="safeguard_violation")
             return AIResult(reply=tldr, fields={}, used=True, reason="ai_success")
         except Exception as exc:  # noqa: BLE001
+            if self._is_unauthorized(exc):
+                self.logger.warning("ai_unauthorized_tldr: %s", exc)
+                return AIResult(reply="", fields={}, used=False, reason="unauthorized")
             self.logger.exception("ai_error_tldr: %s", exc)
             return AIResult(reply="", fields={}, used=False, reason="ai_error")
 

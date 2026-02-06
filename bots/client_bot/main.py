@@ -234,42 +234,48 @@ def answer_callback_query(token: str, callback_query_id: str, text: str | None =
     safe_answer_callback_query(callback_query_id, text=text)
 
 
+def parse_master_usernames_with_meta(raw: str, logger: logging.Logger) -> tuple[list[str], bool, bool]:
+    usernames = []
+    has_numeric = False
+    has_empty = False
+    for item in raw.split(","):
+        cleaned = item.strip()
+        if not cleaned:
+            has_empty = True
+            logger.warning("[client_bot] MASTER_USERNAMES has empty entry")
+            continue
+        cleaned = cleaned.lstrip("@").strip()
+        if not cleaned:
+            has_empty = True
+            logger.warning("[client_bot] MASTER_USERNAMES has empty entry")
+            continue
+        if cleaned.isdigit():
+            has_numeric = True
+            logger.warning("[client_bot] MASTER_USERNAMES entry is numeric; ignoring: %s", cleaned)
+            continue
+        usernames.append(f"@{cleaned}")
+    return usernames, has_numeric, has_empty
+
+
 def parse_master_usernames() -> list[str]:
     raw = os.getenv("MASTER_USERNAMES", "")
     if not raw.strip():
         return []
-    usernames = []
-    for item in raw.split(","):
-        cleaned = item.strip()
-        if not cleaned:
-            continue
-        cleaned = cleaned.lstrip("@").strip()
-        if not cleaned:
-            continue
-        if cleaned.isdigit():
-            continue
-        usernames.append(f"@{cleaned}")
+    logger = logging.getLogger("client_bot")
+    usernames, _, _ = parse_master_usernames_with_meta(raw, logger)
     return usernames
 
 
-def get_master_contact_username() -> tuple[str | None, bool, bool]:
+def get_master_contact_username(logger: logging.Logger) -> tuple[str | None, bool, bool]:
     raw = os.getenv("MASTER_USERNAMES", "")
     if not raw.strip():
         return None, False, True
-    cleaned_items = []
-    for item in raw.split(","):
-        cleaned = item.strip()
-        if not cleaned:
-            continue
-        cleaned = cleaned.lstrip("@").strip()
-        if cleaned:
-            cleaned_items.append(cleaned)
-    if not cleaned_items:
-        return None, False, True
-    non_numeric = [item for item in cleaned_items if not item.isdigit()]
-    if not non_numeric:
+    usernames, has_numeric, has_empty = parse_master_usernames_with_meta(raw, logger)
+    if usernames:
+        return usernames[0], False, False
+    if has_numeric:
         return None, True, False
-    return f"@{non_numeric[0]}", False, False
+    return None, False, has_empty
 
 
 def parse_csv_ints(raw: str | None) -> list[int]:
@@ -306,6 +312,36 @@ def get_env_value(primary: str, fallback: str, default: str = "") -> str:
     return fallback_value.strip()
 
 
+def get_client_env_value(primary: str, default: str = "") -> str:
+    primary_value = os.getenv(primary)
+    if primary_value is None:
+        return default
+    return primary_value.strip()
+
+
+def get_client_env_int(primary: str, default: int) -> int:
+    raw_value = get_client_env_value(primary, "")
+    if not raw_value:
+        return default
+    try:
+        return int(raw_value)
+    except ValueError:
+        return default
+
+
+def get_ai_config_source() -> str:
+    keys = [
+        "CLIENT_DEEPSEEK_API_KEY",
+        "CLIENT_DEEPSEEK_BASE_URL",
+        "CLIENT_DEEPSEEK_MODEL",
+        "CLIENT_AI_TIMEOUT_SECONDS",
+        "CLIENT_FORCE_FALLBACK",
+    ]
+    if any(os.getenv(key) for key in keys):
+        return "CLIENT_*"
+    return "missing"
+
+
 def get_env_int(primary: str, fallback: str, default: int) -> int:
     raw_value = get_env_value(primary, fallback, "")
     if not raw_value:
@@ -327,11 +363,11 @@ def ensure_storage_defaults(storage: dict) -> None:
     settings = storage.setdefault("settings", {})
     settings.setdefault(
         "force_fallback",
-        1 if get_env_value("CLIENT_FORCE_FALLBACK", "FORCE_FALLBACK", "0") == "1" else 0,
+        1 if get_client_env_value("CLIENT_FORCE_FALLBACK", "0") == "1" else 0,
     )
     settings.setdefault(
         "ai_timeout_seconds",
-        get_env_int("CLIENT_AI_TIMEOUT_SECONDS", "AI_TIMEOUT_SECONDS", 10),
+        get_client_env_int("CLIENT_AI_TIMEOUT_SECONDS", 10),
     )
     settings.setdefault(
         "reminder_minutes",
@@ -990,7 +1026,7 @@ def send_master_contact_from_env(
     chat_id: int,
     logger: logging.Logger,
 ) -> None:
-    master_username, numeric_only, empty = get_master_contact_username()
+    master_username, numeric_only, empty = get_master_contact_username(logger)
     if empty:
         logger.warning("[client_bot] MASTER_USERNAMES is empty (env not set)")
         send_message(
@@ -1679,7 +1715,17 @@ def handle_ai_message(
         for key, value in session.get("data", {}).items()
         if key in {"fio", "phone", "pdn_consent", "was_here_before", "car_plate", "car_make_model", "vin"}
     }
+    if session.get("ai_fallback"):
+        ai_logger.info("ai_used=%s reason=%s", False, "session_fallback")
+        return False
     ai_result = ai_service.generate_reply(stage, missing_fields, known_fields, text)
+    if ai_result.reason == "unauthorized":
+        session["ai_fallback"] = True
+        update_session_ttl(session, timezone)
+        save_session(storage, chat_id, session)
+        save_storage(storage)
+        ai_logger.warning("ai_fallback activated for session (401)")
+        return False
     ai_logger.info("ai_used=%s reason=%s", ai_result.used, ai_result.reason)
     if not ai_result.used:
         return False
@@ -1734,9 +1780,17 @@ def finalize_ticket(
         "booking_date": ticket.get("booking_date"),
         "booking_time": ticket.get("booking_time"),
     }
-    tldr_result = ai_service.generate_tldr(tldr_payload)
-    ai_logger.info("ai_used=%s reason=%s", tldr_result.used, tldr_result.reason)
-    ticket["tldr"] = tldr_result.reply or build_tldr_fallback(ticket)
+    if session.get("ai_fallback"):
+        ai_logger.info("ai_used=%s reason=%s", False, "session_fallback")
+        tldr_reply = ""
+    else:
+        tldr_result = ai_service.generate_tldr(tldr_payload)
+        ai_logger.info("ai_used=%s reason=%s", tldr_result.used, tldr_result.reason)
+        if tldr_result.reason == "unauthorized":
+            session["ai_fallback"] = True
+            ai_logger.warning("ai_fallback activated for session (401)")
+        tldr_reply = tldr_result.reply
+    ticket["tldr"] = tldr_reply or build_tldr_fallback(ticket)
     storage.setdefault("tickets", []).append(ticket)
     clear_session(storage, chat_id)
     save_storage(storage)
@@ -2927,7 +2981,7 @@ def main() -> None:
         len(storage.get("tickets", [])),
         len(storage.get("sessions", {})),
     )
-    master_username, numeric_only, _ = get_master_contact_username()
+    master_username, numeric_only, _ = get_master_contact_username(logger)
     if numeric_only:
         logger.error("[client_bot] MASTER_USERNAMES invalid (numeric). Fix env.")
     logger.info("[client_bot] master username: %s", mask_username(master_username))
@@ -2954,13 +3008,15 @@ def main() -> None:
         worker.start()
     settings = get_settings(storage)
     ai_service = AIService(logging.getLogger("ai"), settings=settings)
+    ai_config_source = get_ai_config_source()
     logger.info(
-        "client_bot config: ai_enabled=%s, force_fallback=%s, timeout=%s, model=%s, base_url=%s",
+        "client_bot config: ai_enabled=%s, force_fallback=%s, timeout=%s, model=%s, base_url=%s, ai_config_source=%s",
         ai_service.is_enabled(),
         int(ai_service.force_fallback),
         ai_service.timeout,
         ai_service.model,
         ai_service.base_url,
+        ai_config_source,
     )
     logger.info("client_bot starting (polling mode)")
     delete_webhook(token, logger, drop_pending_updates=False)
