@@ -12,12 +12,16 @@ import requests
 
 from services.ai_service import AIService, normalize_date_string
 from services.outgoing_queue import (
+    clear_failed_messages,
     enqueue_document,
     enqueue_message,
+    get_failed_messages,
     get_last_queue_error,
+    get_outgoing_by_id,
     get_queue_stats,
     is_queue_enabled,
     process_outgoing_queue,
+    retry_failed_messages,
     store_outgoing_file,
 )
 from services.telegram_api import (
@@ -602,6 +606,7 @@ def build_admin_main_keyboard() -> dict:
     return {
         "inline_keyboard": [
             [{"text": "🧪 Самодиагностика", "callback_data": "admin:diag"}],
+            [{"text": "📨 Очередь отправки", "callback_data": "admin:queue"}],
             [{"text": "📋 Заявки", "callback_data": "admin:tickets"}],
             [{"text": "📤 Выгрузка заявок", "callback_data": "admin:export"}],
             [{"text": "📊 Статистика", "callback_data": "admin:stats"}],
@@ -641,6 +646,25 @@ def build_admin_ticket_list_keyboard(tickets: list[dict], status: str, page: int
     if nav_row:
         rows.append(nav_row)
     rows.append([{"text": "Назад", "callback_data": "admin:tickets"}])
+    return {"inline_keyboard": rows}
+
+
+def build_admin_queue_keyboard(failed_messages: list[dict]) -> dict:
+    rows: list[list[dict]] = []
+    if failed_messages:
+        for message in failed_messages:
+            message_id = message.get("id")
+            rows.append(
+                [
+                    {
+                        "text": f"Детали #{message_id}",
+                        "callback_data": f"admin:queue:detail:{message_id}",
+                    }
+                ]
+            )
+        rows.append([{"text": "Повторить failed", "callback_data": "admin:queue:retry_failed"}])
+        rows.append([{"text": "Очистить failed (архив)", "callback_data": "admin:queue:clear_failed"}])
+    rows.append([{"text": "Назад", "callback_data": "admin:menu"}])
     return {"inline_keyboard": rows}
 
 
@@ -969,6 +993,31 @@ def build_stats(storage: dict, timezone: str) -> str:
     )
 
 
+def build_queue_overview(storage: dict, timezone: str) -> tuple[str, list[dict]]:
+    queue_stats = get_queue_stats(storage, timezone)
+    failed_messages = get_failed_messages(storage, timezone)
+    lines = [
+        "Очередь отправки:",
+        f"pending: {queue_stats['pending']}",
+        f"failed: {queue_stats['failed']}",
+    ]
+    if failed_messages:
+        lines.append("Последние failed:")
+        for message in failed_messages:
+            lines.append(
+                " | ".join(
+                    [
+                        f"id={message.get('id')}",
+                        f"ticket={message.get('ticket_id') or '—'}",
+                        f"chat={message.get('target_chat_id')}",
+                        f"attempts={message.get('attempts', 0)}",
+                        f"error={message.get('last_error') or '—'}",
+                    ]
+                )
+            )
+    return "\n".join(lines), failed_messages
+
+
 def send_reminders_now(
     token: str,
     storage: dict,
@@ -980,6 +1029,7 @@ def send_reminders_now(
     for ticket in storage.get("tickets", []):
         if ticket.get("status") != "new":
             continue
+        reminder_index = int(ticket.get("reminder_count", 0)) + 1
         text = f"Напоминание: заявка {ticket.get('ticket_id')} всё ещё новая"
         reminder_card = build_reminder_card(ticket)
         notify_masters(
@@ -990,8 +1040,11 @@ def send_reminders_now(
             storage,
             timezone,
             "reminder",
+            ticket_id=ticket.get("ticket_id"),
+            message_key=f"ticket:{ticket.get('ticket_id')}:reminder:{reminder_index}",
         )
         ticket["reminded_at"] = now_iso(timezone)
+        ticket["reminder_count"] = reminder_index
         count += 1
     save_storage(storage)
     return count
@@ -1164,11 +1217,22 @@ def send_attachment_to_master(
     caption: str,
     storage: dict,
     timezone: str,
+    message_key: str | None = None,
+    ticket_id: str | None = None,
 ) -> bool:
     logger = logging.getLogger("client_bot")
     file_path = store_outgoing_file(content, filename)
     if is_queue_enabled():
-        enqueue_document(storage, master_username, "media", file_path, caption, timezone=timezone)
+        enqueue_document(
+            storage,
+            master_username,
+            "media",
+            file_path,
+            caption,
+            message_key=message_key,
+            ticket_id=ticket_id,
+            timezone=timezone,
+        )
         save_storage(storage)
         return True
     sent = send_document(token, master_username, file_path, caption=caption)
@@ -1195,10 +1259,12 @@ def notify_masters(
     kind: str,
     reply_markup: dict | None = None,
     ticket_id: str | None = None,
+    message_key: str | None = None,
 ) -> None:
     sanitized_markup = sanitize_reply_markup(reply_markup)
     if is_queue_enabled():
         for master in master_usernames:
+            queue_key = f"{message_key}:to:{master}" if message_key else None
             enqueue_message(
                 storage,
                 master,
@@ -1206,6 +1272,8 @@ def notify_masters(
                 text,
                 reply_markup=sanitized_markup,
                 disable_web_page_preview=True,
+                message_key=queue_key,
+                ticket_id=ticket_id,
                 timezone=timezone,
             )
             if ticket_id:
@@ -1233,11 +1301,12 @@ def run_tg_send_test(
     queued = 0
     sent = 0
     failed = 0
-    for index in range(5):
-        text = f"TG SEND TEST {index + 1}/5 ({now_iso(timezone)})"
+    for index in range(10):
+        text = f"TG SEND TEST {index + 1}/10 ({now_iso(timezone)})"
         if is_queue_enabled():
             for master in master_usernames:
-                enqueue_message(storage, master, "test", text, timezone=timezone)
+                queue_key = f"test:{chat_id}:{index}:to:{master}"
+                enqueue_message(storage, master, "test", text, message_key=queue_key, timezone=timezone)
                 queued += 1
             total += len(master_usernames)
         else:
@@ -1249,11 +1318,15 @@ def run_tg_send_test(
                     failed += 1
     if is_queue_enabled():
         save_storage(storage)
+    queue_stats = get_queue_stats(storage, timezone)
     logger.info("tg send test result total=%s queued=%s sent=%s failed=%s", total, queued, sent, failed)
     send_message(
         token,
         chat_id,
-        f"Тест отправки: всего={total}, отправлено={sent}, в очереди={queued}, ошибки={failed}",
+        (
+            "Тест отправки: "
+            f"queued={queued}, pending={queue_stats['pending']}, failed={queue_stats['failed']}"
+        ),
     )
 
 
@@ -1809,6 +1882,7 @@ def finalize_ticket(
         "ticket",
         reply_markup=build_master_status_keyboard(ticket),
         ticket_id=ticket["ticket_id"],
+        message_key=f"ticket:{ticket['ticket_id']}:final",
     )
     logger.info("ticket created %s", ticket["ticket_id"])
     logger.info("sent master card %s", ticket["ticket_id"])
@@ -1863,7 +1937,16 @@ def process_master_request(
     save_session(storage, chat_id, session)
     save_storage(storage)
     draft = build_draft_card(session, chat)
-    notify_masters(token, master_usernames, draft, logger, storage, timezone, "draft")
+    notify_masters(
+        token,
+        master_usernames,
+        draft,
+        logger,
+        storage,
+        timezone,
+        "draft",
+        message_key=f"draft:{draft_id}",
+    )
     logger.info("sent draft to masters %s", draft_id)
     send_master_contact_from_env(token, chat_id, logger)
 
@@ -1909,6 +1992,7 @@ def handle_attachment(
             caption,
             storage,
             timezone,
+            message_key=f"draft:{draft_id}:media:{filename}:to:{master}",
         ):
             logger.error("attachment forward failed master=%s draft=%s", master, draft_id)
     logger.info(
@@ -2040,6 +2124,56 @@ def handle_admin_callback(
             ]
         )
         send_message(token, chat_id, text, reply_markup=build_admin_main_keyboard())
+        return True
+    if data == "admin:queue":
+        text, failed_messages = build_queue_overview(storage, timezone)
+        send_message(token, chat_id, text, reply_markup=build_admin_queue_keyboard(failed_messages))
+        return True
+    if data == "admin:queue:retry_failed":
+        count = retry_failed_messages(storage, timezone, logger)
+        text, failed_messages = build_queue_overview(storage, timezone)
+        send_message(
+            token,
+            chat_id,
+            f"Повтор запущен: {count}\n\n{text}",
+            reply_markup=build_admin_queue_keyboard(failed_messages),
+        )
+        return True
+    if data == "admin:queue:clear_failed":
+        count = clear_failed_messages(storage, timezone, logger)
+        text, failed_messages = build_queue_overview(storage, timezone)
+        send_message(
+            token,
+            chat_id,
+            f"Failed архивированы: {count}\n\n{text}",
+            reply_markup=build_admin_queue_keyboard(failed_messages),
+        )
+        return True
+    if data.startswith("admin:queue:detail:"):
+        message_id = data.split(":")[3]
+        if not message_id.isdigit():
+            return True
+        message = get_outgoing_by_id(storage, int(message_id))
+        if not message:
+            send_message(token, chat_id, "Сообщение не найдено.", reply_markup=build_admin_main_keyboard())
+            return True
+        payload = message.get("payload_json") or "{}"
+        if len(payload) > 1000:
+            payload = payload[:1000] + "..."
+        detail_text = "\n".join(
+            [
+                f"ID: {message.get('id')}",
+                f"Status: {message.get('status')}",
+                f"Chat: {message.get('target_chat_id')}",
+                f"Kind: {message.get('kind')}",
+                f"Ticket: {message.get('ticket_id') or '—'}",
+                f"Attempts: {message.get('attempts', 0)}",
+                f"Last error: {message.get('last_error') or '—'}",
+                f"Next retry: {message.get('next_retry_at') or '—'}",
+                f"Payload: {payload}",
+            ]
+        )
+        send_message(token, chat_id, detail_text, reply_markup=build_admin_main_keyboard())
         return True
     if data == "admin:tickets":
         send_message(token, chat_id, "Выберите фильтр:", reply_markup=build_admin_tickets_filter_keyboard())
@@ -2342,6 +2476,7 @@ def check_reminders(
                     continue
             except ValueError:
                 pass
+        reminder_index = int(ticket.get("reminder_count", 0)) + 1
         text = f"Напоминание: заявка {ticket.get('ticket_id')} всё ещё новая"
         reminder_card = build_reminder_card(ticket)
         notify_masters(
@@ -2352,8 +2487,11 @@ def check_reminders(
             storage,
             timezone,
             "reminder",
+            ticket_id=ticket.get("ticket_id"),
+            message_key=f"ticket:{ticket.get('ticket_id')}:reminder:{reminder_index}",
         )
         ticket["reminded_at"] = now_iso(timezone)
+        ticket["reminder_count"] = reminder_index
         save_storage(storage)
         logger.info("reminder sent %s", ticket.get("ticket_id"))
 
