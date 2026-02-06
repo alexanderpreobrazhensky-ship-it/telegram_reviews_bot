@@ -1,2 +1,2 @@
 [deploy]
-startCommand = "/bin/bash run_all.sh"
+startCommand = "bash run_all.sh"
