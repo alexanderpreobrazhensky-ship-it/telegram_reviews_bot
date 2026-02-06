@@ -234,20 +234,42 @@ def answer_callback_query(token: str, callback_query_id: str, text: str | None =
     safe_answer_callback_query(callback_query_id, text=text)
 
 
+def answer_callback_once(
+    token: str,
+    callback: dict,
+    state: dict,
+    text: str | None = None,
+) -> None:
+    if state.get("answered"):
+        return
+    callback_id = callback.get("id")
+    if not callback_id:
+        return
+    answer_callback_query(token, callback_id, text=text)
+    state["answered"] = True
+
+
 def parse_master_usernames() -> list[str]:
+    logger = logging.getLogger("client_bot")
     raw = os.getenv("MASTER_USERNAMES", "")
-    if not raw.strip():
-        raise RuntimeError("MASTER_USERNAMES is required")
-    usernames = []
+    usernames: list[str] = []
+    invalid_items: list[str] = []
     for item in raw.split(","):
         cleaned = item.strip()
         if not cleaned:
             continue
-        if not cleaned.startswith("@"):
-            cleaned = f"@{cleaned}"
-        usernames.append(cleaned)
+        username = cleaned.lstrip("@")
+        if any(char.isdigit() for char in username):
+            invalid_items.append(cleaned)
+            continue
+        if not username:
+            continue
+        usernames.append(f"@{username}")
+    if invalid_items:
+        logger.warning("MASTER_USERNAMES ignored items with digits: %s", ", ".join(invalid_items))
     if not usernames:
-        raise RuntimeError("MASTER_USERNAMES is required")
+        logger.warning("MASTER_USERNAMES missing or invalid, fallback to @Liraavto")
+        return ["@Liraavto"]
     return usernames
 
 
@@ -329,6 +351,22 @@ def get_admin_ids(storage: dict) -> set[int]:
     ids = {int(value) for value in storage.get("admins", []) if str(value).isdigit()}
     ids.update(parse_csv_ints(os.getenv("CLIENT_ADMIN_IDS", "")))
     return ids
+
+
+def get_admin_source(chat_id: int | None, storage: dict) -> str:
+    if chat_id is None:
+        return "none"
+    storage_admins = {int(value) for value in storage.get("admins", []) if str(value).isdigit()}
+    env_admins = set(parse_csv_ints(os.getenv("CLIENT_ADMIN_IDS", "")))
+    in_storage = chat_id in storage_admins
+    in_env = chat_id in env_admins
+    if in_storage and in_env:
+        return "storage+env"
+    if in_storage:
+        return "storage"
+    if in_env:
+        return "env"
+    return "none"
 
 
 def is_admin(chat_id: int | None, storage: dict) -> bool:
@@ -491,7 +529,6 @@ def build_admin_main_keyboard() -> dict:
             [{"text": "⏰ Напоминания", "callback_data": "admin:reminders"}],
             [{"text": "👥 Администраторы", "callback_data": "admin:admins"}],
             [{"text": "📄 Логи", "callback_data": "admin:logs"}],
-            [{"text": "🚫 Блок-лист", "callback_data": "admin:blocklist"}],
             [{"text": "Закрыть", "callback_data": "admin:close"}],
         ]
     }
@@ -1724,7 +1761,6 @@ def handle_attachment(
     data["attachments_count"] = data.get("attachments_count", 0) + 1
     save_session(storage, chat_id, session)
     save_storage(storage)
-    send_message(token, chat_id, "Пока не принимаем вложения. Опишите, пожалуйста, текстом.")
     download = download_file(token, file_id)
     if not download:
         logger.error("attachment download failed draft=%s file_id=%s", draft_id, file_id)
@@ -1757,12 +1793,11 @@ def update_ticket_status(
     storage: dict,
     timezone: str,
     logger: logging.Logger,
+    callback_state: dict,
 ) -> None:
     admin_logger = logging.getLogger("admin")
-    callback_id = callback.get("id")
     if not is_admin(callback.get("from", {}).get("id"), storage):
-        if callback_id:
-            answer_callback_query(token, callback_id, "Недостаточно прав доступа")
+        answer_callback_once(token, callback, callback_state, "Недостаточно прав доступа")
         return
     data = callback.get("data") or ""
     parts = data.split(":")
@@ -1775,8 +1810,7 @@ def update_ticket_status(
         None,
     )
     if not ticket:
-        if callback_id:
-            answer_callback_query(token, callback_id, "Заявка не найдена.")
+        answer_callback_once(token, callback, callback_state, "Заявка не найдена.")
         return
     ticket["status"] = new_status
     ticket["updated_at"] = now_iso(timezone)
@@ -1787,13 +1821,16 @@ def update_ticket_status(
         callback.get("from", {}).get("username"),
         new_status,
     )
-    if callback_id:
-        answer_callback_query(token, callback_id, f"Статус обновлён: {new_status}")
+    answer_callback_once(token, callback, callback_state, f"Статус обновлён: {new_status}")
     send_message(token, callback.get("from", {}).get("id"), f"Статус заявки {ticket_id}: {new_status}")
 
 
-def handle_client_contact_callback(token: str, callback: dict, storage: dict) -> None:
-    callback_id = callback.get("id")
+def handle_client_contact_callback(
+    token: str,
+    callback: dict,
+    storage: dict,
+    callback_state: dict,
+) -> None:
     data = callback.get("data") or ""
     parts = data.split(":")
     if len(parts) != 2:
@@ -1804,13 +1841,11 @@ def handle_client_contact_callback(token: str, callback: dict, storage: dict) ->
         None,
     )
     if not ticket:
-        if callback_id:
-            answer_callback_query(token, callback_id, "Заявка не найдена.")
+        answer_callback_once(token, callback, callback_state, "Заявка не найдена.")
         return
     contact = ticket.get("client_chat_id")
     message = f"Контакт клиента: id {contact}" if contact else "Контакт клиента не найден."
-    if callback_id:
-        answer_callback_query(token, callback_id)
+    answer_callback_once(token, callback, callback_state)
     send_message(token, callback.get("from", {}).get("id"), message)
 
 
@@ -1821,24 +1856,25 @@ def handle_admin_callback(
     timezone: str,
     logger: logging.Logger,
     master_usernames: list[str],
+    callback_state: dict,
 ) -> bool:
     data = callback.get("data") or ""
     if not data.startswith("admin:"):
         return False
-    callback_id = callback.get("id")
     chat_id = callback.get("from", {}).get("id")
     if not is_admin(chat_id, storage):
-        if callback_id:
-            answer_callback_query(token, callback_id, "Недостаточно прав доступа")
+        answer_callback_once(token, callback, callback_state, "Недостаточно прав доступа")
         return True
     ensure_storage_defaults(storage)
     if data == "admin:menu":
         send_message(token, chat_id, "Админ-меню:", reply_markup=build_admin_main_keyboard())
+        answer_callback_once(token, callback, callback_state)
         return True
     if data == "admin:close":
         clear_admin_session(storage, chat_id)
         save_storage(storage)
         send_message(token, chat_id, "Админ-меню закрыто.")
+        answer_callback_once(token, callback, callback_state)
         return True
     if data == "admin:diag":
         settings = get_settings(storage)
@@ -1866,13 +1902,16 @@ def handle_admin_callback(
             ]
         )
         send_message(token, chat_id, text, reply_markup=build_admin_main_keyboard())
+        answer_callback_once(token, callback, callback_state)
         return True
     if data == "admin:tickets":
         send_message(token, chat_id, "Выберите фильтр:", reply_markup=build_admin_tickets_filter_keyboard())
+        answer_callback_once(token, callback, callback_state)
         return True
     if data.startswith("admin:tickets:"):
         parts = data.split(":")
         if len(parts) != 4:
+            answer_callback_once(token, callback, callback_state)
             return True
         status = parts[2]
         page = int(parts[3]) if parts[3].isdigit() else 1
@@ -1888,6 +1927,7 @@ def handle_admin_callback(
         page_items = tickets[start : start + ADMIN_PAGE_SIZE]
         if not page_items:
             send_message(token, chat_id, "Заявок нет.", reply_markup=build_admin_tickets_filter_keyboard())
+            answer_callback_once(token, callback, callback_state)
             return True
         lines = []
         for ticket in page_items:
@@ -1915,6 +1955,7 @@ def handle_admin_callback(
             "\n".join([header] + lines),
             reply_markup=build_admin_ticket_list_keyboard(page_items, status, page, total_pages),
         )
+        answer_callback_once(token, callback, callback_state)
         return True
     if data.startswith("admin:ticket:"):
         ticket_id = data.split(":", 2)[2]
@@ -1924,6 +1965,7 @@ def handle_admin_callback(
         )
         if not ticket:
             send_message(token, chat_id, "Заявка не найдена.")
+            answer_callback_once(token, callback, callback_state)
             return True
         send_message(
             token,
@@ -1931,10 +1973,12 @@ def handle_admin_callback(
             build_admin_ticket_card(ticket, timezone),
             reply_markup=build_admin_ticket_detail_keyboard(ticket),
         )
+        answer_callback_once(token, callback, callback_state)
         return True
     if data.startswith("admin:ticket_status:"):
         parts = data.split(":")
         if len(parts) != 4:
+            answer_callback_once(token, callback, callback_state)
             return True
         ticket_id = parts[2]
         new_status = parts[3]
@@ -1943,14 +1987,12 @@ def handle_admin_callback(
             None,
         )
         if not ticket:
-            if callback_id:
-                answer_callback_query(token, callback_id, "Заявка не найдена.")
+            answer_callback_once(token, callback, callback_state, "Заявка не найдена.")
             return True
         ticket["status"] = new_status
         ticket["updated_at"] = now_iso(timezone)
         save_storage(storage)
-        if callback_id:
-            answer_callback_query(token, callback_id, "Статус обновлён.")
+        answer_callback_once(token, callback, callback_state, "Статус обновлён.")
         send_message(token, chat_id, build_admin_ticket_card(ticket, timezone))
         return True
     if data.startswith("admin:ticket_contact:"):
@@ -1962,11 +2004,13 @@ def handle_admin_callback(
         tg_id = ticket.get("client_chat_id") if ticket else None
         message = f"tg_id клиента: {tg_id}" if tg_id else "tg_id клиента не найден."
         send_message(token, chat_id, message)
+        answer_callback_once(token, callback, callback_state)
         return True
     if data == "admin:export":
         set_admin_session(storage, chat_id, ADMIN_STATE_EXPORT_RANGE, {})
         save_storage(storage)
         send_message(token, chat_id, "Выберите период:", reply_markup=build_admin_export_range_keyboard())
+        answer_callback_once(token, callback, callback_state)
         return True
     if data.startswith("admin:export_range:"):
         range_value = data.split(":", 2)[2]
@@ -1976,6 +2020,7 @@ def handle_admin_callback(
         storage["admin_sessions"][str(chat_id)] = session
         save_storage(storage)
         send_message(token, chat_id, "Выберите статус:", reply_markup=build_admin_export_status_keyboard())
+        answer_callback_once(token, callback, callback_state)
         return True
     if data.startswith("admin:export_status:"):
         status_value = data.split(":", 2)[2]
@@ -1985,6 +2030,7 @@ def handle_admin_callback(
         storage["admin_sessions"][str(chat_id)] = session
         save_storage(storage)
         send_message(token, chat_id, "Выберите формат:", reply_markup=build_admin_export_format_keyboard())
+        answer_callback_once(token, callback, callback_state)
         return True
     if data.startswith("admin:export_format:"):
         format_value = data.split(":", 2)[2]
@@ -2006,23 +2052,28 @@ def handle_admin_callback(
                 send_document(token, chat_id, xlsx_path, caption="Выгрузка XLSX")
         clear_admin_session(storage, chat_id)
         save_storage(storage)
+        answer_callback_once(token, callback, callback_state)
         return True
     if data == "admin:stats":
         send_message(token, chat_id, build_stats(storage, timezone), reply_markup=build_admin_main_keyboard())
+        answer_callback_once(token, callback, callback_state)
         return True
     if data == "admin:modes":
         settings = get_settings(storage)
         send_message(token, chat_id, "Режимы работы:", reply_markup=build_admin_modes_keyboard(settings))
+        answer_callback_once(token, callback, callback_state)
         return True
     if data == "admin:modes:ai":
         storage["settings"]["force_fallback"] = 0
         save_storage(storage)
         send_message(token, chat_id, "AI включён.", reply_markup=build_admin_modes_keyboard(get_settings(storage)))
+        answer_callback_once(token, callback, callback_state)
         return True
     if data == "admin:modes:fallback":
         storage["settings"]["force_fallback"] = 1
         save_storage(storage)
         send_message(token, chat_id, "Принудительный fallback включён.", reply_markup=build_admin_modes_keyboard(get_settings(storage)))
+        answer_callback_once(token, callback, callback_state)
         return True
     if data.startswith("admin:modes:timeout:"):
         timeout_value = data.split(":")[3]
@@ -2030,10 +2081,12 @@ def handle_admin_callback(
             storage["settings"]["ai_timeout_seconds"] = int(timeout_value)
             save_storage(storage)
         send_message(token, chat_id, "Таймаут обновлён.", reply_markup=build_admin_modes_keyboard(get_settings(storage)))
+        answer_callback_once(token, callback, callback_state)
         return True
     if data == "admin:reminders":
         settings = get_settings(storage)
         send_message(token, chat_id, "Напоминания:", reply_markup=build_admin_reminders_keyboard(settings))
+        answer_callback_once(token, callback, callback_state)
         return True
     if data.startswith("admin:reminders:set:"):
         minutes_value = data.split(":")[3]
@@ -2041,24 +2094,29 @@ def handle_admin_callback(
             storage["settings"]["reminder_minutes"] = int(minutes_value)
             save_storage(storage)
         send_message(token, chat_id, "Настройки напоминаний обновлены.", reply_markup=build_admin_reminders_keyboard(get_settings(storage)))
+        answer_callback_once(token, callback, callback_state)
         return True
     if data == "admin:reminders:send_all":
         count = send_reminders_now(token, storage, timezone, master_usernames, logger)
         send_message(token, chat_id, f"Напоминания отправлены: {count}")
+        answer_callback_once(token, callback, callback_state)
         return True
     if data == "admin:admins":
         admin_ids = sorted(get_admin_ids(storage))
         text = "Администраторы:\n" + "\n".join([str(admin_id) for admin_id in admin_ids])
         send_message(token, chat_id, text, reply_markup=build_admin_admins_keyboard())
+        answer_callback_once(token, callback, callback_state)
         return True
     if data == "admin:admins:add":
         set_admin_session(storage, chat_id, ADMIN_STATE_ADD_ADMIN, {})
         save_storage(storage)
         send_message(token, chat_id, "Отправьте tg_id нового администратора (числом).")
+        answer_callback_once(token, callback, callback_state)
         return True
     if data == "admin:admins:remove":
         admin_ids = sorted(get_admin_ids(storage))
         send_message(token, chat_id, "Выберите администратора для удаления:", reply_markup=build_admin_admins_remove_keyboard(admin_ids))
+        answer_callback_once(token, callback, callback_state)
         return True
     if data.startswith("admin:admins:remove_id:"):
         admin_id = data.split(":")[3]
@@ -2066,14 +2124,17 @@ def handle_admin_callback(
         if admin_id.isdigit() and int(admin_id) in admin_ids:
             if len(admin_ids) <= 1:
                 send_message(token, chat_id, "Нельзя удалить последнего администратора.")
+                answer_callback_once(token, callback, callback_state)
                 return True
             admin_ids.remove(int(admin_id))
             storage["admins"] = admin_ids
             save_storage(storage)
             send_message(token, chat_id, "Администратор удалён.")
+        answer_callback_once(token, callback, callback_state)
         return True
     if data == "admin:logs":
         send_message(token, chat_id, "Логи:", reply_markup=build_admin_logs_keyboard())
+        answer_callback_once(token, callback, callback_state)
         return True
     if data.startswith("admin:logs:filter:"):
         mode = data.split(":")[3]
@@ -2083,24 +2144,29 @@ def handle_admin_callback(
         if len(text) > 3500:
             text = text[-3500:]
         send_message(token, chat_id, text or "Нет данных.", reply_markup=build_admin_logs_keyboard())
+        answer_callback_once(token, callback, callback_state)
         return True
     if data == "admin:logs:download":
         log_path = os.path.join(os.path.dirname(__file__), "logs", "client_bot.log")
         send_document(token, chat_id, log_path, caption="client_bot.log")
+        answer_callback_once(token, callback, callback_state)
         return True
     if data == "admin:blocklist":
         blocklist = [int(item) for item in storage.get("blocklist", []) if str(item).isdigit()]
         text = "Блок-лист:\n" + ("\n".join([str(item) for item in blocklist]) if blocklist else "пусто")
         send_message(token, chat_id, text, reply_markup=build_admin_blocklist_keyboard())
+        answer_callback_once(token, callback, callback_state)
         return True
     if data == "admin:blocklist:add":
         set_admin_session(storage, chat_id, ADMIN_STATE_ADD_BLOCK, {})
         save_storage(storage)
         send_message(token, chat_id, "Отправьте tg_id для блок-листа (числом).")
+        answer_callback_once(token, callback, callback_state)
         return True
     if data == "admin:blocklist:remove":
         blocklist = [int(item) for item in storage.get("blocklist", []) if str(item).isdigit()]
         send_message(token, chat_id, "Выберите tg_id для удаления:", reply_markup=build_admin_blocklist_remove_keyboard(blocklist))
+        answer_callback_once(token, callback, callback_state)
         return True
     if data.startswith("admin:blocklist:remove_id:"):
         block_id = data.split(":")[3]
@@ -2111,7 +2177,9 @@ def handle_admin_callback(
                 storage["blocklist"] = block_ids
                 save_storage(storage)
                 send_message(token, chat_id, "Удалено из блок-листа.")
+        answer_callback_once(token, callback, callback_state)
         return True
+    answer_callback_once(token, callback, callback_state)
     return True
 
 
@@ -2125,16 +2193,21 @@ def process_callback(
     callback = update.get("callback_query")
     if not callback:
         return False
+    callback_state = {"answered": False}
     data = callback.get("data") or ""
     master_usernames = parse_master_usernames()
-    if handle_admin_callback(token, callback, storage, timezone, logger, master_usernames):
+    if handle_admin_callback(token, callback, storage, timezone, logger, master_usernames, callback_state):
+        answer_callback_once(token, callback, callback_state)
         return True
     if data.startswith("ticket:"):
-        update_ticket_status(token, callback, storage, timezone, logger)
+        update_ticket_status(token, callback, storage, timezone, logger, callback_state)
+        answer_callback_once(token, callback, callback_state)
         return True
     if data.startswith("client:"):
-        handle_client_contact_callback(token, callback, storage)
+        handle_client_contact_callback(token, callback, storage, callback_state)
+        answer_callback_once(token, callback, callback_state)
         return True
+    answer_callback_once(token, callback, callback_state)
     return False
 
 
@@ -2185,38 +2258,70 @@ def check_reminders(
 
 
 def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
-    message = update.get("message") or {}
+    message = update.get("message")
     callback = update.get("callback_query")
-    chat = message.get("chat") or {}
-    text = (message.get("text") or "").strip()
-    chat_id = chat.get("id")
+    update_type = "other"
+    chat: dict = {}
+    chat_id = None
+    text: str | None = None
+    message_id = None
+    if message:
+        update_type = "message"
+        chat = message.get("chat") or {}
+        chat_id = chat.get("id")
+        text = (message.get("text") or "").strip()
+        message_id = message.get("message_id")
+    elif callback:
+        update_type = "callback_query"
+        callback_message = callback.get("message") or {}
+        chat = callback_message.get("chat") or {}
+        chat_id = chat.get("id")
+        message_id = callback_message.get("message_id")
 
     logger.info(
-        "update_id=%s chat_id=%s message_id=%s text=%s",
+        "update_type=%s update_id=%s chat_id=%s message_id=%s text=%s",
+        update_type,
         update.get("update_id"),
         chat_id,
-        message.get("message_id"),
-        text,
+        message_id,
+        text or "",
     )
 
     timezone = os.getenv("TIMEZONE", "Europe/Moscow")
     storage = load_storage()
     ensure_storage_defaults(storage)
-    session = ensure_session(storage, chat_id, timezone)
-    master_usernames = parse_master_usernames()
-    settings = get_settings(storage)
-    ai_service = AIService(logging.getLogger("ai"), settings=settings)
-
-    if process_callback(token, update, storage, timezone, logger):
-        return
 
     if callback:
+        process_callback(token, update, storage, timezone, logger)
+        return
+
+    if not message:
         return
 
     if not chat_id:
         return
 
+    session = ensure_session(storage, chat_id, timezone)
+    master_usernames = parse_master_usernames()
+    settings = get_settings(storage)
+    ai_service = AIService(logging.getLogger("ai"), settings=settings)
+
     update_session_client_context(session, chat)
+
+    text = text or ""
+
+    if text and text.startswith("/admin"):
+        admin_ids = get_admin_ids(storage)
+        is_admin_user = chat_id in admin_ids
+        admin_source = get_admin_source(chat_id, storage)
+        logger.info(
+            "admin_command user_id=%s username=%s is_admin=%s admin_source=%s admins_count=%s",
+            chat_id,
+            chat.get("username"),
+            int(is_admin_user),
+            admin_source,
+            len(admin_ids),
+        )
 
     if text.startswith("/admin"):
         if not is_admin(chat_id, storage):
@@ -2230,6 +2335,22 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
             send_message(token, chat_id, "Недостаточно прав доступа")
             return
         run_tg_send_test(token, chat_id, storage, timezone, master_usernames, logger)
+        return
+
+    if handle_attachment(
+        token,
+        chat_id,
+        chat,
+        message,
+        session,
+        storage,
+        timezone,
+        master_usernames,
+        logger,
+    ):
+        return
+
+    if not text:
         return
 
     if is_admin(chat_id, storage):
@@ -2255,23 +2376,6 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
             save_storage(storage)
             send_message(token, chat_id, "Добавлено в блок-лист.")
             return
-
-    if handle_attachment(
-        token,
-        chat_id,
-        chat,
-        message,
-        session,
-        storage,
-        timezone,
-        master_usernames,
-        logger,
-    ):
-        return
-
-    if not message.get("text") and message.get("message_id"):
-        send_message(token, chat_id, "Пока не принимаем вложения. Опишите, пожалуйста, текстом.")
-        return
 
     if text.startswith("/master"):
         process_master_request(
