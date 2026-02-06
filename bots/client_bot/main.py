@@ -237,18 +237,39 @@ def answer_callback_query(token: str, callback_query_id: str, text: str | None =
 def parse_master_usernames() -> list[str]:
     raw = os.getenv("MASTER_USERNAMES", "")
     if not raw.strip():
-        raise RuntimeError("MASTER_USERNAMES is required")
+        return []
     usernames = []
     for item in raw.split(","):
         cleaned = item.strip()
         if not cleaned:
             continue
-        if not cleaned.startswith("@"):
-            cleaned = f"@{cleaned}"
-        usernames.append(cleaned)
-    if not usernames:
-        raise RuntimeError("MASTER_USERNAMES is required")
+        cleaned = cleaned.lstrip("@").strip()
+        if not cleaned:
+            continue
+        if cleaned.isdigit():
+            continue
+        usernames.append(f"@{cleaned}")
     return usernames
+
+
+def get_master_contact_username() -> tuple[str | None, bool, bool]:
+    raw = os.getenv("MASTER_USERNAMES", "")
+    if not raw.strip():
+        return None, False, True
+    cleaned_items = []
+    for item in raw.split(","):
+        cleaned = item.strip()
+        if not cleaned:
+            continue
+        cleaned = cleaned.lstrip("@").strip()
+        if cleaned:
+            cleaned_items.append(cleaned)
+    if not cleaned_items:
+        return None, False, True
+    non_numeric = [item for item in cleaned_items if not item.isdigit()]
+    if not non_numeric:
+        return None, True, False
+    return f"@{non_numeric[0]}", False, False
 
 
 def parse_csv_ints(raw: str | None) -> list[int]:
@@ -264,6 +285,15 @@ def parse_csv_ints(raw: str | None) -> list[int]:
         except ValueError:
             continue
     return values
+
+
+def parse_single_int(raw: str | None) -> list[int]:
+    if not raw:
+        return []
+    cleaned = raw.strip()
+    if cleaned.isdigit():
+        return [int(cleaned)]
+    return []
 
 
 def get_env_value(primary: str, fallback: str, default: str = "") -> str:
@@ -294,11 +324,6 @@ def ensure_storage_defaults(storage: dict) -> None:
     storage.setdefault("settings", {})
     storage.setdefault("blocklist", [])
     storage.setdefault("outgoing_messages", [])
-    env_admins = parse_csv_ints(os.getenv("CLIENT_ADMIN_IDS", ""))
-    if env_admins:
-        merged = {int(value) for value in storage.get("admins", []) if str(value).isdigit()}
-        merged.update(env_admins)
-        storage["admins"] = sorted(merged)
     settings = storage.setdefault("settings", {})
     settings.setdefault(
         "force_fallback",
@@ -326,9 +351,66 @@ def get_settings(storage: dict) -> dict:
 
 def get_admin_ids(storage: dict) -> set[int]:
     ensure_storage_defaults(storage)
-    ids = {int(value) for value in storage.get("admins", []) if str(value).isdigit()}
-    ids.update(parse_csv_ints(os.getenv("CLIENT_ADMIN_IDS", "")))
+    ids, _ = get_admin_ids_with_source()
     return ids
+
+
+def get_admin_ids_with_source() -> tuple[set[int], str]:
+    env_priority = (
+        ("CLIENT_ADMIN_IDS", parse_csv_ints),
+        ("ADMIN_IDS", parse_csv_ints),
+        ("SUPERADMIN_ID", parse_single_int),
+        ("SUPERADMIN_IDS", parse_csv_ints),
+    )
+    for env_name, parser in env_priority:
+        raw_value = os.getenv(env_name)
+        if raw_value is None:
+            continue
+        parsed = parser(raw_value)
+        return set(parsed), env_name
+    return set(), "none"
+
+
+def mask_username(username: str | None) -> str:
+    if not username:
+        return "@—"
+    cleaned = username.lstrip("@")
+    if not cleaned:
+        return "@—"
+    if len(cleaned) == 1:
+        return f"@{cleaned}***"
+    return f"@{cleaned[0]}***{cleaned[-1]}"
+
+
+def log_admin_denied(
+    logger: logging.Logger,
+    user_id: int | None,
+    username: str | None,
+    admins_source: str,
+    admins_count: int,
+) -> None:
+    logger.warning(
+        "[client_bot] admin check denied: user_id=%s, username=%s, admins_source=%s, admins_count=%s",
+        user_id,
+        username or "—",
+        admins_source,
+        admins_count,
+    )
+
+
+def check_admin_access(
+    chat_id: int | None,
+    username: str | None,
+    logger: logging.Logger,
+) -> bool:
+    admin_ids, admins_source = get_admin_ids_with_source()
+    admins_count = len(admin_ids)
+    if not admin_ids and admins_source == "none":
+        logger.warning("[client_bot] admins list is empty (env not set)")
+    if chat_id is None or chat_id not in admin_ids:
+        log_admin_denied(logger, chat_id, username, admins_source, admins_count)
+        return False
+    return True
 
 
 def is_admin(chat_id: int | None, storage: dict) -> bool:
@@ -901,6 +983,39 @@ def send_master_contact(token: str, chat_id: int, master_username: str) -> None:
         f"Мастер: {master_username}. Нажмите кнопку, чтобы написать мастеру.",
         reply_markup=build_master_keyboard(master_username),
     )
+
+
+def send_master_contact_from_env(
+    token: str,
+    chat_id: int,
+    logger: logging.Logger,
+) -> None:
+    master_username, numeric_only, empty = get_master_contact_username()
+    if empty:
+        logger.warning("[client_bot] MASTER_USERNAMES is empty (env not set)")
+        send_message(
+            token,
+            chat_id,
+            "Контакт мастера временно не настроен. Пожалуйста, позвоните в автоцентр.",
+        )
+        return
+    if numeric_only:
+        logger.error("[client_bot] MASTER_USERNAMES invalid (numeric). Fix env.")
+        send_message(
+            token,
+            chat_id,
+            "Связь с мастером временно недоступна. Пожалуйста, позвоните в автоцентр.",
+        )
+        return
+    if not master_username:
+        logger.warning("[client_bot] MASTER_USERNAMES empty. Fix env.")
+        send_message(
+            token,
+            chat_id,
+            "Контакт мастера временно не настроен. Пожалуйста, позвоните в автоцентр.",
+        )
+        return
+    send_master_contact(token, chat_id, master_username)
 
 
 def get_or_create_draft_id(session: dict, chat_id: int, timezone: str) -> str:
@@ -1696,7 +1811,7 @@ def process_master_request(
     draft = build_draft_card(session, chat)
     notify_masters(token, master_usernames, draft, logger, storage, timezone, "draft")
     logger.info("sent draft to masters %s", draft_id)
-    send_master_contact(token, chat_id, master_usernames[0])
+    send_master_contact_from_env(token, chat_id, logger)
 
 
 def handle_attachment(
@@ -1760,7 +1875,12 @@ def update_ticket_status(
 ) -> None:
     admin_logger = logging.getLogger("admin")
     callback_id = callback.get("id")
-    if not is_admin(callback.get("from", {}).get("id"), storage):
+    from_user = callback.get("from", {})
+    if not check_admin_access(
+        from_user.get("id"),
+        from_user.get("username"),
+        logger,
+    ):
         if callback_id:
             answer_callback_query(token, callback_id, "Недостаточно прав доступа")
         return
@@ -1827,7 +1947,7 @@ def handle_admin_callback(
         return False
     callback_id = callback.get("id")
     chat_id = callback.get("from", {}).get("id")
-    if not is_admin(chat_id, storage):
+    if not check_admin_access(chat_id, callback.get("from", {}).get("username"), logger):
         if callback_id:
             answer_callback_query(token, callback_id, "Недостаточно прав доступа")
         return True
@@ -2218,15 +2338,25 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
 
     update_session_client_context(session, chat)
 
+    if text.startswith("/whoami"):
+        username = chat.get("username")
+        username_display = f"@{username}" if username else "—"
+        send_message(
+            token,
+            chat_id,
+            f"Ваш user_id: {chat_id}\nUsername: {username_display}",
+        )
+        return
+
     if text.startswith("/admin"):
-        if not is_admin(chat_id, storage):
+        if not check_admin_access(chat_id, chat.get("username"), logger):
             send_message(token, chat_id, "Недостаточно прав доступа")
             return
         send_message(token, chat_id, "Админ-меню:", reply_markup=build_admin_main_keyboard())
         return
 
     if text.startswith("/tgsendtest"):
-        if not is_admin(chat_id, storage):
+        if not check_admin_access(chat_id, chat.get("username"), logger):
             send_message(token, chat_id, "Недостаточно прав доступа")
             return
         run_tg_send_test(token, chat_id, storage, timezone, master_usernames, logger)
@@ -2797,6 +2927,18 @@ def main() -> None:
         len(storage.get("tickets", [])),
         len(storage.get("sessions", {})),
     )
+    master_username, numeric_only, _ = get_master_contact_username()
+    if numeric_only:
+        logger.error("[client_bot] MASTER_USERNAMES invalid (numeric). Fix env.")
+    logger.info("[client_bot] master username: %s", mask_username(master_username))
+    admin_ids, admins_source = get_admin_ids_with_source()
+    logger.info(
+        "[client_bot] admins source=%s admins_count=%s",
+        admins_source,
+        len(admin_ids),
+    )
+    if not admin_ids and admins_source == "none":
+        logger.warning("[client_bot] admins list is empty (env not set)")
     queue_stats = get_queue_stats(storage, timezone)
     logger.info(
         "outgoing queue: enabled=%s pending=%s",
