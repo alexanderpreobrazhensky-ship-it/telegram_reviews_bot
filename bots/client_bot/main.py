@@ -1771,6 +1771,15 @@ def main() -> None:
 
     timezone = os.getenv("TIMEZONE", "Europe/Moscow")
     logger = build_logger(timezone)
+    ai_service = AIService(logger)
+    logger.info(
+        "client_bot config: ai_enabled=%s, force_fallback=%s, timeout=%s, model=%s, base_url=%s",
+        ai_service.is_enabled(),
+        int(ai_service.force_fallback),
+        ai_service.timeout,
+        ai_service.model,
+        ai_service.base_url,
+    )
     logger.info("client_bot starting (polling mode)")
     poll_updates(token, logger)
 
