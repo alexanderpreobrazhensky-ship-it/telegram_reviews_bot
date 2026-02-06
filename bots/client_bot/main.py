@@ -120,13 +120,79 @@ def build_last_visit_category_keyboard() -> dict:
     }
 
 
-def send_message(token: str, chat_id: int, text: str, reply_markup: dict | None = None) -> None:
+def sanitize_reply_markup(reply_markup: dict | None) -> dict | None:
+    if not reply_markup or not isinstance(reply_markup, dict):
+        return None
+    if "inline_keyboard" in reply_markup:
+        keyboard = reply_markup.get("inline_keyboard")
+        if not isinstance(keyboard, list) or not keyboard:
+            return None
+        sanitized_rows: list[list[dict]] = []
+        for row in keyboard:
+            if not isinstance(row, list) or not row:
+                return None
+            sanitized_buttons: list[dict] = []
+            for button in row:
+                if not isinstance(button, dict):
+                    return None
+                text = button.get("text")
+                if not isinstance(text, str) or not text:
+                    return None
+                if "url" in button:
+                    url = button.get("url")
+                    if not isinstance(url, str) or not url:
+                        return None
+                    sanitized_buttons.append({"text": text, "url": url})
+                elif "callback_data" in button:
+                    callback_data = button.get("callback_data")
+                    if not isinstance(callback_data, str) or not callback_data:
+                        return None
+                    if len(callback_data) >= 64:
+                        return None
+                    sanitized_buttons.append({"text": text, "callback_data": callback_data})
+                else:
+                    return None
+            sanitized_rows.append(sanitized_buttons)
+        return {"inline_keyboard": sanitized_rows}
+    if "keyboard" in reply_markup:
+        keyboard = reply_markup.get("keyboard")
+        if not isinstance(keyboard, list) or not keyboard:
+            return None
+        for row in keyboard:
+            if not isinstance(row, list) or not row:
+                return None
+            for button in row:
+                if not isinstance(button, dict):
+                    return None
+                text = button.get("text")
+                if not isinstance(text, str) or not text:
+                    return None
+        return reply_markup
+    return None
+
+
+def send_message(token: str, chat_id: int, text: str, reply_markup: dict | None = None) -> bool:
+    logger = logging.getLogger("client_bot")
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     payload: dict = {"chat_id": chat_id, "text": text}
-    if reply_markup:
-        payload["reply_markup"] = reply_markup
-    response = requests.post(url, json=payload, timeout=10)
-    response.raise_for_status()
+    sanitized_markup = sanitize_reply_markup(reply_markup)
+    if sanitized_markup:
+        payload["reply_markup"] = sanitized_markup
+    try:
+        response = requests.post(url, json=payload, timeout=10)
+        if response.status_code in {400, 403}:
+            logger.error(
+                "telegram sendMessage rejected chat_id=%s status_code=%s response=%s",
+                chat_id,
+                response.status_code,
+                response.text,
+            )
+            return False
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        logger.error("telegram sendMessage error chat_id=%s error=%s", chat_id, exc)
+        return False
+    return True
 
 
 def answer_callback_query(token: str, callback_query_id: str, text: str | None = None) -> None:
@@ -198,27 +264,19 @@ def stage_description(stage: str | None) -> str:
 
 
 def build_master_status_keyboard(ticket: dict) -> dict:
-    ticket_id = ticket["ticket_id"]
+    ticket_id = str(ticket.get("ticket_id", ""))
+    keyboard = [
+        [
+            {"text": "В работу", "callback_data": f"ticket:{ticket_id}:in_work"},
+            {"text": "Закрыть", "callback_data": f"ticket:{ticket_id}:closed"},
+        ]
+    ]
     username = ticket.get("client_username")
     if username:
-        contact_button = {
-            "text": "Связаться с клиентом",
-            "url": f"https://t.me/{username.lstrip('@')}",
-        }
-    else:
-        contact_button = {
-            "text": "Связаться с клиентом",
-            "callback_data": f"client:{ticket_id}",
-        }
-    return {
-        "inline_keyboard": [
-            [
-                {"text": "В работу", "callback_data": f"status:{ticket_id}:in_work"},
-                {"text": "Закрыть", "callback_data": f"status:{ticket_id}:closed"},
-            ],
-            [contact_button],
-        ]
-    }
+        keyboard.append(
+            [{"text": "Связаться с клиентом", "url": f"https://t.me/{username.lstrip('@')}"}]
+        )
+    return {"inline_keyboard": keyboard}
 
 
 def build_master_card(ticket: dict, timezone: str) -> str:
@@ -409,10 +467,16 @@ def notify_masters(
     token: str,
     master_usernames: list[str],
     text: str,
+    logger: logging.Logger,
     reply_markup: dict | None = None,
+    ticket_id: str | None = None,
 ) -> None:
     for master in master_usernames:
-        send_message(token, master, text, reply_markup=reply_markup)
+        if ticket_id:
+            logger.info("Sending ticket %s to master %s", ticket_id, master)
+        success = send_message(token, master, text, reply_markup=reply_markup)
+        if not success:
+            logger.error("failed to send message to master %s ticket_id=%s", master, ticket_id)
 
 
 def normalize_text(text: str) -> str:
@@ -638,7 +702,9 @@ def finalize_ticket(
         token,
         master_usernames,
         build_master_card(ticket, timezone),
+        logger,
         reply_markup=build_master_status_keyboard(ticket),
+        ticket_id=ticket["ticket_id"],
     )
     logger.info("ticket created %s", ticket["ticket_id"])
     logger.info("sent master card %s", ticket["ticket_id"])
@@ -693,7 +759,7 @@ def process_master_request(
     save_session(storage, chat_id, session)
     save_storage(storage)
     draft = build_draft_card(session, chat)
-    notify_masters(token, master_usernames, draft)
+    notify_masters(token, master_usernames, draft, logger)
     logger.info("sent draft to masters %s", draft_id)
     send_master_contact(token, chat_id, master_usernames[0])
 
@@ -806,7 +872,7 @@ def process_callback(
     if not callback:
         return False
     data = callback.get("data") or ""
-    if data.startswith("status:"):
+    if data.startswith("ticket:"):
         update_ticket_status(token, callback, storage, timezone, logger)
         return True
     if data.startswith("client:"):
@@ -846,7 +912,7 @@ def check_reminders(
                 pass
         text = f"Напоминание: заявка {ticket.get('ticket_id')} всё ещё новая"
         reminder_card = build_reminder_card(ticket)
-        notify_masters(token, master_usernames, f"{text}\n{reminder_card}".strip())
+        notify_masters(token, master_usernames, f"{text}\n{reminder_card}".strip(), logger)
         ticket["reminded_at"] = now_iso(timezone)
         save_storage(storage)
         logger.info("reminder sent %s", ticket.get("ticket_id"))
