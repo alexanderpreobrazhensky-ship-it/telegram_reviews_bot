@@ -37,6 +37,9 @@ from storage import (
     ttl_iso,
 )
 
+CLIENT_BOT_BUILD = "build-2026-02-06-a"
+print(f"[client_bot] build={CLIENT_BOT_BUILD}")
+
 VERSION = "0.4.0"
 POLLING_TIMEOUT = 30
 POLLING_SLEEP_SECONDS = 1
