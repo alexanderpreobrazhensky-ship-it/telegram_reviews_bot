@@ -50,12 +50,31 @@ class AIResult:
 class AIService:
     def __init__(self, logger: logging.Logger) -> None:
         self.logger = logger
-        self.api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
-        self.base_url = os.getenv("DEEPSEEK_BASE_URL", "").strip()
-        self.model = os.getenv("DEEPSEEK_MODEL", "").strip()
-        self.timeout = int(os.getenv("AI_TIMEOUT_SECONDS", "10"))
-        self.force_fallback = os.getenv("FORCE_FALLBACK", "0").strip() == "1"
+        self.api_key = self._get_env_value("CLIENT_DEEPSEEK_API_KEY", "DEEPSEEK_API_KEY")
+        self.base_url = self._get_env_value("CLIENT_DEEPSEEK_BASE_URL", "DEEPSEEK_BASE_URL")
+        self.model = self._get_env_value("CLIENT_DEEPSEEK_MODEL", "DEEPSEEK_MODEL")
+        self.timeout = self._get_timeout_seconds()
+        self.force_fallback = self._get_env_value("CLIENT_FORCE_FALLBACK", "FORCE_FALLBACK") == "1"
         self._client: Optional[OpenAI] = None
+
+    @staticmethod
+    def _get_env_value(primary: str, fallback: str) -> str:
+        primary_value = os.getenv(primary)
+        if primary_value is not None:
+            return primary_value.strip()
+        fallback_value = os.getenv(fallback)
+        if fallback_value is None:
+            return ""
+        return fallback_value.strip()
+
+    def _get_timeout_seconds(self) -> int:
+        raw_value = self._get_env_value("CLIENT_AI_TIMEOUT_SECONDS", "AI_TIMEOUT_SECONDS")
+        if not raw_value:
+            return 10
+        try:
+            return int(raw_value)
+        except ValueError:
+            return 10
 
     def is_enabled(self) -> bool:
         if self.force_fallback:
