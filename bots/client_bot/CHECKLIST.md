@@ -1,25 +1,40 @@
-## Checklist: деплой client_bot в одном Railway service
+# Checklist: эксплуатация client_bot
 
-### Подготовка переменных окружения
+## Перед деплоем
 
-1. Установить `CLIENT_TELEGRAM_BOT_TOKEN` = токен **клиентского** бота (BotFather).
-2. Убедиться, что `TELEGRAM_BOT_TOKEN` остаётся токеном `reviews_bot` (не использовать в client_bot).
-3. Задать `MASTER_USERNAMES` (обязательно) и при необходимости `TIMEZONE`, `REMINDER_MINUTES`.
-4. При использовании AI задать `CLIENT_*` переменные (см. README).
+- Получить токен клиентского бота в BotFather (`CLIENT_TELEGRAM_BOT_TOKEN`).
+- Собрать `MASTER_USERNAMES` (каждый мастер должен написать боту первым).
+- Собрать `CLIENT_ADMIN_IDS` (tg_id администраторов).
+- Проверить `TIMEZONE` (по умолчанию Europe/Moscow).
 
-### Деплой
+## После деплоя — smoke test (10 пунктов)
 
-1. Выполнить redeploy Railway service.
-2. В Deploy Logs проверить:
-   - строка `client_bot token source: CLIENT_TELEGRAM_BOT_TOKEN|TELEGRAM_BOT_TOKEN_CLIENT`;
-   - строка `client_bot deleteWebhook ok` (или warning о том, что webhook уже удалён);
-   - отсутствие `409 Conflict` в polling.
+1. `/start` — бот отвечает и показывает меню.
+2. Сценарий **«Запись»**: выбрать дату «завтра» — бот принимает, «сегодня» — запрещает.
+3. Сценарий **«Ремонт»**: бот предлагает записаться после описания проблемы.
+4. Нажать «Связаться с мастером» в середине диалога — мастер получает черновик.
+5. Отправить фото клиентом — клиенту отказ, мастеру уходит файл.
+6. В админке сменить статус заявки (новая → в работе → закрыта).
+7. Выгрузить заявки в CSV и XLSX.
+8. Проверить AI: `CLIENT_FORCE_FALLBACK=1` → только fallback; затем вернуть `0`.
+9. Установить `CLIENT_REMINDER_MINUTES=1` и убедиться, что пришло напоминание по новой заявке.
+10. Проверить логи: видны префиксы `[client_bot]`, `[polling]`, `[admin]`, `[ai]`, `[storage]`.
 
-### Проверка работоспособности
+## Диагностика
 
-1. В Telegram отправить `/start` в **client_bot** — бот должен ответить.
-2. Убедиться, что `reviews_bot` продолжает работать как раньше (webhook не сломан).
+- Логи: `bots/client_bot/logs/client_bot.log`.
+- Ищите ошибки по префиксам `[polling]`, `[ai]`, `[admin]`, `[storage]`.
+- `409 Conflict`: webhook включён на токене — бот сам делает `deleteWebhook`.
+- `400 Bad Request (reply_markup)`: смотрите строку ошибки в логах.
 
-### Где смотреть логи
+## Быстрые переключатели
 
-- Railway → Deploy Logs (service с `client_bot`).
+- `CLIENT_FORCE_FALLBACK=1` — принудительный fallback.
+- `CLIENT_REMINDER_MINUTES=1` — быстрый тест напоминаний.
+- `CLIENT_AI_TIMEOUT_SECONDS=10` — быстрый тест таймаута.
+
+## Проверка выгрузки и админ-меню
+
+- Команда `/admin` → открыть меню.
+- Раздел «Выгрузка заявок» → выбрать диапазон → статус → формат CSV/XLSX.
+- Проверить, что файл пришёл администратору и открывается.

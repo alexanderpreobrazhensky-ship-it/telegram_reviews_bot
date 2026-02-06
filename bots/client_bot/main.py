@@ -58,11 +58,8 @@ LAST_VISIT_CATEGORIES = {"Гарантия", "Повтор проблемы", "�
 
 
 def build_logger(timezone: str) -> logging.Logger:
-    logger = logging.getLogger("client_bot")
-    logger.setLevel(logging.INFO)
-
     log_path = os.path.join(os.path.dirname(__file__), "logs", "client_bot.log")
-    formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+    formatter = logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s")
     tz = ZoneInfo(timezone)
 
     def format_time(record, datefmt=None):
@@ -73,16 +70,21 @@ def build_logger(timezone: str) -> logging.Logger:
 
     formatter.formatTime = format_time
 
-    if not logger.handlers:
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+    if not root_logger.handlers:
         file_handler = logging.FileHandler(log_path)
         file_handler.setFormatter(formatter)
-        logger.addHandler(file_handler)
+        root_logger.addHandler(file_handler)
 
         stream_handler = logging.StreamHandler()
         stream_handler.setFormatter(formatter)
-        logger.addHandler(stream_handler)
+        root_logger.addHandler(stream_handler)
 
-    return logger
+    for name in ("client_bot", "ai", "polling", "admin", "storage"):
+        logging.getLogger(name).setLevel(logging.INFO)
+
+    return logging.getLogger("client_bot")
 
 
 def build_main_menu_keyboard() -> dict:
@@ -236,13 +238,17 @@ def send_document(token: str, chat_id: int, file_path: str, caption: str | None 
 
 
 def answer_callback_query(token: str, callback_query_id: str, text: str | None = None) -> None:
+    logger = logging.getLogger("client_bot")
     url = f"https://api.telegram.org/bot{token}/answerCallbackQuery"
     payload: dict = {"callback_query_id": callback_query_id}
     if text:
         payload["text"] = text
         payload["show_alert"] = False
-    response = requests.post(url, json=payload, timeout=10)
-    response.raise_for_status()
+    try:
+        response = requests.post(url, json=payload, timeout=10)
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        logger.warning("telegram answerCallbackQuery error callback_id=%s error=%s", callback_query_id, exc)
 
 
 def parse_master_usernames() -> list[str]:
@@ -979,28 +985,49 @@ def extract_attachment(message: dict) -> tuple[str, str, int | None] | None:
     return None
 
 
-def download_file(token: str, file_id: str) -> tuple[bytes, str]:
+def download_file(token: str, file_id: str) -> tuple[bytes, str] | None:
+    logger = logging.getLogger("client_bot")
     url = f"https://api.telegram.org/bot{token}/getFile"
-    response = requests.get(url, params={"file_id": file_id}, timeout=10)
-    response.raise_for_status()
+    try:
+        response = requests.get(url, params={"file_id": file_id}, timeout=10)
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        logger.error("telegram getFile error file_id=%s error=%s", file_id, exc)
+        return None
     file_path = response.json().get("result", {}).get("file_path")
     if not file_path:
-        raise RuntimeError("Failed to get file path from Telegram")
+        logger.error("telegram getFile missing file_path file_id=%s", file_id)
+        return None
     download_url = f"https://api.telegram.org/file/bot{token}/{file_path}"
-    file_response = requests.get(download_url, timeout=20)
-    file_response.raise_for_status()
+    try:
+        file_response = requests.get(download_url, timeout=20)
+        file_response.raise_for_status()
+    except requests.RequestException as exc:
+        logger.error("telegram file download error file_id=%s error=%s", file_id, exc)
+        return None
     filename = os.path.basename(file_path)
     return file_response.content, filename
 
 
 def send_attachment_to_master(
     token: str, master_username: str, filename: str, content: bytes, caption: str
-) -> None:
+) -> bool:
+    logger = logging.getLogger("client_bot")
     url = f"https://api.telegram.org/bot{token}/sendDocument"
     files = {"document": (filename, content)}
     data = {"chat_id": master_username, "caption": caption}
-    response = requests.post(url, data=data, files=files, timeout=20)
-    response.raise_for_status()
+    try:
+        response = requests.post(url, data=data, files=files, timeout=20)
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        logger.error(
+            "telegram sendDocument error master=%s filename=%s error=%s",
+            master_username,
+            filename,
+            exc,
+        )
+        return False
+    return True
 
 
 def notify_masters(
@@ -1476,11 +1503,12 @@ def handle_ai_message(
     text: str,
     master_usernames: list[str],
 ) -> bool:
+    ai_logger = logging.getLogger("ai")
     stage = session.get("stage")
     if not stage:
         return False
     if stage in AI_ASK_BLOCKLIST:
-        logger.info("ai_used=%s reason=%s", False, "blocked_stage")
+        ai_logger.info("ai_used=%s reason=%s", False, "blocked_stage")
         return False
     missing_fields = list_missing_fields(session)
     known_fields = {
@@ -1489,7 +1517,7 @@ def handle_ai_message(
         if key in {"fio", "phone", "pdn_consent", "was_here_before", "car_plate", "car_make_model", "vin"}
     }
     ai_result = ai_service.generate_reply(stage, missing_fields, known_fields, text)
-    logger.info("ai_used=%s reason=%s", ai_result.used, ai_result.reason)
+    ai_logger.info("ai_used=%s reason=%s", ai_result.used, ai_result.reason)
     if not ai_result.used:
         return False
     data = session.setdefault("data", {})
@@ -1533,6 +1561,7 @@ def finalize_ticket(
     master_usernames: list[str],
     ai_service: AIService,
 ) -> None:
+    ai_logger = logging.getLogger("ai")
     ticket = build_ticket_from_session(session, timezone, storage)
     tldr_payload = {
         "scenario": format_scenario(ticket.get("scenario_type")),
@@ -1546,7 +1575,7 @@ def finalize_ticket(
         "booking_time": ticket.get("booking_time"),
     }
     tldr_result = ai_service.generate_tldr(tldr_payload)
-    logger.info("ai_used=%s reason=%s", tldr_result.used, tldr_result.reason)
+    ai_logger.info("ai_used=%s reason=%s", tldr_result.used, tldr_result.reason)
     ticket["tldr"] = tldr_result.reply or build_tldr_fallback(ticket)
     storage.setdefault("tickets", []).append(ticket)
     clear_session(storage, chat_id)
@@ -1648,10 +1677,15 @@ def handle_attachment(
     save_session(storage, chat_id, session)
     save_storage(storage)
     send_message(token, chat_id, "Пока не принимаем вложения. Опишите, пожалуйста, текстом.")
-    content, filename = download_file(token, file_id)
+    download = download_file(token, file_id)
+    if not download:
+        logger.error("attachment download failed draft=%s file_id=%s", draft_id, file_id)
+        return True
+    content, filename = download
     caption = f"Вложение к заявке {draft_id} от {data.get('fio') or data.get('client_username') or chat_id}"
     for master in master_usernames:
-        send_attachment_to_master(token, master, filename, content, caption)
+        if not send_attachment_to_master(token, master, filename, content, caption):
+            logger.error("attachment forward failed master=%s draft=%s", master, draft_id)
     logger.info(
         "attachment received type=%s size=%s draft=%s",
         file_type,
@@ -1668,6 +1702,7 @@ def update_ticket_status(
     timezone: str,
     logger: logging.Logger,
 ) -> None:
+    admin_logger = logging.getLogger("admin")
     callback_id = callback.get("id")
     if not is_admin(callback.get("from", {}).get("id"), storage):
         if callback_id:
@@ -1690,7 +1725,7 @@ def update_ticket_status(
     ticket["status"] = new_status
     ticket["updated_at"] = now_iso(timezone)
     save_storage(storage)
-    logger.info(
+    admin_logger.info(
         "status change ticket_id=%s by=%s status=%s",
         ticket_id,
         callback.get("from", {}).get("username"),
@@ -1751,7 +1786,7 @@ def handle_admin_callback(
         return True
     if data == "admin:diag":
         settings = get_settings(storage)
-        ai_service = AIService(logger, settings=settings)
+        ai_service = AIService(logging.getLogger("ai"), settings=settings)
         mode = "FORCED" if settings.get("force_fallback") else ("AI" if ai_service.is_enabled() else "FALLBACK")
         deepseek_status = "доступен" if ai_service.ping() else "недоступен"
         master_ids = parse_csv_ints(os.getenv("CLIENT_MASTER_CHAT_IDS", ""))
@@ -2099,7 +2134,7 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
     session = ensure_session(storage, chat_id, timezone)
     master_usernames = parse_master_usernames()
     settings = get_settings(storage)
-    ai_service = AIService(logger, settings=settings)
+    ai_service = AIService(logging.getLogger("ai"), settings=settings)
 
     if process_callback(token, update, storage, timezone, logger):
         return
@@ -2591,13 +2626,14 @@ def determine_next_stage_after_car(session: dict) -> str:
 
 
 def poll_updates(token: str, logger: logging.Logger) -> None:
+    polling_logger = logging.getLogger("polling")
     offset = 0
     url = f"https://api.telegram.org/bot{token}/getUpdates"
     timezone = os.getenv("TIMEZONE", "Europe/Moscow")
     master_usernames = parse_master_usernames()
     last_reminder_check = 0.0
 
-    logger.info("client_bot polling started (version=%s)", VERSION)
+    polling_logger.info("polling started (version=%s)", VERSION)
 
     while True:
         try:
@@ -2607,7 +2643,7 @@ def poll_updates(token: str, logger: logging.Logger) -> None:
                 timeout=POLLING_TIMEOUT + 5,
             )
             if response.status_code == 409:
-                logger.warning(
+                polling_logger.warning(
                     "polling 409 conflict: webhook is set; retrying after 5s"
                 )
                 delete_webhook(token, logger)
@@ -2616,7 +2652,7 @@ def poll_updates(token: str, logger: logging.Logger) -> None:
             response.raise_for_status()
             payload = response.json()
             if not payload.get("ok"):
-                logger.warning("telegram response not ok: %s", payload)
+                polling_logger.warning("telegram response not ok: %s", payload)
                 time.sleep(POLLING_SLEEP_SECONDS)
                 continue
 
@@ -2629,7 +2665,7 @@ def poll_updates(token: str, logger: logging.Logger) -> None:
                 check_reminders(token, storage, timezone, master_usernames, logger)
                 last_reminder_check = time.time()
         except Exception as exc:  # noqa: BLE001 - keep polling on errors
-            logger.exception("polling error: %s", exc)
+            polling_logger.exception("polling error: %s", exc)
             time.sleep(POLLING_SLEEP_SECONDS)
 
 
@@ -2672,8 +2708,13 @@ def main() -> None:
     logger.info("client_bot token source: %s", token_source)
     storage = load_storage()
     ensure_storage_defaults(storage)
+    logging.getLogger("storage").info(
+        "storage loaded tickets=%s sessions=%s",
+        len(storage.get("tickets", [])),
+        len(storage.get("sessions", {})),
+    )
     settings = get_settings(storage)
-    ai_service = AIService(logger, settings=settings)
+    ai_service = AIService(logging.getLogger("ai"), settings=settings)
     logger.info(
         "client_bot config: ai_enabled=%s, force_fallback=%s, timeout=%s, model=%s, base_url=%s",
         ai_service.is_enabled(),
