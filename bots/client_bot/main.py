@@ -64,6 +64,7 @@ ADMIN_STATE_ADD_BLOCK = "await_block_id"
 ADMIN_STATE_EXPORT_RANGE = "await_export_range"
 ADMIN_STATE_EXPORT_STATUS = "await_export_status"
 ADMIN_STATE_EXPORT_FORMAT = "await_export_format"
+ADMIN_STATE_ASK_MORE_TEXT = "await_ask_more_text"
 
 AI_ASK_BLOCKLIST = {
     "pdn",
@@ -75,6 +76,14 @@ AI_ASK_BLOCKLIST = {
     "last_visit_category",
 }
 LAST_VISIT_CATEGORIES = {"Гарантия", "Повтор проблемы", "Документы", "Уточнение", "Другое"}
+ASK_MORE_OPTIONS = [
+    ("vin", "VIN"),
+    ("plate", "Госномер"),
+    ("phone", "Телефон"),
+    ("symptom", "Точный симптом/шум/условия"),
+    ("booking", "Желаемое время/дата"),
+    ("other", "Другое (свободный текст)"),
+]
 
 
 def build_logger(timezone: str) -> logging.Logger:
@@ -234,6 +243,22 @@ def answer_callback_query(token: str, callback_query_id: str, text: str | None =
     safe_answer_callback_query(callback_query_id, text=text)
 
 
+def is_duplicate_callback(storage: dict, callback_id: str | None, ttl_seconds: int = 30) -> bool:
+    if not callback_id:
+        return False
+    ensure_storage_defaults(storage)
+    entries: dict[str, float] = storage.setdefault("callback_debounce", {})
+    now_value = time.time()
+    expired = [key for key, value in entries.items() if now_value - value > ttl_seconds]
+    for key in expired:
+        entries.pop(key, None)
+    if callback_id in entries:
+        return True
+    entries[callback_id] = now_value
+    save_storage(storage)
+    return False
+
+
 def parse_master_usernames_with_meta(raw: str, logger: logging.Logger) -> tuple[list[str], bool, bool]:
     usernames = []
     has_numeric = False
@@ -360,6 +385,7 @@ def ensure_storage_defaults(storage: dict) -> None:
     storage.setdefault("settings", {})
     storage.setdefault("blocklist", [])
     storage.setdefault("outgoing_messages", [])
+    storage.setdefault("callback_debounce", {})
     settings = storage.setdefault("settings", {})
     settings.setdefault(
         "force_fallback",
@@ -512,70 +538,56 @@ def stage_description(stage: str | None) -> str:
 
 
 def build_master_status_keyboard(ticket: dict) -> dict:
-    keyboard: list[list[dict]] = []
+    ticket_id = ticket.get("ticket_id", "")
+    keyboard: list[list[dict]] = [
+        [
+            {"text": "✅ В работу", "callback_data": f"ticket:{ticket_id}:in_work"},
+            {"text": "✅ Закрыть", "callback_data": f"ticket:{ticket_id}:closed"},
+        ]
+    ]
+    row: list[dict] = []
     username = ticket.get("client_username")
     if username:
-        keyboard.append(
-            [{"text": "Связаться с клиентом", "url": f"https://t.me/{username.lstrip('@')}"}]
-        )
-    return {"inline_keyboard": keyboard} if keyboard else {}
+        row.append({"text": "👤 Связаться", "url": f"https://t.me/{username.lstrip('@')}"})
+    row.append({"text": "✍️ Запросить уточнение", "callback_data": f"ticket:{ticket_id}:ask_more"})
+    keyboard.append(row)
+    return {"inline_keyboard": keyboard}
 
 
 def build_master_card(ticket: dict, timezone: str) -> str:
-    created_at = ticket.get("created_at")
-    created_display = "—"
-    if created_at:
-        try:
-            created_display = (
-                datetime.fromisoformat(created_at)
-                .astimezone(ZoneInfo(timezone))
-                .strftime("%Y-%m-%d %H:%M")
-            )
-        except ValueError:
-            created_display = created_at
+    created_display = format_dt(ticket.get("created_at"), timezone)
     username = ticket.get("client_username")
-    tg_id = ticket.get("client_chat_id")
-    contact = "—"
-    if username and tg_id:
-        contact = f"{username} (id {tg_id})"
-    elif username:
-        contact = username
-    elif tg_id:
-        contact = f"id {tg_id}"
+    username_display = "нет username"
+    if username:
+        cleaned = username.lstrip("@")
+        username_display = f"@{cleaned}" if cleaned else "нет username"
+    tg_id = ticket.get("client_chat_id") or "—"
     description = (
         ticket.get("problem_text")
         or ticket.get("parts_text")
         or ticket.get("last_visit_text")
         or "—"
     )
-    booking = "—"
+    if len(description) > 800:
+        description = f"{description[:797].rstrip()}..."
+    booking_value = "—"
     if ticket.get("booking_date") or ticket.get("booking_time"):
-        booking = f"{ticket.get('booking_date', '-')}, {ticket.get('booking_time', '-')}"
-    car_bits = []
-    if ticket.get("car_make_model"):
-        car_bits.append(ticket["car_make_model"])
-    if ticket.get("car_plate"):
-        car_bits.append(f"Госномер: {ticket['car_plate']}")
-    if ticket.get("vin"):
-        car_bits.append(f"VIN: {ticket['vin']}")
-    car_line = " / ".join(car_bits) if car_bits else "—"
+        booking_value = f"{ticket.get('booking_date', '—')} {ticket.get('booking_time', '—')} (Europe/Moscow)"
     tldr = ticket.get("tldr") or "—"
     return "\n".join(
         [
-            "КАРТОЧКА ЗАЯВКИ",
-            f"Номер заявки: {ticket['ticket_id']}",
-            f"Дата/время создания: {created_display}",
-            f"Статус: {ticket.get('status', 'new')}",
-            f"ФИО: {ticket.get('fio', '—')}",
-            f"Телефон: {ticket.get('phone', '—')}",
-            f"Telegram: {contact}",
-            f"Был ранее: {format_was_here(ticket.get('was_here_before'))}",
-            f"Авто: {car_line}",
-            f"Тип обращения: {format_scenario(ticket.get('scenario_type'))}",
-            f"Описание: {description}",
-            f"Запись: {booking}",
-            f"Вложения: {ticket.get('attachments_count', 0)}",
+            f"🧾 Заявка {ticket.get('ticket_id', '—')} • {format_ticket_status(ticket.get('status'))}",
             f"TL;DR: {tldr}",
+            f"👤 {ticket.get('fio') or '—'}",
+            f"☎️ {ticket.get('phone') or '—'}",
+            f"💬 {username_display} • id:{tg_id}",
+            f"🚗 {ticket.get('car_make_model') or 'не указано'} • {ticket.get('car_plate') or '—'}",
+            f"VIN: {ticket.get('vin') or '—'}",
+            f"🧩 Тип: {format_scenario(ticket.get('scenario_type'))}",
+            f"📝 {description}",
+            f"🗓 {booking_value}",
+            f"📎 Вложения: {ticket.get('attachments_count', 0)}",
+            f"⚙️ Источник: client_bot • created_at:{created_display}",
         ]
     )
 
@@ -596,6 +608,13 @@ def format_dt(value: str | None, timezone: str) -> str:
         )
     except ValueError:
         return value
+
+
+def build_ask_more_keyboard(ticket_id: str) -> dict:
+    rows: list[list[dict]] = []
+    for key, label in ASK_MORE_OPTIONS:
+        rows.append([{"text": label, "callback_data": f"ticket:{ticket_id}:ask_more:{key}"}])
+    return {"inline_keyboard": rows}
 
 
 def build_admin_main_keyboard() -> dict:
@@ -981,7 +1000,7 @@ def send_reminders_now(
         if ticket.get("status") != "new":
             continue
         text = f"Напоминание: заявка {ticket.get('ticket_id')} всё ещё новая"
-        reminder_card = build_reminder_card(ticket)
+        reminder_card = build_reminder_card(ticket, timezone)
         notify_masters(
             token,
             master_usernames,
@@ -997,19 +1016,8 @@ def send_reminders_now(
     return count
 
 
-def build_reminder_card(ticket: dict) -> str:
-    booking = ""
-    if ticket.get("booking_date") or ticket.get("booking_time"):
-        booking = f"Запись: {ticket.get('booking_date', '-')}, {ticket.get('booking_time', '-')}"
-    return "\n".join(
-        [
-            f"Заявка: {ticket.get('ticket_id', '—')}",
-            f"ФИО: {ticket.get('fio', '—')}",
-            f"Телефон: {ticket.get('phone', '—')}",
-            f"Тип: {format_scenario(ticket.get('scenario_type'))}",
-            booking,
-        ]
-    ).strip()
+def build_reminder_card(ticket: dict, timezone: str) -> str:
+    return build_master_card(ticket, timezone)
 
 
 def send_master_contact(token: str, chat_id: int, master_username: str) -> None:
@@ -1938,12 +1946,18 @@ def update_ticket_status(
         if callback_id:
             answer_callback_query(token, callback_id, "Недостаточно прав доступа")
         return
+    if is_duplicate_callback(storage, callback_id):
+        if callback_id:
+            answer_callback_query(token, callback_id)
+        return
     data = callback.get("data") or ""
     parts = data.split(":")
     if len(parts) != 3:
         return
     ticket_id = parts[1]
     new_status = parts[2]
+    if new_status not in {"in_work", "closed"}:
+        return
     ticket = next(
         (item for item in storage.get("tickets", []) if item.get("ticket_id") == ticket_id),
         None,
@@ -1964,6 +1978,242 @@ def update_ticket_status(
     if callback_id:
         answer_callback_query(token, callback_id, f"Статус обновлён: {new_status}")
     send_message(token, callback.get("from", {}).get("id"), f"Статус заявки {ticket_id}: {new_status}")
+
+
+def handle_ask_more_request(
+    token: str,
+    callback: dict,
+    storage: dict,
+    timezone: str,
+    logger: logging.Logger,
+) -> None:
+    callback_id = callback.get("id")
+    from_user = callback.get("from", {})
+    if not check_admin_access(
+        from_user.get("id"),
+        from_user.get("username"),
+        logger,
+    ):
+        if callback_id:
+            answer_callback_query(token, callback_id, "Недостаточно прав доступа")
+        return
+    if is_duplicate_callback(storage, callback_id):
+        if callback_id:
+            answer_callback_query(token, callback_id)
+        return
+    data = callback.get("data") or ""
+    parts = data.split(":")
+    if len(parts) != 3:
+        return
+    ticket_id = parts[1]
+    ticket = next(
+        (item for item in storage.get("tickets", []) if item.get("ticket_id") == ticket_id),
+        None,
+    )
+    if not ticket:
+        if callback_id:
+            answer_callback_query(token, callback_id, "Заявка не найдена.")
+        return
+    client_chat_id = ticket.get("client_chat_id")
+    if not client_chat_id:
+        if callback_id:
+            answer_callback_query(token, callback_id, "Контакт клиента не найден.")
+        return
+    ticket["clarification_status"] = "selecting"
+    ticket["clarification_requested_at"] = now_iso(timezone)
+    save_storage(storage)
+    send_message(token, client_chat_id, "Уточните, пожалуйста: выберите/введите вопрос.")
+    send_message(
+        token,
+        callback.get("from", {}).get("id"),
+        "Выберите, что уточнить:",
+        reply_markup=build_ask_more_keyboard(ticket_id),
+    )
+    if callback_id:
+        answer_callback_query(token, callback_id)
+
+
+def handle_ask_more_selection(
+    token: str,
+    callback: dict,
+    storage: dict,
+    timezone: str,
+    logger: logging.Logger,
+) -> None:
+    callback_id = callback.get("id")
+    from_user = callback.get("from", {})
+    if not check_admin_access(
+        from_user.get("id"),
+        from_user.get("username"),
+        logger,
+    ):
+        if callback_id:
+            answer_callback_query(token, callback_id, "Недостаточно прав доступа")
+        return
+    if is_duplicate_callback(storage, callback_id):
+        if callback_id:
+            answer_callback_query(token, callback_id)
+        return
+    data = callback.get("data") or ""
+    parts = data.split(":")
+    if len(parts) != 4:
+        return
+    ticket_id = parts[1]
+    key = parts[3]
+    ticket = next(
+        (item for item in storage.get("tickets", []) if item.get("ticket_id") == ticket_id),
+        None,
+    )
+    if not ticket:
+        if callback_id:
+            answer_callback_query(token, callback_id, "Заявка не найдена.")
+        return
+    client_chat_id = ticket.get("client_chat_id")
+    if not client_chat_id:
+        if callback_id:
+            answer_callback_query(token, callback_id, "Контакт клиента не найден.")
+        return
+    if key == "other":
+        set_admin_session(storage, from_user.get("id"), ADMIN_STATE_ASK_MORE_TEXT, {"ticket_id": ticket_id})
+        save_storage(storage)
+        send_message(token, from_user.get("id"), "Введите текст вопроса для клиента.")
+        if callback_id:
+            answer_callback_query(token, callback_id)
+        return
+    question_map = {
+        "vin": "VIN",
+        "plate": "Госномер",
+        "phone": "Телефон",
+        "symptom": "Точный симптом/шум/условия",
+        "booking": "Желаемое время/дата",
+    }
+    question = question_map.get(key)
+    if not question:
+        return
+    ticket["clarification_status"] = "waiting"
+    ticket["clarification_key"] = key
+    ticket["clarification_question"] = question
+    ticket["clarification_requested_at"] = now_iso(timezone)
+    save_storage(storage)
+    send_message(token, client_chat_id, f"Уточните, пожалуйста: {question}")
+    send_message(token, from_user.get("id"), f"Запрос отправлен клиенту: {question}")
+    if callback_id:
+        answer_callback_query(token, callback_id)
+
+
+def handle_ask_more_free_text(
+    token: str,
+    chat_id: int,
+    text: str,
+    storage: dict,
+    timezone: str,
+) -> bool:
+    admin_session = get_admin_session(storage, chat_id)
+    if admin_session.get("state") != ADMIN_STATE_ASK_MORE_TEXT:
+        return False
+    payload = admin_session.get("data", {})
+    ticket_id = payload.get("ticket_id")
+    question_text = text.strip()
+    if not question_text:
+        send_message(token, chat_id, "Введите текст вопроса для клиента.")
+        return True
+    ticket = next(
+        (item for item in storage.get("tickets", []) if item.get("ticket_id") == ticket_id),
+        None,
+    )
+    if not ticket:
+        clear_admin_session(storage, chat_id)
+        save_storage(storage)
+        send_message(token, chat_id, "Заявка не найдена.")
+        return True
+    client_chat_id = ticket.get("client_chat_id")
+    if not client_chat_id:
+        clear_admin_session(storage, chat_id)
+        save_storage(storage)
+        send_message(token, chat_id, "Контакт клиента не найден.")
+        return True
+    ticket["clarification_status"] = "waiting"
+    ticket["clarification_key"] = "other"
+    ticket["clarification_question"] = question_text
+    ticket["clarification_requested_at"] = now_iso(timezone)
+    clear_admin_session(storage, chat_id)
+    save_storage(storage)
+    send_message(token, client_chat_id, f"Уточните, пожалуйста: {question_text}")
+    send_message(token, chat_id, "Запрос отправлен клиенту.")
+    return True
+
+
+def find_pending_clarification_ticket(storage: dict, chat_id: int) -> dict | None:
+    candidates = [
+        ticket
+        for ticket in storage.get("tickets", [])
+        if ticket.get("client_chat_id") == chat_id and ticket.get("clarification_status") == "waiting"
+    ]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item.get("updated_at") or item.get("created_at") or "", reverse=True)
+    return candidates[0]
+
+
+def handle_clarification_response(
+    token: str,
+    chat_id: int,
+    text: str,
+    storage: dict,
+    timezone: str,
+    master_usernames: list[str],
+    logger: logging.Logger,
+) -> bool:
+    ticket = find_pending_clarification_ticket(storage, chat_id)
+    if not ticket:
+        return False
+    key = ticket.get("clarification_key")
+    question = ticket.get("clarification_question") or "Уточнение"
+    answer = text.strip()
+    if not answer:
+        return False
+    clarifications = ticket.setdefault("clarifications", [])
+    clarifications.append(
+        {
+            "question": question,
+            "answer": answer,
+            "at": now_iso(timezone),
+        }
+    )
+    if key == "vin":
+        ticket["vin"] = answer
+    elif key == "plate":
+        ticket["car_plate"] = answer
+    elif key == "phone":
+        ticket["phone"] = answer
+    elif key == "symptom":
+        ticket["clarification_symptom"] = answer
+    elif key == "booking":
+        ticket["clarification_booking"] = answer
+    else:
+        ticket["clarification_other"] = answer
+    ticket["clarification_status"] = "answered"
+    ticket["clarification_answer_at"] = now_iso(timezone)
+    ticket["updated_at"] = now_iso(timezone)
+    save_storage(storage)
+    update_text = "\n".join(
+        [
+            f"UPDATE: получено уточнение от клиента ({question}).",
+            build_master_card(ticket, timezone),
+        ]
+    )
+    notify_masters(
+        token,
+        master_usernames,
+        update_text,
+        logger,
+        storage,
+        timezone,
+        "ticket_update",
+        reply_markup=build_master_status_keyboard(ticket),
+        ticket_id=ticket.get("ticket_id"),
+    )
+    return True
 
 
 def handle_client_contact_callback(token: str, callback: dict, storage: dict) -> None:
@@ -2304,7 +2554,14 @@ def process_callback(
     if handle_admin_callback(token, callback, storage, timezone, logger, master_usernames):
         return True
     if data.startswith("ticket:"):
-        update_ticket_status(token, callback, storage, timezone, logger)
+        parts = data.split(":")
+        if len(parts) >= 3 and parts[2] == "ask_more":
+            if len(parts) == 3:
+                handle_ask_more_request(token, callback, storage, timezone, logger)
+            elif len(parts) == 4:
+                handle_ask_more_selection(token, callback, storage, timezone, logger)
+        else:
+            update_ticket_status(token, callback, storage, timezone, logger)
         return True
     if data.startswith("client:"):
         handle_client_contact_callback(token, callback, storage)
@@ -2343,7 +2600,7 @@ def check_reminders(
             except ValueError:
                 pass
         text = f"Напоминание: заявка {ticket.get('ticket_id')} всё ещё новая"
-        reminder_card = build_reminder_card(ticket)
+        reminder_card = build_reminder_card(ticket, timezone)
         notify_masters(
             token,
             master_usernames,
@@ -2418,6 +2675,8 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
 
     if is_admin(chat_id, storage):
         admin_session = get_admin_session(storage, chat_id)
+        if handle_ask_more_free_text(token, chat_id, text, storage, timezone):
+            return
         if admin_session.get("state") == ADMIN_STATE_ADD_ADMIN:
             if not text.isdigit():
                 send_message(token, chat_id, "tg_id должен быть числом. Повторите ввод.")
@@ -2508,6 +2767,18 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
             reply_markup=build_main_menu_keyboard(),
         )
         return
+
+    if text and not text.startswith("/"):
+        if handle_clarification_response(
+            token,
+            chat_id,
+            text,
+            storage,
+            timezone,
+            master_usernames,
+            logger,
+        ):
+            return
 
     if text == MENU_MASTER:
         process_master_request(
