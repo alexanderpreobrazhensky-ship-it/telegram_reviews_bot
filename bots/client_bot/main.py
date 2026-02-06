@@ -1744,6 +1744,13 @@ def poll_updates(token: str, logger: logging.Logger) -> None:
                 params={"timeout": POLLING_TIMEOUT, "offset": offset},
                 timeout=POLLING_TIMEOUT + 5,
             )
+            if response.status_code == 409:
+                logger.warning(
+                    "polling 409 conflict: webhook is set; retrying after 5s"
+                )
+                delete_webhook(token, logger)
+                time.sleep(5)
+                continue
             response.raise_for_status()
             payload = response.json()
             if not payload.get("ok"):
@@ -1764,13 +1771,43 @@ def poll_updates(token: str, logger: logging.Logger) -> None:
             time.sleep(POLLING_SLEEP_SECONDS)
 
 
-def main() -> None:
+def get_client_token() -> tuple[str, str]:
+    token = os.getenv("CLIENT_TELEGRAM_BOT_TOKEN")
+    if token:
+        return token.strip(), "CLIENT_TELEGRAM_BOT_TOKEN"
     token = os.getenv("TELEGRAM_BOT_TOKEN_CLIENT")
-    if not token:
-        raise RuntimeError("TELEGRAM_BOT_TOKEN_CLIENT is required")
+    if token:
+        return token.strip(), "TELEGRAM_BOT_TOKEN_CLIENT"
+    raise RuntimeError(
+        "CLIENT_TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN_CLIENT is required"
+    )
 
+
+def delete_webhook(
+    token: str, logger: logging.Logger, drop_pending_updates: bool = False
+) -> None:
+    url = f"https://api.telegram.org/bot{token}/deleteWebhook"
+    payload = {"drop_pending_updates": drop_pending_updates}
+    try:
+        response = requests.post(url, json=payload, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        if data.get("ok"):
+            logger.info(
+                "client_bot deleteWebhook ok: result=%s",
+                data.get("result"),
+            )
+        else:
+            logger.warning("client_bot deleteWebhook failed: %s", data)
+    except requests.RequestException as exc:
+        logger.warning("client_bot deleteWebhook error: %s", exc)
+
+
+def main() -> None:
     timezone = os.getenv("TIMEZONE", "Europe/Moscow")
     logger = build_logger(timezone)
+    token, token_source = get_client_token()
+    logger.info("client_bot token source: %s", token_source)
     ai_service = AIService(logger)
     logger.info(
         "client_bot config: ai_enabled=%s, force_fallback=%s, timeout=%s, model=%s, base_url=%s",
@@ -1781,6 +1818,7 @@ def main() -> None:
         ai_service.base_url,
     )
     logger.info("client_bot starting (polling mode)")
+    delete_webhook(token, logger, drop_pending_updates=False)
     poll_updates(token, logger)
 
 
