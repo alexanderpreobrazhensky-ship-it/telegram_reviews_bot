@@ -10,6 +10,7 @@ import random
 import threading
 import time
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode, urlparse, urlunparse, quote
 
@@ -101,6 +102,13 @@ GROK_MODEL = os.getenv("GROK_MODEL") or "grok-beta"
 
 REPORT_CHAT_IDS = os.getenv("REPORT_CHAT_IDS", "").strip()
 EXTRA_ADMIN_CHAT_IDS = os.getenv("ADMIN_CHAT_IDS", "").strip()
+CLIENT_ADMIN_CHAT_IDS_RAW = os.getenv("CLIENT_ADMIN_IDS", "").strip()
+CHANNEL_CHAT_ID_RAW = os.getenv("CHANNEL_CHAT_ID", "").strip()
+CHANNEL_POST_IMAGE = os.getenv("CHANNEL_POST_IMAGE", "").strip()
+CHANNEL_POST_TEXT = os.getenv("CHANNEL_POST_TEXT", "").strip()
+CHANNEL_POST_BUTTONS = os.getenv("CHANNEL_POST_BUTTONS", "").strip()
+CHANNEL_POST_PARSE_MODE = (os.getenv("CHANNEL_POST_PARSE_MODE") or "").strip()
+OWNER_USERNAME = os.getenv("OWNER_USERNAME", "").strip().lstrip("@")
 
 def _env_flag(name: str, default: str = "1") -> bool:
     raw = os.getenv(name)
@@ -180,6 +188,9 @@ else:
     logger.warning("Admins parsed: count=0 (REPORT_CHAT_IDS is empty or invalid)")
 if SUPERADMIN_ID is None and OWNER_CHAT_ID is None:
     logger.warning("SUPERADMIN_ID/OWNER_CHAT_ID not set and REPORT_CHAT_IDS empty; owner seed will be skipped.")
+
+CLIENT_ADMIN_IDS = _parse_id_list(CLIENT_ADMIN_CHAT_IDS_RAW)
+CHANNEL_CHAT_ID = int(CHANNEL_CHAT_ID_RAW) if CHANNEL_CHAT_ID_RAW.isdigit() else None
 
 DATABASE_URL = None
 DB_URL_SOURCE = "unset"
@@ -356,6 +367,98 @@ def send_message(chat_id: int, text: str, reply_markup: Optional[dict] = None, p
     except Exception as e:
         logger.exception("sendMessage exception chat_id=%s text=%s err=%s", chat_id, _redact(text[:200]), e)
 
+def send_photo(
+    chat_id: int,
+    photo: str,
+    caption: str,
+    reply_markup: Optional[dict] = None,
+    parse_mode: Optional[str] = None,
+) -> Optional[int]:
+    payload = {"chat_id": chat_id, "photo": photo, "caption": caption}
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+    try:
+        r = requests.post(tg_api("sendPhoto"), json=payload, timeout=TG_TIMEOUT)
+        if r.status_code != 200:
+            logger.error(
+                "sendPhoto failed status=%s chat_id=%s body=%s",
+                r.status_code,
+                chat_id,
+                _redact(r.text[:900]),
+            )
+            return None
+        data = r.json()
+        return (data.get("result") or {}).get("message_id")
+    except Exception:
+        logger.exception("sendPhoto exception chat_id=%s", chat_id)
+        return None
+
+def edit_message_caption(
+    chat_id: int,
+    message_id: int,
+    caption: str,
+    reply_markup: Optional[dict] = None,
+    parse_mode: Optional[str] = None,
+) -> bool:
+    payload = {"chat_id": chat_id, "message_id": message_id, "caption": caption}
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+    try:
+        r = requests.post(tg_api("editMessageCaption"), json=payload, timeout=TG_TIMEOUT)
+        if r.status_code != 200:
+            logger.error(
+                "editMessageCaption failed status=%s chat_id=%s message_id=%s body=%s",
+                r.status_code,
+                chat_id,
+                message_id,
+                _redact(r.text[:900]),
+            )
+            return False
+        return True
+    except Exception:
+        logger.exception("editMessageCaption exception chat_id=%s message_id=%s", chat_id, message_id)
+        return False
+
+def edit_reply_markup(chat_id: int, message_id: int, reply_markup: Optional[dict]) -> bool:
+    payload = {"chat_id": chat_id, "message_id": message_id, "reply_markup": reply_markup or {"inline_keyboard": []}}
+    try:
+        r = requests.post(tg_api("editMessageReplyMarkup"), json=payload, timeout=TG_TIMEOUT)
+        if r.status_code != 200:
+            logger.error(
+                "editMessageReplyMarkup failed status=%s chat_id=%s message_id=%s body=%s",
+                r.status_code,
+                chat_id,
+                message_id,
+                _redact(r.text[:900]),
+            )
+            return False
+        return True
+    except Exception:
+        logger.exception("editMessageReplyMarkup exception chat_id=%s message_id=%s", chat_id, message_id)
+        return False
+
+def pin_message(chat_id: int, message_id: int, silent: bool = True) -> bool:
+    payload = {"chat_id": chat_id, "message_id": message_id, "disable_notification": silent}
+    try:
+        r = requests.post(tg_api("pinChatMessage"), json=payload, timeout=TG_TIMEOUT)
+        if r.status_code != 200:
+            logger.error(
+                "pinChatMessage failed status=%s chat_id=%s message_id=%s body=%s",
+                r.status_code,
+                chat_id,
+                message_id,
+                _redact(r.text[:500]),
+            )
+            return False
+        return True
+    except Exception:
+        logger.exception("pinChatMessage exception chat_id=%s message_id=%s", chat_id, message_id)
+        return False
+
 def _access_denied_text(user_id: Optional[int]) -> str:
     suffix = f"Ваш ID: {user_id}." if user_id is not None else "Ваш ID неизвестен."
     return f"⛔ Доступ запрещён. {suffix} Обратитесь к администратору."
@@ -438,6 +541,259 @@ def can_use_bot(chat_id: Optional[int], user_id: Optional[int]) -> bool:
 def can_manage_access(chat_id: Optional[int], user_id: Optional[int]) -> bool:
     return get_user_role(chat_id, user_id) == "owner"
 
+FORBIDDEN_PHRASE = "вы записаны"
+CHANNEL_POST_SETTING_KEY = "channel_post_state"
+CHANNEL_SCHEDULE_SETTING_KEY = "channel_post_schedule"
+CHANNEL_SCHEDULE_TZ = ZoneInfo("Europe/Moscow")
+CHANNEL_SCHEDULE_WEEKDAY = 4  # Friday
+CHANNEL_SCHEDULE_HOUR = 14
+CHANNEL_SCHEDULE_MINUTE = 0
+
+_channel_post_cache: Dict[str, Any] = {}
+_schedule_thread_started = False
+_schedule_thread_lock = threading.Lock()
+
+def _contains_forbidden_phrase(text: str) -> bool:
+    return FORBIDDEN_PHRASE in (text or "").lower()
+
+def _is_client_admin(chat_id: Optional[int]) -> bool:
+    return chat_id is not None and chat_id in CLIENT_ADMIN_IDS
+
+def _channel_post_buttons() -> Optional[dict]:
+    if not CHANNEL_POST_BUTTONS:
+        return None
+    try:
+        payload = json.loads(CHANNEL_POST_BUTTONS)
+        if isinstance(payload, dict) and "inline_keyboard" in payload:
+            return payload
+        if not isinstance(payload, list):
+            raise ValueError("CHANNEL_POST_BUTTONS must be list or inline_keyboard dict")
+        rows: List[List[Dict[str, str]]] = []
+        for row in payload:
+            if not isinstance(row, list):
+                continue
+            row_buttons: List[Dict[str, str]] = []
+            for btn in row:
+                if not isinstance(btn, dict):
+                    continue
+                text = (btn.get("text") or "").strip()
+                url = (btn.get("url") or "").strip()
+                if text and url:
+                    row_buttons.append({"text": text, "url": url})
+            if row_buttons:
+                rows.append(row_buttons)
+        return {"inline_keyboard": rows} if rows else None
+    except Exception:
+        logger.exception("Failed to parse CHANNEL_POST_BUTTONS")
+        return None
+
+def _channel_post_text() -> str:
+    return CHANNEL_POST_TEXT or "Оставьте, пожалуйста, отзыв о нашем сервисе — это помогает нам становиться лучше."
+
+def _channel_post_parse_mode() -> Optional[str]:
+    return CHANNEL_POST_PARSE_MODE or None
+
+def _load_channel_post_state() -> Dict[str, Any]:
+    if DB_OK:
+        state = db_get_setting(CHANNEL_POST_SETTING_KEY) or {}
+        return state if isinstance(state, dict) else {}
+    return dict(_channel_post_cache)
+
+def _save_channel_post_state(state: Dict[str, Any]) -> None:
+    if DB_OK:
+        db_set_setting(CHANNEL_POST_SETTING_KEY, state)
+    else:
+        _channel_post_cache.update(state)
+
+def _helpadmin_text() -> str:
+    return (
+        "🧠 Что делает бот:\n"
+        "— публикует один важный пост в канале с кнопками\n"
+        "— обновляет этот пост без удаления\n"
+        "— сам публикует/обновляет пост по расписанию (пятница 14:00, МСК)\n\n"
+        "📌 Команды:\n"
+        "— /post_channel: опубликовать пост в канал\n"
+        "— /update_channel_post: обновить текст и кнопки поста\n"
+        "— /helpadmin: эта памятка\n\n"
+        "📅 Что делать в выходные:\n"
+        "— Ничего. Бот сам обновит пост в пятницу.\n\n"
+        "🛠️ Как работать мастеру:\n"
+        "— Если нужно срочно обновить пост — жми /update_channel_post.\n"
+        "— Если пост исчез — жми /post_channel."
+    )
+
+def _helpadmin_keyboard() -> Optional[dict]:
+    if not OWNER_USERNAME:
+        logger.warning("OWNER_USERNAME not set; helpadmin button disabled")
+        return None
+    return {
+        "inline_keyboard": [
+            [{"text": "Написать владельцу", "url": f"https://t.me/{OWNER_USERNAME}"}]
+        ]
+    }
+
+def _validate_text(text: str, context: str) -> bool:
+    if _contains_forbidden_phrase(text):
+        logger.error("Forbidden phrase detected in %s", context)
+        return False
+    return True
+
+def _channel_post_payload(require_photo: bool = False) -> Tuple[Optional[str], Optional[str], Optional[dict], Optional[str]]:
+    photo = CHANNEL_POST_IMAGE or None
+    text = _channel_post_text()
+    reply_markup = _channel_post_buttons()
+    parse_mode = _channel_post_parse_mode()
+    if require_photo and not photo:
+        logger.error("CHANNEL_POST_IMAGE is not configured")
+    if not _validate_text(text, "channel_post_text"):
+        return None, None, None, None
+    if require_photo and not photo:
+        return None, None, None, None
+    return photo, text, reply_markup, parse_mode
+
+def _post_channel_message() -> Tuple[bool, Optional[int]]:
+    if CHANNEL_CHAT_ID is None:
+        logger.error("CHANNEL_CHAT_ID not configured")
+        return False, None
+    photo, text, reply_markup, parse_mode = _channel_post_payload(require_photo=True)
+    if not photo or text is None:
+        return False, None
+    message_id = send_photo(CHANNEL_CHAT_ID, photo, text, reply_markup=reply_markup, parse_mode=parse_mode)
+    if not message_id:
+        return False, None
+    _save_channel_post_state({
+        "message_id": message_id,
+        "chat_id": CHANNEL_CHAT_ID,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    })
+    logger.info("Channel post published message_id=%s", message_id)
+    return True, message_id
+
+def _update_channel_message(message_id: int) -> bool:
+    if CHANNEL_CHAT_ID is None:
+        logger.error("CHANNEL_CHAT_ID not configured")
+        return False
+    _, text, reply_markup, parse_mode = _channel_post_payload(require_photo=False)
+    if text is None:
+        return False
+    caption_ok = edit_message_caption(CHANNEL_CHAT_ID, message_id, text, reply_markup=None, parse_mode=parse_mode)
+    markup_ok = edit_reply_markup(CHANNEL_CHAT_ID, message_id, reply_markup)
+    if caption_ok or markup_ok:
+        _save_channel_post_state({
+            "message_id": message_id,
+            "chat_id": CHANNEL_CHAT_ID,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        })
+        logger.info("Channel post updated message_id=%s", message_id)
+        return True
+    return False
+
+def _pin_channel_message(message_id: int) -> bool:
+    if CHANNEL_CHAT_ID is None:
+        return False
+    ok = pin_message(CHANNEL_CHAT_ID, message_id, silent=True)
+    if ok:
+        logger.info("Channel post pinned message_id=%s", message_id)
+    return ok
+
+def _upsert_channel_post() -> bool:
+    state = _load_channel_post_state()
+    stored_id = state.get("message_id")
+    if stored_id:
+        if _update_channel_message(int(stored_id)):
+            _pin_channel_message(int(stored_id))
+            return True
+    ok, message_id = _post_channel_message()
+    if ok and message_id:
+        _pin_channel_message(message_id)
+    return ok
+
+def _try_schedule_lock() -> Optional[Any]:
+    if not DB_OK:
+        return None
+    conn = _db_connect()
+    if not conn:
+        return None
+    try:
+        lock_key = _schedule_lock_key()
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_try_advisory_lock(%s)", (lock_key,))
+            row = cur.fetchone()
+        if row and row[0]:
+            return conn
+    except Exception:
+        logger.exception("Schedule advisory lock failed")
+    try:
+        conn.close()
+    except Exception:
+        pass
+    return None
+
+def _release_schedule_lock(conn: Any) -> None:
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_advisory_unlock(%s)", (_schedule_lock_key(),))
+    except Exception:
+        logger.exception("Schedule advisory unlock failed")
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+def _schedule_state_key(now_msk: datetime) -> str:
+    iso = now_msk.isocalendar()
+    return f"{iso.year}-W{iso.week}"
+
+def _should_run_schedule(now_msk: datetime) -> bool:
+    if now_msk.weekday() != CHANNEL_SCHEDULE_WEEKDAY:
+        return False
+    if now_msk.hour != CHANNEL_SCHEDULE_HOUR or now_msk.minute != CHANNEL_SCHEDULE_MINUTE:
+        return False
+    state = db_get_setting(CHANNEL_SCHEDULE_SETTING_KEY) if DB_OK else _channel_post_cache.get(CHANNEL_SCHEDULE_SETTING_KEY)
+    if isinstance(state, dict):
+        if state.get("week_key") == _schedule_state_key(now_msk):
+            return False
+    return True
+
+def _mark_schedule_ran(now_msk: datetime) -> None:
+    payload = {"week_key": _schedule_state_key(now_msk), "ran_at": now_msk.isoformat()}
+    if DB_OK:
+        db_set_setting(CHANNEL_SCHEDULE_SETTING_KEY, payload)
+    else:
+        _channel_post_cache[CHANNEL_SCHEDULE_SETTING_KEY] = payload
+
+def _schedule_worker() -> None:
+    logger.info("Schedule worker started")
+    while True:
+        try:
+            now_msk = datetime.now(CHANNEL_SCHEDULE_TZ)
+            if _should_run_schedule(now_msk):
+                lock_conn = _try_schedule_lock()
+                if lock_conn or not DB_OK:
+                    try:
+                        logger.info("Schedule triggered at %s", now_msk.isoformat())
+                        if _upsert_channel_post():
+                            _mark_schedule_ran(now_msk)
+                            logger.info("Schedule post/update completed")
+                        else:
+                            logger.error("Schedule post/update failed")
+                    finally:
+                        if lock_conn:
+                            _release_schedule_lock(lock_conn)
+            time.sleep(30)
+        except Exception:
+            logger.exception("Schedule worker error")
+            time.sleep(30)
+
+def start_schedule_worker() -> None:
+    global _schedule_thread_started
+    with _schedule_thread_lock:
+        if _schedule_thread_started:
+            return
+        _schedule_thread_started = True
+        threading.Thread(target=_schedule_worker, daemon=True).start()
+
 def ensure_admin_seed(chat_id: Optional[int], user_id: Optional[int]) -> None:
     if not is_env_admin(chat_id, user_id):
         return
@@ -466,6 +822,10 @@ _webhook_lock = threading.Lock()
 
 def _webhook_lock_key() -> int:
     digest = hashlib.sha256(f"setWebhook:{TELEGRAM_BOT_TOKEN}".encode("utf-8")).hexdigest()
+    return int(digest[:15], 16)
+
+def _schedule_lock_key() -> int:
+    digest = hashlib.sha256(f"channel_schedule:{TELEGRAM_BOT_TOKEN}".encode("utf-8")).hexdigest()
     return int(digest[:15], 16)
 
 def set_webhook_once() -> None:
@@ -3944,6 +4304,47 @@ def telegram_webhook():
             send_message(chat_id, contacts_text())
             return "ok"
 
+        if cmd == "/helpadmin":
+            _log_route("helpadmin", chat_id, user_id)
+            if not _is_client_admin(chat_id):
+                send_message(chat_id, "⛔ Доступ запрещён.")
+                return "ok"
+            text_payload = _helpadmin_text()
+            if not _validate_text(text_payload, "helpadmin_text"):
+                send_message(chat_id, "❌ Текст справки содержит запрещённую фразу.")
+                return "ok"
+            sent_to = user_id if user_id else chat_id
+            send_message(sent_to, text_payload, reply_markup=_helpadmin_keyboard())
+            if chat_id != sent_to:
+                send_message(chat_id, "Справка отправлена в личные сообщения.")
+            logger.info("helpadmin sent user_id=%s", user_id)
+            return "ok"
+
+        if cmd in ("/post_channel", "/update_channel_post"):
+            _log_route(cmd.lstrip("/"), chat_id, user_id)
+            if not _is_client_admin(chat_id):
+                send_message(chat_id, "⛔ Доступ запрещён.")
+                return "ok"
+            if cmd == "/post_channel":
+                ok, message_id = _post_channel_message()
+                if not ok or not message_id:
+                    send_message(chat_id, "❌ Не удалось опубликовать пост. Проверь настройки канала.")
+                    return "ok"
+                _pin_channel_message(message_id)
+                send_message(chat_id, f"✅ Пост опубликован. ID: {message_id}")
+                return "ok"
+            state = _load_channel_post_state()
+            message_id = state.get("message_id")
+            if not message_id:
+                send_message(chat_id, "❌ Нет сохранённого поста. Сначала используйте /post_channel.")
+                return "ok"
+            if _update_channel_message(int(message_id)):
+                _pin_channel_message(int(message_id))
+                send_message(chat_id, f"✅ Пост обновлён. ID: {message_id}")
+            else:
+                send_message(chat_id, "❌ Не удалось обновить пост. Проверь настройки.")
+            return "ok"
+
         ensure_admin_seed(chat_id, user_id)
         if not can_use_bot(chat_id, user_id):
             _log_route("blocked_message", chat_id, user_id)
@@ -4467,6 +4868,7 @@ def telegram_webhook():
 # -----------------------------
 db_init()
 set_webhook_once()
+start_schedule_worker()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=PORT)
