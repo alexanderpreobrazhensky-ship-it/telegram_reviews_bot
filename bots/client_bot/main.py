@@ -1,4 +1,5 @@
 import csv
+import importlib.util
 import logging
 import os
 import threading
@@ -8,7 +9,6 @@ from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import requests
-from openpyxl import Workbook
 
 from services.ai_service import AIService, normalize_date_string
 from services.outgoing_queue import (
@@ -150,6 +150,10 @@ def build_yes_no_keyboard() -> dict:
         "resize_keyboard": True,
         "one_time_keyboard": True,
     }
+
+
+def is_openpyxl_available() -> bool:
+    return importlib.util.find_spec("openpyxl") is not None
 
 
 def build_last_visit_category_keyboard() -> dict:
@@ -769,6 +773,11 @@ def build_export_files(
         writer.writerow(headers)
         writer.writerows(rows)
     xlsx_path = os.path.join(export_dir, f"{filename_prefix}.xlsx")
+    try:
+        from openpyxl import Workbook
+    except ImportError:
+        logging.getLogger("client_bot").warning("openpyxl missing; xlsx disabled")
+        return csv_path, ""
     workbook = Workbook()
     sheet = workbook.active
     sheet.append(headers)
@@ -2005,7 +2014,10 @@ def handle_admin_callback(
         if format_value == "csv":
             send_document(token, chat_id, csv_path, caption="Выгрузка CSV")
         else:
-            send_document(token, chat_id, xlsx_path, caption="Выгрузка XLSX")
+            if not xlsx_path:
+                send_message(token, chat_id, "XLSX временно недоступен на сервере. Используйте CSV.")
+            else:
+                send_document(token, chat_id, xlsx_path, caption="Выгрузка XLSX")
         clear_admin_session(storage, chat_id)
         save_storage(storage)
         return True
@@ -2790,6 +2802,7 @@ def delete_webhook(
 def main() -> None:
     timezone = os.getenv("TIMEZONE", "Europe/Moscow")
     logger = build_logger(timezone)
+    logger.info("openpyxl available: %s", is_openpyxl_available())
     token, token_source = get_client_token()
     configure_telegram(token)
     logger.info("client_bot token source: %s", token_source)
