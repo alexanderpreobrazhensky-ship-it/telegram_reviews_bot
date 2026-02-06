@@ -25,6 +25,8 @@ def ensure_storage_schema(storage: dict) -> dict:
     storage.setdefault("admin_sessions", {})
     storage.setdefault("blocklist", [])
     storage.setdefault("outgoing_messages", [])
+    storage.setdefault("click_stats", [])
+    storage.setdefault("smart_queue", [])
     return storage
 
 

@@ -52,7 +52,8 @@ TTL_HOURS = 24
 OUTGOING_QUEUE_INTERVAL_SECONDS = 3
 
 MENU_BOOKING = "🗓 Записаться на сервис"
-MENU_LAST_VISIT = "🧾 Вопрос по прошлому визиту"
+MENU_WARRANTY = "🛡 Гарантия"
+MENU_HISTORY = "🧾 Вопрос по прошлому визиту"
 MENU_PARTS = "🧩 Запчасти"
 MENU_REPAIR = "🔧 Ремонт"
 MENU_OTHER = "❓ Другое"
@@ -84,6 +85,7 @@ AI_ASK_BLOCKLIST = {
     "booking_date",
     "booking_time",
     "last_visit_category",
+    "warranty_date",
 }
 LAST_VISIT_CATEGORIES = {"Гарантия", "Повтор проблемы", "Документы", "Уточнение", "Другое"}
 ASK_MORE_OPTIONS = [
@@ -94,6 +96,15 @@ ASK_MORE_OPTIONS = [
     ("booking", "Желаемое время/дата"),
     ("other", "Другое (свободный текст)"),
 ]
+
+START_SCENARIO_MAP = {
+    "book": "booking",
+    "warranty": "warranty",
+    "repair": "repair",
+    "parts": "parts",
+    "history": "history",
+    "other": "other",
+}
 
 
 def build_logger(timezone: str) -> logging.Logger:
@@ -130,7 +141,7 @@ def build_main_menu_keyboard() -> dict:
     return {
         "keyboard": [
             [{"text": MENU_BOOKING}],
-            [{"text": MENU_LAST_VISIT}],
+            [{"text": MENU_WARRANTY}, {"text": MENU_HISTORY}],
             [{"text": MENU_PARTS}, {"text": MENU_REPAIR}],
             [{"text": MENU_OTHER}],
             [{"text": MENU_MASTER}],
@@ -171,6 +182,32 @@ def build_yes_no_keyboard() -> dict:
         "resize_keyboard": True,
         "one_time_keyboard": True,
     }
+
+
+def is_weekend_day(value: date) -> bool:
+    return value.weekday() >= 5
+
+
+def get_day_type(timezone: str, value: datetime | None = None) -> str:
+    dt_value = value or datetime.now(ZoneInfo(timezone))
+    return "weekend" if is_weekend_day(dt_value.date()) else "weekday"
+
+
+def record_click_stat(
+    storage: dict,
+    chat_id: int,
+    param: str,
+    scenario: str,
+    timezone: str,
+) -> None:
+    storage.setdefault("click_stats", []).append(
+        {
+            "at": now_iso(timezone),
+            "chat_id": chat_id,
+            "param": param,
+            "scenario": scenario,
+        }
+    )
 
 
 def is_openpyxl_available() -> bool:
@@ -396,6 +433,8 @@ def ensure_storage_defaults(storage: dict) -> None:
     storage.setdefault("blocklist", [])
     storage.setdefault("outgoing_messages", [])
     storage.setdefault("callback_debounce", {})
+    storage.setdefault("click_stats", [])
+    storage.setdefault("smart_queue", [])
     settings = storage.setdefault("settings", {})
     settings.setdefault(
         "force_fallback",
@@ -409,6 +448,10 @@ def ensure_storage_defaults(storage: dict) -> None:
         "reminder_minutes",
         get_env_int("CLIENT_REMINDER_MINUTES", "REMINDER_MINUTES", 30),
     )
+    settings.setdefault(
+        "auto_response_hours",
+        get_env_int("CLIENT_AUTO_RESPONSE_HOURS", "AUTO_RESPONSE_HOURS", 4),
+    )
 
 
 def get_settings(storage: dict) -> dict:
@@ -418,6 +461,7 @@ def get_settings(storage: dict) -> dict:
         "force_fallback": int(settings.get("force_fallback", 0)),
         "ai_timeout_seconds": int(settings.get("ai_timeout_seconds", 10)),
         "reminder_minutes": int(settings.get("reminder_minutes", 30)),
+        "auto_response_hours": int(settings.get("auto_response_hours", 4)),
     }
 
 
@@ -515,6 +559,8 @@ def format_was_here(value: str | None) -> str:
 def format_scenario(value: str | None) -> str:
     mapping = {
         "booking": "Запись",
+        "warranty": "Гарантия",
+        "history": "Прошлый визит",
         "last_visit": "Прошлый визит",
         "parts": "Запчасти",
         "repair": "Ремонт",
@@ -538,6 +584,8 @@ def stage_description(stage: str | None) -> str:
         "last_visit_date": "ожидаем дату прошлого визита",
         "last_visit_category": "ожидаем категорию вопроса",
         "last_visit_description": "ожидаем описание вопроса",
+        "warranty_date": "ожидаем дату обращения по гарантии",
+        "warranty_description": "ожидаем описание гарантийного вопроса",
         "parts_text": "ожидаем запрос по запчастям",
         "parts_offer_booking": "ожидаем ответ о записи на сервис",
         "repair_text": "ожидаем описание проблемы",
@@ -603,39 +651,30 @@ def is_callback_debounced(callback: dict, logger: logging.Logger) -> bool:
 
 
 def build_master_card(ticket: dict, timezone: str) -> str:
-    created_display = format_dt(ticket.get("created_at"), timezone)
-    username = ticket.get("client_username")
-    username_display = "нет username"
-    if username:
-        cleaned = username.lstrip("@")
-        username_display = f"@{cleaned}" if cleaned else "нет username"
-    tg_id = ticket.get("client_chat_id") or "—"
-    description = (
+    booking_date = ticket.get("booking_date") or "—"
+    booking_time = ticket.get("booking_time") or "—"
+    comment = (
         ticket.get("problem_text")
         or ticket.get("parts_text")
         or ticket.get("last_visit_text")
+        or ticket.get("warranty_text")
         or "—"
     )
-    if len(description) > 800:
-        description = f"{description[:797].rstrip()}..."
-    booking_value = "—"
-    if ticket.get("booking_date") or ticket.get("booking_time"):
-        booking_value = f"{ticket.get('booking_date', '—')} {ticket.get('booking_time', '—')} (Europe/Moscow)"
-    tldr = ticket.get("tldr") or "—"
+    if len(comment) > 800:
+        comment = f"{comment[:797].rstrip()}..."
+    day_type = "Выходной" if ticket.get("day_type") == "weekend" else "Будний"
+    client_line = ticket.get("fio") or "—"
+    phone = ticket.get("phone")
+    if phone:
+        client_line = f"{client_line} ({phone})"
     return "\n".join(
         [
-            f"🧾 Заявка {ticket.get('ticket_id', '—')} • {format_ticket_status(ticket.get('status'))}",
-            f"TL;DR: {tldr}",
-            f"👤 {ticket.get('fio') or '—'}",
-            f"☎️ {ticket.get('phone') or '—'}",
-            f"💬 {username_display} • id:{tg_id}",
-            f"🚗 {ticket.get('car_make_model') or 'не указано'} • {ticket.get('car_plate') or '—'}",
-            f"VIN: {ticket.get('vin') or '—'}",
-            f"🧩 Тип: {format_scenario(ticket.get('scenario_type'))}",
-            f"📝 {description}",
-            f"🗓 {booking_value}",
-            f"📎 Вложения: {ticket.get('attachments_count', 0)}",
-            f"⚙️ Источник: client_bot • created_at:{created_display}",
+            f"Тип заявки: {format_scenario(ticket.get('scenario_type'))}",
+            f"Клиент: {client_line}",
+            f"Дата: {booking_date}",
+            f"Время: {booking_time}",
+            f"Комментарий: {comment}",
+            f"День: {day_type}",
         ]
     )
 
@@ -646,7 +685,7 @@ def summarize_ticket_changes(fields_changed: list[str]) -> list[str]:
         summary.append("телефон")
     if any(field in fields_changed for field in ("car_plate", "car_make_model", "vin")):
         summary.append("авто")
-    if any(field in fields_changed for field in ("problem_text", "parts_text", "last_visit_text")):
+    if any(field in fields_changed for field in ("problem_text", "parts_text", "last_visit_text", "warranty_text")):
         summary.append("описание")
     if any(field in fields_changed for field in ("booking_date", "booking_time")):
         summary.append("время")
@@ -1071,12 +1110,19 @@ def build_stats(storage: dict, timezone: str) -> str:
     if type_counts:
         top_reason = max(type_counts.items(), key=lambda item: item[1])[0]
     type_distribution = ", ".join([f"{key}: {value}" for key, value in type_counts.items()]) or "—"
+    click_stats = storage.get("click_stats", [])
+    click_counts: dict[str, int] = {}
+    for click in click_stats:
+        scenario = format_scenario(click.get("scenario"))
+        click_counts[scenario] = click_counts.get(scenario, 0) + 1
+    click_distribution = ", ".join([f"{key}: {value}" for key, value in click_counts.items()]) or "—"
     return "\n".join(
         [
             f"Всего заявок: {total}",
             f"Сегодня: {len(today)}",
             f"7 дней: {len(last_7)}",
             f"Распределение по типам: {type_distribution}",
+            f"Клики по кнопкам: {click_distribution}",
             (
                 "Статусы: "
                 f"новые {status_counts.get('new', 0)}, "
@@ -1086,6 +1132,97 @@ def build_stats(storage: dict, timezone: str) -> str:
             f"Топ-1 причина обращения: {top_reason}",
         ]
     )
+
+
+def update_smart_queue(storage: dict, timezone: str) -> None:
+    scenario_order = {
+        "booking": 0,
+        "warranty": 1,
+        "repair": 2,
+        "parts": 3,
+        "history": 4,
+        "last_visit": 4,
+        "other": 5,
+    }
+    queue_items = []
+    for ticket in storage.get("tickets", []):
+        if ticket.get("status") != "new":
+            continue
+        booking_date = ticket.get("booking_date")
+        booking_time = ticket.get("booking_time") or "00:00"
+        sort_dt: datetime | None = None
+        if booking_date:
+            try:
+                sort_dt = datetime.fromisoformat(f"{booking_date}T{booking_time}:00")
+                sort_dt = sort_dt.replace(tzinfo=ZoneInfo(timezone))
+            except ValueError:
+                sort_dt = None
+        if not sort_dt:
+            created_at = ticket.get("created_at")
+            if created_at:
+                try:
+                    sort_dt = datetime.fromisoformat(created_at).astimezone(ZoneInfo(timezone))
+                except ValueError:
+                    sort_dt = None
+        if not sort_dt:
+            sort_dt = datetime.now(ZoneInfo(timezone))
+        queue_items.append(
+            {
+                "ticket_id": ticket.get("ticket_id"),
+                "scenario_type": ticket.get("scenario_type"),
+                "booking_date": ticket.get("booking_date"),
+                "booking_time": ticket.get("booking_time"),
+                "sort_at": sort_dt.isoformat(),
+                "_sort_key": (
+                    sort_dt,
+                    scenario_order.get(ticket.get("scenario_type"), 99),
+                ),
+            }
+        )
+    queue_items.sort(key=lambda item: item["_sort_key"])
+    for item in queue_items:
+        item.pop("_sort_key", None)
+    storage["smart_queue"] = queue_items
+
+
+def check_auto_responses(
+    token: str,
+    storage: dict,
+    timezone: str,
+    logger: logging.Logger,
+) -> None:
+    settings = get_settings(storage)
+    hours = settings.get("auto_response_hours", 4)
+    if hours <= 0:
+        return
+    now_value = datetime.now(ZoneInfo(timezone))
+    for ticket in storage.get("tickets", []):
+        if ticket.get("status") != "new":
+            continue
+        if ticket.get("auto_response_sent_at"):
+            continue
+        if ticket.get("master_response_at"):
+            continue
+        created_at = ticket.get("created_at")
+        if not created_at:
+            continue
+        try:
+            created_dt = datetime.fromisoformat(created_at).astimezone(ZoneInfo(timezone))
+        except ValueError:
+            continue
+        if created_dt > now_value - timedelta(hours=hours):
+            continue
+        chat_id = ticket.get("client_chat_id")
+        if not chat_id:
+            continue
+        send_message(
+            token,
+            chat_id,
+            "Спасибо за обращение! Мастер ещё не ответил. Мы вернёмся с ответом в рабочее время.",
+        )
+        ticket["auto_response_sent_at"] = now_iso(timezone)
+        save_storage(storage)
+        logger.info("auto_response sent ticket=%s", ticket.get("ticket_id"))
 
 
 def build_queue_overview(storage: dict, timezone: str) -> tuple[str, list[dict]]:
@@ -1232,6 +1369,10 @@ def build_draft_card(session: dict, chat: dict) -> str:
         collected.append(f"Запчасти: {data['parts_text']}")
     if data.get("last_visit_text"):
         collected.append(f"Вопрос: {data['last_visit_text']}")
+    if data.get("warranty_text"):
+        collected.append(f"Гарантия: {data['warranty_text']}")
+    if data.get("warranty_date"):
+        collected.append(f"Дата гарантии: {data['warranty_date']}")
     if data.get("booking_date") or data.get("booking_time"):
         collected.append(
             f"Запись: {data.get('booking_date', '-')} {data.get('booking_time', '-')}"
@@ -1536,6 +1677,8 @@ def build_updates_from_session(session: dict) -> dict:
         "parts_text": data.get("parts_text"),
         "last_visit_text": last_visit_text,
         "last_visit_category": data.get("last_visit_category"),
+        "warranty_date": data.get("warranty_date"),
+        "warranty_text": data.get("warranty_text"),
         "booking_date": data.get("booking_date"),
         "booking_time": data.get("booking_time"),
         "attachments_count": data.get("attachments_count"),
@@ -1568,8 +1711,10 @@ def build_updates_from_text(text: str, ticket: dict, timezone: str) -> dict:
         scenario = ticket.get("scenario_type")
         if scenario == "parts":
             updates["parts_text"] = append_text(ticket.get("parts_text"), normalized)
-        elif scenario == "last_visit":
+        elif scenario in {"history", "last_visit"}:
             updates["last_visit_text"] = append_text(ticket.get("last_visit_text"), normalized)
+        elif scenario == "warranty":
+            updates["warranty_text"] = append_text(ticket.get("warranty_text"), normalized)
         else:
             updates["problem_text"] = append_text(ticket.get("problem_text"), normalized)
     return updates
@@ -1595,8 +1740,6 @@ def validate_booking_date(value: date, timezone: str) -> str | None:
     today = datetime.now(ZoneInfo(timezone)).date()
     if value <= today:
         return "Запись день-в-день недоступна. Минимальная дата — завтра."
-    if value.weekday() >= 5:
-        return "Мы работаем только по будням (Пн–Пт). Выберите другой день."
     return None
 
 
@@ -1623,7 +1766,7 @@ def build_summary(ticket: dict) -> str:
     lines = [
         "ИТОГ ЗАЯВКИ",
         f"Номер: {ticket['ticket_id']}",
-        f"Тип: {ticket.get('scenario_type', '-')}",
+        f"Тип: {format_scenario(ticket.get('scenario_type'))}",
         f"ФИО: {ticket.get('fio', '-')}",
         f"Телефон: {ticket.get('phone', '-')}",
         f"Согласие ПДн: {'да' if ticket.get('pdn_consent') else 'нет'}",
@@ -1646,6 +1789,10 @@ def build_summary(ticket: dict) -> str:
         lines.append(f"Вопрос: {ticket['last_visit_text']}")
     if ticket.get("last_visit_category"):
         lines.append(f"Категория: {ticket['last_visit_category']}")
+    if ticket.get("warranty_date"):
+        lines.append(f"Дата гарантии: {ticket['warranty_date']}")
+    if ticket.get("warranty_text"):
+        lines.append(f"Гарантия: {ticket['warranty_text']}")
     if ticket.get("booking_date"):
         lines.append(f"Дата записи: {ticket['booking_date']}")
     if ticket.get("booking_time"):
@@ -1656,7 +1803,10 @@ def build_summary(ticket: dict) -> str:
 def build_tldr_fallback(ticket: dict) -> str:
     parts = []
     scenario = format_scenario(ticket.get("scenario_type"))
-    parts.append(f"{scenario}: {ticket.get('problem_text') or ticket.get('parts_text') or ticket.get('last_visit_text') or '—'}")
+    parts.append(
+        f"{scenario}: "
+        f"{ticket.get('problem_text') or ticket.get('parts_text') or ticket.get('last_visit_text') or ticket.get('warranty_text') or '—'}"
+    )
     car_bits = []
     if ticket.get("car_make_model"):
         car_bits.append(ticket["car_make_model"])
@@ -1728,6 +1878,10 @@ def ask_current_step(token: str, chat_id: int, session: dict) -> None:
         )
     elif stage == "last_visit_description":
         send_message(token, chat_id, "Опишите вопрос по прошлому визиту.")
+    elif stage == "warranty_date":
+        send_message(token, chat_id, "Укажите дату визита или покупки, по которой нужен гарантийный вопрос.")
+    elif stage == "warranty_description":
+        send_message(token, chat_id, "Кратко опишите гарантийный вопрос.")
     elif stage == "parts_text":
         send_message(token, chat_id, "Какие запчасти нужны? Можно списком.")
     elif stage == "parts_offer_booking":
@@ -1777,6 +1931,8 @@ def build_ticket_from_session(session: dict, timezone: str, storage: dict) -> di
         "parts_text": data.get("parts_text"),
         "last_visit_text": last_visit_text,
         "last_visit_category": data.get("last_visit_category"),
+        "warranty_date": data.get("warranty_date"),
+        "warranty_text": data.get("warranty_text"),
         "booking_date": data.get("booking_date"),
         "booking_time": data.get("booking_time"),
         "attachments_count": data.get("attachments_count", 0),
@@ -1785,12 +1941,16 @@ def build_ticket_from_session(session: dict, timezone: str, storage: dict) -> di
         "client_chat_id": data.get("client_chat_id"),
         "reminded_at": None,
         "last_master_notify_at": None,
+        "master_response_at": None,
+        "auto_response_sent_at": None,
+        "day_type": get_day_type(timezone),
         "ttl_expires_at": data.get("ttl_expires_at", ttl_iso(timezone, TTL_HOURS)),
     }
 
 
 def compute_next_stage(session: dict) -> str:
     data = session.get("data", {})
+    weekend_mode = bool(data.get("weekend_mode"))
     if not data.get("fio"):
         return "fio"
     if not data.get("phone"):
@@ -1816,47 +1976,81 @@ def compute_next_stage(session: dict) -> str:
         if not data.get("booking_time"):
             return "booking_time"
         return "done"
-    if scenario == "last_visit":
+    if scenario in {"history", "last_visit"}:
         if not data.get("last_visit_date"):
             return "last_visit_date"
         if not data.get("last_visit_category"):
             return "last_visit_category"
         if not data.get("last_visit_text"):
             return "last_visit_description"
+        if weekend_mode:
+            if not data.get("booking_date"):
+                return "booking_date"
+            if not data.get("booking_time"):
+                return "booking_time"
+        return "done"
+    if scenario == "warranty":
+        if not data.get("warranty_date"):
+            return "warranty_date"
+        if not data.get("warranty_text"):
+            return "warranty_description"
+        if weekend_mode:
+            if not data.get("booking_date"):
+                return "booking_date"
+            if not data.get("booking_time"):
+                return "booking_time"
         return "done"
     if scenario == "parts":
         if not data.get("parts_text"):
             return "parts_text"
-        if data.get("wants_booking") is None:
-            return "parts_offer_booking"
-        if data.get("wants_booking"):
-            if not data.get("problem_text"):
-                return "booking_purpose"
+        if weekend_mode:
             if not data.get("booking_date"):
                 return "booking_date"
             if not data.get("booking_time"):
                 return "booking_time"
+        else:
+            if data.get("wants_booking") is None:
+                return "parts_offer_booking"
+            if data.get("wants_booking"):
+                if not data.get("problem_text"):
+                    return "booking_purpose"
+                if not data.get("booking_date"):
+                    return "booking_date"
+                if not data.get("booking_time"):
+                    return "booking_time"
         return "done"
     if scenario == "repair":
         if not data.get("problem_text"):
             return "repair_text"
-        if data.get("wants_booking") is None:
-            return "repair_offer_booking"
-        if data.get("wants_booking"):
+        if weekend_mode:
             if not data.get("booking_date"):
                 return "booking_date"
             if not data.get("booking_time"):
                 return "booking_time"
+        else:
+            if data.get("wants_booking") is None:
+                return "repair_offer_booking"
+            if data.get("wants_booking"):
+                if not data.get("booking_date"):
+                    return "booking_date"
+                if not data.get("booking_time"):
+                    return "booking_time"
         return "done"
     if scenario == "other":
         if not data.get("problem_text"):
             return "other_text"
+        if weekend_mode:
+            if not data.get("booking_date"):
+                return "booking_date"
+            if not data.get("booking_time"):
+                return "booking_time"
         return "done"
     return "done"
 
 
 def list_missing_fields(session: dict) -> list[str]:
     data = session.get("data", {})
+    weekend_mode = bool(data.get("weekend_mode"))
     missing = []
     if not data.get("fio"):
         missing.append("fio")
@@ -1882,38 +2076,70 @@ def list_missing_fields(session: dict) -> list[str]:
             missing.append("booking_date")
         if not data.get("booking_time"):
             missing.append("booking_time")
-    if scenario == "last_visit":
+    if scenario in {"history", "last_visit"}:
         if not data.get("last_visit_date"):
             missing.append("last_visit_date")
         if not data.get("last_visit_category"):
             missing.append("last_visit_category")
         if not data.get("last_visit_text"):
             missing.append("last_visit_text")
+        if weekend_mode:
+            if not data.get("booking_date"):
+                missing.append("booking_date")
+            if not data.get("booking_time"):
+                missing.append("booking_time")
+    if scenario == "warranty":
+        if not data.get("warranty_date"):
+            missing.append("warranty_date")
+        if not data.get("warranty_text"):
+            missing.append("warranty_text")
+        if weekend_mode:
+            if not data.get("booking_date"):
+                missing.append("booking_date")
+            if not data.get("booking_time"):
+                missing.append("booking_time")
     if scenario == "parts":
         if not data.get("parts_text"):
             missing.append("parts_text")
-        if data.get("wants_booking") is None:
-            missing.append("wants_booking")
-        if data.get("wants_booking"):
-            if not data.get("problem_text"):
-                missing.append("problem_text")
+        if weekend_mode:
             if not data.get("booking_date"):
                 missing.append("booking_date")
             if not data.get("booking_time"):
                 missing.append("booking_time")
+        else:
+            if data.get("wants_booking") is None:
+                missing.append("wants_booking")
+            if data.get("wants_booking"):
+                if not data.get("problem_text"):
+                    missing.append("problem_text")
+                if not data.get("booking_date"):
+                    missing.append("booking_date")
+                if not data.get("booking_time"):
+                    missing.append("booking_time")
     if scenario == "repair":
         if not data.get("problem_text"):
             missing.append("problem_text")
-        if data.get("wants_booking") is None:
-            missing.append("wants_booking")
-        if data.get("wants_booking"):
+        if weekend_mode:
             if not data.get("booking_date"):
                 missing.append("booking_date")
             if not data.get("booking_time"):
                 missing.append("booking_time")
+        else:
+            if data.get("wants_booking") is None:
+                missing.append("wants_booking")
+            if data.get("wants_booking"):
+                if not data.get("booking_date"):
+                    missing.append("booking_date")
+                if not data.get("booking_time"):
+                    missing.append("booking_time")
     if scenario == "other":
         if not data.get("problem_text"):
             missing.append("problem_text")
+        if weekend_mode:
+            if not data.get("booking_date"):
+                missing.append("booking_date")
+            if not data.get("booking_time"):
+                missing.append("booking_time")
     return missing
 
 
@@ -1976,6 +2202,14 @@ def apply_ai_fields(
             cleaned = normalize_text(str(value))
             if cleaned:
                 data["last_visit_date"] = cleaned
+        elif key == "warranty_text" and not data.get("warranty_text"):
+            cleaned = normalize_text(str(value))
+            if cleaned:
+                data["warranty_text"] = cleaned
+        elif key == "warranty_date" and not data.get("warranty_date"):
+            cleaned = normalize_text(str(value))
+            if cleaned:
+                data["warranty_date"] = cleaned
         elif key == "booking_date" and not data.get("booking_date"):
             normalized = normalize_date_string(str(value))
             if normalized:
@@ -2088,6 +2322,7 @@ def finalize_ticket(
         fields_changed = apply_ticket_updates(active_ticket, updates, timezone)
         if fields_changed:
             active_ticket["last_master_notify_at"] = now_iso(timezone)
+            update_smart_queue(storage, timezone)
             save_storage(storage)
             notify_ticket_update(
                 token,
@@ -2133,10 +2368,15 @@ def finalize_ticket(
     ticket["tldr"] = tldr_reply or build_tldr_fallback(ticket)
     storage.setdefault("tickets", []).append(ticket)
     clear_session(storage, chat_id)
+    update_smart_queue(storage, timezone)
     save_storage(storage)
     summary = build_summary(ticket)
     send_message(token, chat_id, summary)
-    send_message(token, chat_id, "Спасибо! Заявка сохранена.")
+    day_type = ticket.get("day_type") or get_day_type(timezone)
+    if day_type == "weekend":
+        send_message(token, chat_id, "Заявка принята. Мастер свяжется в рабочее время")
+    else:
+        send_message(token, chat_id, "Заявка принята. Подтверждение записи — только мастером.")
     ticket["finalized_at"] = now_iso(timezone)
     ticket["last_master_notify_at"] = now_iso(timezone)
     save_storage(storage)
@@ -2160,6 +2400,11 @@ def ensure_session(storage: dict, chat_id: int, timezone: str) -> dict:
     session = get_session(storage, chat_id)
     if not session:
         return {}
+    data = session.setdefault("data", {})
+    if "weekend_mode" not in data:
+        data["weekend_mode"] = get_day_type(timezone) == "weekend"
+        save_session(storage, chat_id, session)
+        save_storage(storage)
     ttl_str = session.get("ttl_expires_at")
     if not ttl_str:
         return session
@@ -2186,6 +2431,30 @@ def update_session_client_context(session: dict, chat: dict) -> None:
         data["client_username"] = f"@{chat['username']}"
     if chat.get("id"):
         data["client_chat_id"] = chat["id"]
+
+
+def start_scenario_session(
+    token: str,
+    chat_id: int,
+    chat: dict,
+    scenario: str,
+    storage: dict,
+    timezone: str,
+) -> None:
+    session = {
+        "scenario": scenario,
+        "stage": "fio",
+        "created_at": now_iso(timezone),
+        "updated_at": now_iso(timezone),
+        "ttl_expires_at": ttl_iso(timezone, TTL_HOURS),
+        "data": {},
+    }
+    update_session_client_context(session, chat)
+    session.setdefault("data", {})["weekend_mode"] = get_day_type(timezone) == "weekend"
+    get_or_create_draft_id(session, chat_id, timezone)
+    save_session(storage, chat_id, session)
+    save_storage(storage)
+    send_message(token, chat_id, "Отлично! Начнём. Как вас зовут? Укажите имя и фамилию.")
 
 
 def process_master_request(
@@ -2312,6 +2581,8 @@ def update_ticket_status(
         return
     ticket["status"] = new_status
     ticket["updated_at"] = now_iso(timezone)
+    ticket["master_response_at"] = now_iso(timezone)
+    update_smart_queue(storage, timezone)
     save_storage(storage)
     admin_logger.info(
         "status change ticket_id=%s by=%s status=%s",
@@ -2365,6 +2636,7 @@ def handle_ask_more_request(
         return
     ticket["clarification_status"] = "selecting"
     ticket["clarification_requested_at"] = now_iso(timezone)
+    ticket["master_response_at"] = now_iso(timezone)
     save_storage(storage)
     send_message(token, client_chat_id, "Уточните, пожалуйста: выберите/введите вопрос.")
     send_message(
@@ -2438,6 +2710,7 @@ def handle_ask_more_selection(
     ticket["clarification_key"] = key
     ticket["clarification_question"] = question
     ticket["clarification_requested_at"] = now_iso(timezone)
+    ticket["master_response_at"] = now_iso(timezone)
     save_storage(storage)
     send_message(token, client_chat_id, f"Уточните, пожалуйста: {question}")
     send_message(token, from_user.get("id"), f"Запрос отправлен клиенту: {question}")
@@ -2480,6 +2753,7 @@ def handle_ask_more_free_text(
     ticket["clarification_key"] = "other"
     ticket["clarification_question"] = question_text
     ticket["clarification_requested_at"] = now_iso(timezone)
+    ticket["master_response_at"] = now_iso(timezone)
     clear_admin_session(storage, chat_id)
     save_storage(storage)
     send_message(token, client_chat_id, f"Уточните, пожалуйста: {question_text}")
@@ -2766,6 +3040,8 @@ def handle_admin_callback(
             return True
         ticket["status"] = new_status
         ticket["updated_at"] = now_iso(timezone)
+        ticket["master_response_at"] = now_iso(timezone)
+        update_smart_queue(storage, timezone)
         save_storage(storage)
         if callback_id:
             answer_callback_query(token, callback_id, "Статус обновлён.")
@@ -3070,7 +3346,8 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
 
     if active_ticket and not session.get("stage") and text in {
         MENU_BOOKING,
-        MENU_LAST_VISIT,
+        MENU_WARRANTY,
+        MENU_HISTORY,
         MENU_PARTS,
         MENU_REPAIR,
         MENU_OTHER,
@@ -3195,6 +3472,16 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
             if session.get("stage"):
                 ask_current_step(token, chat_id, session)
             return
+        payload = ""
+        parts = text.split(maxsplit=1)
+        if len(parts) > 1:
+            payload = parts[1].strip()
+        if payload in START_SCENARIO_MAP:
+            scenario = START_SCENARIO_MAP[payload]
+            record_click_stat(storage, chat_id, payload, scenario, timezone)
+            save_storage(storage)
+            start_scenario_session(token, chat_id, chat, scenario, storage, timezone)
+            return
         send_message(
             token,
             chat_id,
@@ -3233,6 +3520,7 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
         fields_changed = apply_ticket_updates(active_ticket, updates, timezone)
         if fields_changed:
             active_ticket["last_master_notify_at"] = now_iso(timezone)
+            update_smart_queue(storage, timezone)
             save_storage(storage)
             notify_ticket_update(
                 token,
@@ -3254,7 +3542,8 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
 
     if session.get("stage") and text in {
         MENU_BOOKING,
-        MENU_LAST_VISIT,
+        MENU_WARRANTY,
+        MENU_HISTORY,
         MENU_PARTS,
         MENU_REPAIR,
         MENU_OTHER,
@@ -3270,31 +3559,22 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
     if not session.get("stage"):
         if text in {
             MENU_BOOKING,
-            MENU_LAST_VISIT,
+            MENU_WARRANTY,
+            MENU_HISTORY,
             MENU_PARTS,
             MENU_REPAIR,
             MENU_OTHER,
         }:
             scenario_map = {
                 MENU_BOOKING: "booking",
-                MENU_LAST_VISIT: "last_visit",
+                MENU_WARRANTY: "warranty",
+                MENU_HISTORY: "history",
                 MENU_PARTS: "parts",
                 MENU_REPAIR: "repair",
                 MENU_OTHER: "other",
             }
-            session = {
-                "scenario": scenario_map[text],
-                "stage": "fio",
-                "created_at": now_iso(timezone),
-                "updated_at": now_iso(timezone),
-                "ttl_expires_at": ttl_iso(timezone, TTL_HOURS),
-                "data": {},
-            }
-            update_session_client_context(session, chat)
-            get_or_create_draft_id(session, chat_id, timezone)
-            save_session(storage, chat_id, session)
-            save_storage(storage)
-            send_message(token, chat_id, "Отлично! Начнём. Как вас зовут? Укажите имя и фамилию.")
+            scenario = scenario_map[text]
+            start_scenario_session(token, chat_id, chat, scenario, storage, timezone)
             return
         send_message(
             token,
@@ -3306,6 +3586,7 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
 
     stage = session.get("stage")
     data = session.setdefault("data", {})
+    weekend_mode = bool(data.get("weekend_mode"))
 
     if stage and handle_ai_message(
         token,
@@ -3513,10 +3794,46 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
             return
         data["last_visit_text"] = normalize_text(text)
         update_session_ttl(session, timezone)
+        if weekend_mode and (not data.get("booking_date") or not data.get("booking_time")):
+            session["stage"] = "booking_date"
+            save_session(storage, chat_id, session)
+            save_storage(storage)
+            ask_current_step(token, chat_id, session)
+        else:
+            save_session(storage, chat_id, session)
+            finalize_ticket(
+                token, chat_id, session, storage, timezone, logger, master_usernames, ai_service
+            )
+        return
+
+    if stage == "warranty_date":
+        if not normalize_text(text):
+            send_message(token, chat_id, "Введите дату визита или покупки.")
+            return
+        data["warranty_date"] = normalize_text(text)
+        session["stage"] = "warranty_description"
+        update_session_ttl(session, timezone)
         save_session(storage, chat_id, session)
-        finalize_ticket(
-            token, chat_id, session, storage, timezone, logger, master_usernames, ai_service
-        )
+        save_storage(storage)
+        ask_current_step(token, chat_id, session)
+        return
+
+    if stage == "warranty_description":
+        if not normalize_text(text):
+            send_message(token, chat_id, "Опишите гарантийный вопрос.")
+            return
+        data["warranty_text"] = normalize_text(text)
+        update_session_ttl(session, timezone)
+        if weekend_mode and (not data.get("booking_date") or not data.get("booking_time")):
+            session["stage"] = "booking_date"
+            save_session(storage, chat_id, session)
+            save_storage(storage)
+            ask_current_step(token, chat_id, session)
+        else:
+            save_session(storage, chat_id, session)
+            finalize_ticket(
+                token, chat_id, session, storage, timezone, logger, master_usernames, ai_service
+            )
         return
 
     if stage == "parts_text":
@@ -3524,7 +3841,7 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
             send_message(token, chat_id, "Опишите, какие запчасти нужны.")
             return
         data["parts_text"] = normalize_text(text)
-        session["stage"] = "parts_offer_booking"
+        session["stage"] = "booking_date" if weekend_mode else "parts_offer_booking"
         update_session_ttl(session, timezone)
         save_session(storage, chat_id, session)
         save_storage(storage)
@@ -3532,6 +3849,13 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
         return
 
     if stage == "parts_offer_booking":
+        if weekend_mode:
+            session["stage"] = "booking_date"
+            update_session_ttl(session, timezone)
+            save_session(storage, chat_id, session)
+            save_storage(storage)
+            ask_current_step(token, chat_id, session)
+            return
         lower = text.strip().lower()
         if lower in YES_OPTIONS:
             data["wants_booking"] = True
@@ -3558,7 +3882,7 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
             send_message(token, chat_id, "Опишите симптомы.")
             return
         data["problem_text"] = normalize_text(text)
-        session["stage"] = "repair_offer_booking"
+        session["stage"] = "booking_date" if weekend_mode else "repair_offer_booking"
         update_session_ttl(session, timezone)
         save_session(storage, chat_id, session)
         save_storage(storage)
@@ -3566,6 +3890,13 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
         return
 
     if stage == "repair_offer_booking":
+        if weekend_mode:
+            session["stage"] = "booking_date"
+            update_session_ttl(session, timezone)
+            save_session(storage, chat_id, session)
+            save_storage(storage)
+            ask_current_step(token, chat_id, session)
+            return
         lower = text.strip().lower()
         if lower in YES_OPTIONS:
             data["wants_booking"] = True
@@ -3593,10 +3924,16 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
             return
         data["problem_text"] = normalize_text(text)
         update_session_ttl(session, timezone)
-        save_session(storage, chat_id, session)
-        finalize_ticket(
-            token, chat_id, session, storage, timezone, logger, master_usernames, ai_service
-        )
+        if weekend_mode and (not data.get("booking_date") or not data.get("booking_time")):
+            session["stage"] = "booking_date"
+            save_session(storage, chat_id, session)
+            save_storage(storage)
+            ask_current_step(token, chat_id, session)
+        else:
+            save_session(storage, chat_id, session)
+            finalize_ticket(
+                token, chat_id, session, storage, timezone, logger, master_usernames, ai_service
+            )
         return
 
     send_message(token, chat_id, "Пожалуйста, следуйте подсказкам.")
@@ -3606,8 +3943,10 @@ def determine_next_stage_after_car(session: dict) -> str:
     scenario = session.get("scenario")
     if scenario == "booking":
         return "booking_purpose"
-    if scenario == "last_visit":
+    if scenario in {"history", "last_visit"}:
         return "last_visit_date"
+    if scenario == "warranty":
+        return "warranty_date"
     if scenario == "parts":
         return "parts_text"
     if scenario == "repair":
@@ -3632,6 +3971,7 @@ def poll_updates(token: str, logger: logging.Logger) -> None:
     timezone = os.getenv("TIMEZONE", "Europe/Moscow")
     master_usernames = parse_master_usernames()
     last_reminder_check = 0.0
+    last_auto_response_check = 0.0
 
     polling_logger.info("polling started (version=%s)", VERSION)
 
@@ -3664,6 +4004,10 @@ def poll_updates(token: str, logger: logging.Logger) -> None:
                 storage = load_storage()
                 check_reminders(token, storage, timezone, master_usernames, logger)
                 last_reminder_check = time.time()
+            if time.time() - last_auto_response_check >= 60:
+                storage = load_storage()
+                check_auto_responses(token, storage, timezone, logger)
+                last_auto_response_check = time.time()
         except Exception as exc:  # noqa: BLE001 - keep polling on errors
             polling_logger.exception("polling error: %s", exc)
             time.sleep(POLLING_SLEEP_SECONDS)
