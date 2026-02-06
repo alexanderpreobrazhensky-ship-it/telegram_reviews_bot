@@ -48,13 +48,24 @@ class AIResult:
 
 
 class AIService:
-    def __init__(self, logger: logging.Logger) -> None:
+    def __init__(self, logger: logging.Logger, settings: dict | None = None) -> None:
         self.logger = logger
         self.api_key = self._get_env_value("CLIENT_DEEPSEEK_API_KEY", "DEEPSEEK_API_KEY")
         self.base_url = self._get_env_value("CLIENT_DEEPSEEK_BASE_URL", "DEEPSEEK_BASE_URL")
         self.model = self._get_env_value("CLIENT_DEEPSEEK_MODEL", "DEEPSEEK_MODEL")
         self.timeout = self._get_timeout_seconds()
         self.force_fallback = self._get_env_value("CLIENT_FORCE_FALLBACK", "FORCE_FALLBACK") == "1"
+        if settings:
+            if "ai_timeout_seconds" in settings and settings["ai_timeout_seconds"] is not None:
+                try:
+                    self.timeout = int(settings["ai_timeout_seconds"])
+                except (TypeError, ValueError):
+                    pass
+            if "force_fallback" in settings and settings["force_fallback"] is not None:
+                try:
+                    self.force_fallback = bool(int(settings["force_fallback"]))
+                except (TypeError, ValueError):
+                    self.force_fallback = bool(settings["force_fallback"])
         self._client: Optional[OpenAI] = None
 
     @staticmethod
@@ -82,6 +93,26 @@ class AIService:
         if not self.api_key or not self.base_url or not self.model:
             return False
         return True
+
+    def is_configured(self) -> bool:
+        return bool(self.api_key and self.base_url and self.model)
+
+    def ping(self, timeout_seconds: int = 3) -> bool:
+        if not self.is_configured():
+            return False
+        messages = [
+            {"role": "system", "content": "Отвечай одним словом."},
+            {"role": "user", "content": "ping"},
+        ]
+        previous_timeout = self.timeout
+        self.timeout = min(self.timeout, timeout_seconds) if self.timeout else timeout_seconds
+        try:
+            _ = self._chat(messages)
+            return True
+        except Exception:  # noqa: BLE001
+            return False
+        finally:
+            self.timeout = previous_timeout
 
     def _client_instance(self) -> OpenAI:
         if not self._client:

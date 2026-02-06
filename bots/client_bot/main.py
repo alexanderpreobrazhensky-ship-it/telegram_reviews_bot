@@ -1,10 +1,13 @@
+import csv
 import logging
 import os
 import time
+from collections import deque
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import requests
+from openpyxl import Workbook
 
 from services.ai_service import AIService, normalize_date_string
 from storage import (
@@ -32,6 +35,15 @@ MENU_MASTER = "👨‍🔧 Связаться с мастером / Написа
 
 YES_OPTIONS = {"да", "yes", "ага"}
 NO_OPTIONS = {"нет", "no"}
+ADMIN_PAGE_SIZE = 5
+ADMIN_LOG_LINES = 200
+ADMIN_STATE_NONE = "none"
+ADMIN_STATE_ADD_ADMIN = "await_admin_id"
+ADMIN_STATE_ADD_BLOCK = "await_block_id"
+ADMIN_STATE_EXPORT_RANGE = "await_export_range"
+ADMIN_STATE_EXPORT_STATUS = "await_export_status"
+ADMIN_STATE_EXPORT_FORMAT = "await_export_format"
+
 AI_ASK_BLOCKLIST = {
     "pdn",
     "was_here",
@@ -207,6 +219,22 @@ def send_message(token: str, chat_id: int, text: str, reply_markup: dict | None 
     return True
 
 
+def send_document(token: str, chat_id: int, file_path: str, caption: str | None = None) -> bool:
+    logger = logging.getLogger("client_bot")
+    url = f"https://api.telegram.org/bot{token}/sendDocument"
+    data = {"chat_id": chat_id}
+    if caption:
+        data["caption"] = caption
+    try:
+        with open(file_path, "rb") as file_handle:
+            response = requests.post(url, data=data, files={"document": file_handle}, timeout=20)
+        response.raise_for_status()
+    except (OSError, requests.RequestException) as exc:
+        logger.error("telegram sendDocument error chat_id=%s error=%s", chat_id, exc)
+        return False
+    return True
+
+
 def answer_callback_query(token: str, callback_query_id: str, text: str | None = None) -> None:
     url = f"https://api.telegram.org/bot{token}/answerCallbackQuery"
     payload: dict = {"callback_query_id": callback_query_id}
@@ -232,6 +260,107 @@ def parse_master_usernames() -> list[str]:
     if not usernames:
         raise RuntimeError("MASTER_USERNAMES is required")
     return usernames
+
+
+def parse_csv_ints(raw: str | None) -> list[int]:
+    if not raw:
+        return []
+    values = []
+    for item in raw.split(","):
+        cleaned = item.strip()
+        if not cleaned:
+            continue
+        try:
+            values.append(int(cleaned))
+        except ValueError:
+            continue
+    return values
+
+
+def get_env_value(primary: str, fallback: str, default: str = "") -> str:
+    primary_value = os.getenv(primary)
+    if primary_value is not None:
+        return primary_value.strip()
+    fallback_value = os.getenv(fallback)
+    if fallback_value is None:
+        return default
+    return fallback_value.strip()
+
+
+def get_env_int(primary: str, fallback: str, default: int) -> int:
+    raw_value = get_env_value(primary, fallback, "")
+    if not raw_value:
+        return default
+    try:
+        return int(raw_value)
+    except ValueError:
+        return default
+
+
+def ensure_storage_defaults(storage: dict) -> None:
+    storage.setdefault("tickets", [])
+    storage.setdefault("sessions", {})
+    storage.setdefault("admin_sessions", {})
+    storage.setdefault("admins", [])
+    storage.setdefault("settings", {})
+    storage.setdefault("blocklist", [])
+    env_admins = parse_csv_ints(os.getenv("CLIENT_ADMIN_IDS", ""))
+    if env_admins:
+        merged = {int(value) for value in storage.get("admins", []) if str(value).isdigit()}
+        merged.update(env_admins)
+        storage["admins"] = sorted(merged)
+    settings = storage.setdefault("settings", {})
+    settings.setdefault(
+        "force_fallback",
+        1 if get_env_value("CLIENT_FORCE_FALLBACK", "FORCE_FALLBACK", "0") == "1" else 0,
+    )
+    settings.setdefault(
+        "ai_timeout_seconds",
+        get_env_int("CLIENT_AI_TIMEOUT_SECONDS", "AI_TIMEOUT_SECONDS", 10),
+    )
+    settings.setdefault(
+        "reminder_minutes",
+        get_env_int("CLIENT_REMINDER_MINUTES", "REMINDER_MINUTES", 30),
+    )
+
+
+def get_settings(storage: dict) -> dict:
+    ensure_storage_defaults(storage)
+    settings = storage.get("settings", {})
+    return {
+        "force_fallback": int(settings.get("force_fallback", 0)),
+        "ai_timeout_seconds": int(settings.get("ai_timeout_seconds", 10)),
+        "reminder_minutes": int(settings.get("reminder_minutes", 30)),
+    }
+
+
+def get_admin_ids(storage: dict) -> set[int]:
+    ensure_storage_defaults(storage)
+    ids = {int(value) for value in storage.get("admins", []) if str(value).isdigit()}
+    ids.update(parse_csv_ints(os.getenv("CLIENT_ADMIN_IDS", "")))
+    return ids
+
+
+def is_admin(chat_id: int | None, storage: dict) -> bool:
+    if chat_id is None:
+        return False
+    return chat_id in get_admin_ids(storage)
+
+
+def get_admin_session(storage: dict, chat_id: int) -> dict:
+    ensure_storage_defaults(storage)
+    return storage.setdefault("admin_sessions", {}).get(str(chat_id), {"state": ADMIN_STATE_NONE})
+
+
+def set_admin_session(storage: dict, chat_id: int, state: str, data: dict | None = None) -> None:
+    ensure_storage_defaults(storage)
+    payload = {"state": state, "data": data or {}}
+    storage.setdefault("admin_sessions", {})[str(chat_id)] = payload
+
+
+def clear_admin_session(storage: dict, chat_id: int) -> None:
+    ensure_storage_defaults(storage)
+    storage.setdefault("admin_sessions", {}).pop(str(chat_id), None)
 
 
 def format_was_here(value: str | None) -> str:
@@ -276,19 +405,13 @@ def stage_description(stage: str | None) -> str:
 
 
 def build_master_status_keyboard(ticket: dict) -> dict:
-    ticket_id = str(ticket.get("ticket_id", ""))
-    keyboard = [
-        [
-            {"text": "В работу", "callback_data": f"ticket:{ticket_id}:in_work"},
-            {"text": "Закрыть", "callback_data": f"ticket:{ticket_id}:closed"},
-        ]
-    ]
+    keyboard: list[list[dict]] = []
     username = ticket.get("client_username")
     if username:
         keyboard.append(
             [{"text": "Связаться с клиентом", "url": f"https://t.me/{username.lstrip('@')}"}]
         )
-    return {"inline_keyboard": keyboard}
+    return {"inline_keyboard": keyboard} if keyboard else {}
 
 
 def build_master_card(ticket: dict, timezone: str) -> str:
@@ -348,6 +471,410 @@ def build_master_card(ticket: dict, timezone: str) -> str:
             f"TL;DR: {tldr}",
         ]
     )
+
+
+def format_ticket_status(value: str | None) -> str:
+    mapping = {"new": "Новая", "in_work": "В работе", "closed": "Закрыта"}
+    return mapping.get(value or "", "—")
+
+
+def format_dt(value: str | None, timezone: str) -> str:
+    if not value:
+        return "—"
+    try:
+        return (
+            datetime.fromisoformat(value)
+            .astimezone(ZoneInfo(timezone))
+            .strftime("%Y-%m-%d %H:%M")
+        )
+    except ValueError:
+        return value
+
+
+def build_admin_main_keyboard() -> dict:
+    return {
+        "inline_keyboard": [
+            [{"text": "🧪 Самодиагностика", "callback_data": "admin:diag"}],
+            [{"text": "📋 Заявки", "callback_data": "admin:tickets"}],
+            [{"text": "📤 Выгрузка заявок", "callback_data": "admin:export"}],
+            [{"text": "📊 Статистика", "callback_data": "admin:stats"}],
+            [{"text": "⚙️ Режимы работы (AI/Fallback)", "callback_data": "admin:modes"}],
+            [{"text": "⏰ Напоминания", "callback_data": "admin:reminders"}],
+            [{"text": "👥 Администраторы", "callback_data": "admin:admins"}],
+            [{"text": "📄 Логи", "callback_data": "admin:logs"}],
+            [{"text": "🚫 Блок-лист", "callback_data": "admin:blocklist"}],
+            [{"text": "Закрыть", "callback_data": "admin:close"}],
+        ]
+    }
+
+
+def build_admin_tickets_filter_keyboard() -> dict:
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "Новые", "callback_data": "admin:tickets:new:1"},
+                {"text": "В работе", "callback_data": "admin:tickets:in_work:1"},
+                {"text": "Закрытые", "callback_data": "admin:tickets:closed:1"},
+            ],
+            [{"text": "Назад", "callback_data": "admin:menu"}],
+        ]
+    }
+
+
+def build_admin_ticket_list_keyboard(tickets: list[dict], status: str, page: int, total_pages: int) -> dict:
+    rows: list[list[dict]] = []
+    for ticket in tickets:
+        ticket_id = ticket.get("ticket_id", "")
+        rows.append([{"text": ticket_id, "callback_data": f"admin:ticket:{ticket_id}"}])
+    nav_row: list[dict] = []
+    if page > 1:
+        nav_row.append({"text": "⬅️", "callback_data": f"admin:tickets:{status}:{page - 1}"})
+    if page < total_pages:
+        nav_row.append({"text": "➡️", "callback_data": f"admin:tickets:{status}:{page + 1}"})
+    if nav_row:
+        rows.append(nav_row)
+    rows.append([{"text": "Назад", "callback_data": "admin:tickets"}])
+    return {"inline_keyboard": rows}
+
+
+def build_admin_ticket_detail_keyboard(ticket: dict) -> dict:
+    ticket_id = ticket.get("ticket_id", "")
+    rows = [
+        [
+            {"text": "✅ В работу", "callback_data": f"admin:ticket_status:{ticket_id}:in_work"},
+            {"text": "✅ Закрыта", "callback_data": f"admin:ticket_status:{ticket_id}:closed"},
+        ],
+        [{"text": "↩️ Вернуть в новые", "callback_data": f"admin:ticket_status:{ticket_id}:new"}],
+    ]
+    username = ticket.get("client_username")
+    if username:
+        rows.append(
+            [{"text": "👤 Связаться с клиентом", "url": f"https://t.me/{username.lstrip('@')}"}]
+        )
+    else:
+        rows.append(
+            [{"text": "👤 Показать tg_id", "callback_data": f"admin:ticket_contact:{ticket_id}"}]
+        )
+    rows.append([{"text": "Назад", "callback_data": "admin:tickets"}])
+    return {"inline_keyboard": rows}
+
+
+def build_admin_export_range_keyboard() -> dict:
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "Сегодня", "callback_data": "admin:export_range:today"},
+                {"text": "7 дней", "callback_data": "admin:export_range:7"},
+                {"text": "30 дней", "callback_data": "admin:export_range:30"},
+            ],
+            [{"text": "Назад", "callback_data": "admin:menu"}],
+        ]
+    }
+
+
+def build_admin_export_status_keyboard() -> dict:
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "Любой", "callback_data": "admin:export_status:any"},
+                {"text": "Новые", "callback_data": "admin:export_status:new"},
+                {"text": "В работе", "callback_data": "admin:export_status:in_work"},
+                {"text": "Закрытые", "callback_data": "admin:export_status:closed"},
+            ],
+            [{"text": "Назад", "callback_data": "admin:export"}],
+        ]
+    }
+
+
+def build_admin_export_format_keyboard() -> dict:
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "CSV", "callback_data": "admin:export_format:csv"},
+                {"text": "XLSX", "callback_data": "admin:export_format:xlsx"},
+            ],
+            [{"text": "Назад", "callback_data": "admin:export"}],
+        ]
+    }
+
+
+def build_admin_modes_keyboard(settings: dict) -> dict:
+    force_fallback = "1" if settings.get("force_fallback") else "0"
+    timeout = settings.get("ai_timeout_seconds")
+    return {
+        "inline_keyboard": [
+            [{"text": f"CLIENT_FORCE_FALLBACK = {force_fallback}", "callback_data": "admin:modes"}],
+            [{"text": f"CLIENT_AI_TIMEOUT_SECONDS = {timeout}", "callback_data": "admin:modes"}],
+            [
+                {"text": "Включить AI", "callback_data": "admin:modes:ai"},
+                {"text": "Принудительный fallback", "callback_data": "admin:modes:fallback"},
+            ],
+            [
+                {"text": "Таймаут 5", "callback_data": "admin:modes:timeout:5"},
+                {"text": "10", "callback_data": "admin:modes:timeout:10"},
+                {"text": "15", "callback_data": "admin:modes:timeout:15"},
+                {"text": "20", "callback_data": "admin:modes:timeout:20"},
+            ],
+            [{"text": "Назад", "callback_data": "admin:menu"}],
+        ]
+    }
+
+
+def build_admin_reminders_keyboard(settings: dict) -> dict:
+    reminder_minutes = settings.get("reminder_minutes")
+    return {
+        "inline_keyboard": [
+            [{"text": f"CLIENT_REMINDER_MINUTES = {reminder_minutes}", "callback_data": "admin:reminders"}],
+            [
+                {"text": "5", "callback_data": "admin:reminders:set:5"},
+                {"text": "15", "callback_data": "admin:reminders:set:15"},
+                {"text": "30", "callback_data": "admin:reminders:set:30"},
+                {"text": "60", "callback_data": "admin:reminders:set:60"},
+            ],
+            [{"text": "Отправить напоминание сейчас", "callback_data": "admin:reminders:send_all"}],
+            [{"text": "Назад", "callback_data": "admin:menu"}],
+        ]
+    }
+
+
+def build_admin_admins_keyboard() -> dict:
+    return {
+        "inline_keyboard": [
+            [{"text": "Добавить админа", "callback_data": "admin:admins:add"}],
+            [{"text": "Удалить админа", "callback_data": "admin:admins:remove"}],
+            [{"text": "Назад", "callback_data": "admin:menu"}],
+        ]
+    }
+
+
+def build_admin_admins_remove_keyboard(admin_ids: list[int]) -> dict:
+    rows = [[{"text": str(admin_id), "callback_data": f"admin:admins:remove_id:{admin_id}"}] for admin_id in admin_ids]
+    rows.append([{"text": "Назад", "callback_data": "admin:admins"}])
+    return {"inline_keyboard": rows}
+
+
+def build_admin_logs_keyboard() -> dict:
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "Всё", "callback_data": "admin:logs:filter:all"},
+                {"text": "Ошибки", "callback_data": "admin:logs:filter:error"},
+                {"text": "AI", "callback_data": "admin:logs:filter:ai"},
+                {"text": "Polling", "callback_data": "admin:logs:filter:polling"},
+            ],
+            [{"text": "Выгрузить лог файлом", "callback_data": "admin:logs:download"}],
+            [{"text": "Назад", "callback_data": "admin:menu"}],
+        ]
+    }
+
+
+def build_admin_blocklist_keyboard() -> dict:
+    return {
+        "inline_keyboard": [
+            [{"text": "Добавить в блок-лист", "callback_data": "admin:blocklist:add"}],
+            [{"text": "Удалить из блок-листа", "callback_data": "admin:blocklist:remove"}],
+            [{"text": "Назад", "callback_data": "admin:menu"}],
+        ]
+    }
+
+
+def build_admin_blocklist_remove_keyboard(blocklist: list[int]) -> dict:
+    rows = [[{"text": str(block_id), "callback_data": f"admin:blocklist:remove_id:{block_id}"}] for block_id in blocklist]
+    rows.append([{"text": "Назад", "callback_data": "admin:blocklist"}])
+    return {"inline_keyboard": rows}
+
+
+def build_admin_ticket_card(ticket: dict, timezone: str) -> str:
+    booking = "—"
+    if ticket.get("booking_date") or ticket.get("booking_time"):
+        booking = f"{ticket.get('booking_date', '-')}, {ticket.get('booking_time', '-')}"
+    return "\n".join(
+        [
+            f"Заявка {ticket.get('ticket_id')}",
+            f"Дата: {format_dt(ticket.get('created_at'), timezone)}",
+            f"ФИО: {ticket.get('fio', '—')}",
+            f"Телефон: {ticket.get('phone', '—')}",
+            f"Тип: {format_scenario(ticket.get('scenario_type'))}",
+            f"Запись: {booking}",
+            f"Вложения: {ticket.get('attachments_count', 0)}",
+            f"Статус: {format_ticket_status(ticket.get('status'))}",
+        ]
+    )
+
+
+def filter_tickets_by_status(tickets: list[dict], status: str) -> list[dict]:
+    if status == "any":
+        return list(tickets)
+    return [ticket for ticket in tickets if ticket.get("status", "new") == status]
+
+
+def filter_tickets_by_days(tickets: list[dict], days: int | None, timezone: str) -> list[dict]:
+    if days is None:
+        return list(tickets)
+    cutoff = datetime.now(ZoneInfo(timezone)) - timedelta(days=days)
+    filtered = []
+    for ticket in tickets:
+        created_at = ticket.get("created_at")
+        if not created_at:
+            continue
+        try:
+            created_dt = datetime.fromisoformat(created_at).astimezone(ZoneInfo(timezone))
+        except ValueError:
+            continue
+        if created_dt >= cutoff:
+            filtered.append(ticket)
+    return filtered
+
+
+def build_export_rows(tickets: list[dict]) -> list[list[str]]:
+    rows = []
+    for ticket in tickets:
+        rows.append(
+            [
+                str(ticket.get("ticket_id", "")),
+                str(ticket.get("created_at", "")),
+                str(ticket.get("status", "")),
+                str(ticket.get("fio", "")),
+                str(ticket.get("phone", "")),
+                str(ticket.get("client_chat_id", "")),
+                str(ticket.get("client_username", "")),
+                str(ticket.get("was_here_before", "")),
+                str(ticket.get("car_plate", "")),
+                str(ticket.get("car_make_model", "")),
+                str(ticket.get("vin", "")),
+                str(ticket.get("scenario_type", "")),
+                str(ticket.get("problem_text", "")),
+                str(ticket.get("booking_date", "")),
+                str(ticket.get("booking_time", "")),
+                str(ticket.get("attachments_count", "")),
+                str(ticket.get("tldr", "")),
+            ]
+        )
+    return rows
+
+
+def build_export_files(
+    tickets: list[dict],
+    export_dir: str,
+    filename_prefix: str,
+) -> tuple[str, str]:
+    os.makedirs(export_dir, exist_ok=True)
+    headers = [
+        "ticket_id",
+        "created_at",
+        "status",
+        "fio",
+        "phone",
+        "tg_id",
+        "username",
+        "was_here_before",
+        "plate",
+        "make_model",
+        "vin",
+        "type",
+        "description",
+        "booking_date",
+        "booking_time",
+        "attachments_count",
+        "tl_dr",
+    ]
+    rows = build_export_rows(tickets)
+    csv_path = os.path.join(export_dir, f"{filename_prefix}.csv")
+    with open(csv_path, "w", encoding="utf-8", newline="") as csv_file:
+        writer = csv.writer(csv_file)
+        writer.writerow(headers)
+        writer.writerows(rows)
+    xlsx_path = os.path.join(export_dir, f"{filename_prefix}.xlsx")
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(headers)
+    for row in rows:
+        sheet.append(row)
+    workbook.save(xlsx_path)
+    return csv_path, xlsx_path
+
+
+def read_log_lines(log_path: str, mode: str) -> list[str]:
+    if not os.path.exists(log_path):
+        return ["Лог файл не найден."]
+    lines: deque[str] = deque(maxlen=ADMIN_LOG_LINES)
+    with open(log_path, "r", encoding="utf-8") as log_file:
+        for line in log_file:
+            line = line.rstrip("\n")
+            if mode == "error" and "ERROR" not in line and "Exception" not in line:
+                continue
+            if mode == "ai" and "ai_" not in line and "AI" not in line:
+                continue
+            if mode == "polling" and "polling" not in line:
+                continue
+            lines.append(line)
+    if not lines:
+        return ["Нет данных по фильтру."]
+    return list(lines)
+
+
+def get_last_error_line(log_path: str) -> str:
+    if not os.path.exists(log_path):
+        return "—"
+    last_error = "—"
+    with open(log_path, "r", encoding="utf-8") as log_file:
+        for line in log_file:
+            if "ERROR" in line or "Exception" in line:
+                last_error = line.strip()
+    return last_error
+
+
+def build_stats(storage: dict, timezone: str) -> str:
+    tickets = storage.get("tickets", [])
+    total = len(tickets)
+    today = filter_tickets_by_days(tickets, 1, timezone)
+    last_7 = filter_tickets_by_days(tickets, 7, timezone)
+    status_counts = {"new": 0, "in_work": 0, "closed": 0}
+    type_counts: dict[str, int] = {}
+    for ticket in tickets:
+        status = ticket.get("status", "new")
+        status_counts[status] = status_counts.get(status, 0) + 1
+        scenario = format_scenario(ticket.get("scenario_type"))
+        type_counts[scenario] = type_counts.get(scenario, 0) + 1
+    top_reason = "—"
+    if type_counts:
+        top_reason = max(type_counts.items(), key=lambda item: item[1])[0]
+    type_distribution = ", ".join([f"{key}: {value}" for key, value in type_counts.items()]) or "—"
+    return "\n".join(
+        [
+            f"Всего заявок: {total}",
+            f"Сегодня: {len(today)}",
+            f"7 дней: {len(last_7)}",
+            f"Распределение по типам: {type_distribution}",
+            (
+                "Статусы: "
+                f"новые {status_counts.get('new', 0)}, "
+                f"в работе {status_counts.get('in_work', 0)}, "
+                f"закрытые {status_counts.get('closed', 0)}"
+            ),
+            f"Топ-1 причина обращения: {top_reason}",
+        ]
+    )
+
+
+def send_reminders_now(
+    token: str,
+    storage: dict,
+    timezone: str,
+    master_usernames: list[str],
+    logger: logging.Logger,
+) -> int:
+    count = 0
+    for ticket in storage.get("tickets", []):
+        if ticket.get("status") != "new":
+            continue
+        text = f"Напоминание: заявка {ticket.get('ticket_id')} всё ещё новая"
+        reminder_card = build_reminder_card(ticket)
+        notify_masters(token, master_usernames, f"{text}\n{reminder_card}".strip(), logger)
+        ticket["reminded_at"] = now_iso(timezone)
+        count += 1
+    save_storage(storage)
+    return count
 
 
 def build_reminder_card(ticket: dict) -> str:
@@ -981,7 +1508,7 @@ def handle_ai_message(
         update_session_ttl(session, timezone)
         save_session(storage, chat_id, session)
         finalize_ticket(
-            token, chat_id, session, storage, timezone, logger, master_usernames
+            token, chat_id, session, storage, timezone, logger, master_usernames, ai_service
         )
         return True
     session["stage"] = next_stage
@@ -1004,9 +1531,9 @@ def finalize_ticket(
     timezone: str,
     logger: logging.Logger,
     master_usernames: list[str],
+    ai_service: AIService,
 ) -> None:
     ticket = build_ticket_from_session(session, timezone, storage)
-    ai_service = AIService(logger)
     tldr_payload = {
         "scenario": format_scenario(ticket.get("scenario_type")),
         "description": ticket.get("problem_text")
@@ -1142,6 +1669,10 @@ def update_ticket_status(
     logger: logging.Logger,
 ) -> None:
     callback_id = callback.get("id")
+    if not is_admin(callback.get("from", {}).get("id"), storage):
+        if callback_id:
+            answer_callback_query(token, callback_id, "Недостаточно прав доступа")
+        return
     data = callback.get("data") or ""
     parts = data.split(":")
     if len(parts) != 3:
@@ -1192,6 +1723,300 @@ def handle_client_contact_callback(token: str, callback: dict, storage: dict) ->
     send_message(token, callback.get("from", {}).get("id"), message)
 
 
+def handle_admin_callback(
+    token: str,
+    callback: dict,
+    storage: dict,
+    timezone: str,
+    logger: logging.Logger,
+    master_usernames: list[str],
+) -> bool:
+    data = callback.get("data") or ""
+    if not data.startswith("admin:"):
+        return False
+    callback_id = callback.get("id")
+    chat_id = callback.get("from", {}).get("id")
+    if not is_admin(chat_id, storage):
+        if callback_id:
+            answer_callback_query(token, callback_id, "Недостаточно прав доступа")
+        return True
+    ensure_storage_defaults(storage)
+    if data == "admin:menu":
+        send_message(token, chat_id, "Админ-меню:", reply_markup=build_admin_main_keyboard())
+        return True
+    if data == "admin:close":
+        clear_admin_session(storage, chat_id)
+        save_storage(storage)
+        send_message(token, chat_id, "Админ-меню закрыто.")
+        return True
+    if data == "admin:diag":
+        settings = get_settings(storage)
+        ai_service = AIService(logger, settings=settings)
+        mode = "FORCED" if settings.get("force_fallback") else ("AI" if ai_service.is_enabled() else "FALLBACK")
+        deepseek_status = "доступен" if ai_service.ping() else "недоступен"
+        master_ids = parse_csv_ints(os.getenv("CLIENT_MASTER_CHAT_IDS", ""))
+        masters_count = len(master_ids) if master_ids else len(master_usernames)
+        log_path = os.path.join(os.path.dirname(__file__), "logs", "client_bot.log")
+        last_error = get_last_error_line(log_path)
+        text = "\n".join(
+            [
+                "Самодиагностика:",
+                "client_bot: OK",
+                "polling: OK",
+                f"DeepSeek: {deepseek_status}",
+                f"режим: {mode}",
+                "storage: OK",
+                f"masters configured: count={masters_count}",
+                f"последняя ошибка: {last_error}",
+            ]
+        )
+        send_message(token, chat_id, text, reply_markup=build_admin_main_keyboard())
+        return True
+    if data == "admin:tickets":
+        send_message(token, chat_id, "Выберите фильтр:", reply_markup=build_admin_tickets_filter_keyboard())
+        return True
+    if data.startswith("admin:tickets:"):
+        parts = data.split(":")
+        if len(parts) != 4:
+            return True
+        status = parts[2]
+        page = int(parts[3]) if parts[3].isdigit() else 1
+        tickets = [
+            ticket
+            for ticket in storage.get("tickets", [])
+            if ticket.get("status", "new") == status
+        ]
+        tickets.sort(key=lambda item: item.get("created_at", ""), reverse=True)
+        total_pages = max(1, (len(tickets) + ADMIN_PAGE_SIZE - 1) // ADMIN_PAGE_SIZE)
+        page = max(1, min(page, total_pages))
+        start = (page - 1) * ADMIN_PAGE_SIZE
+        page_items = tickets[start : start + ADMIN_PAGE_SIZE]
+        if not page_items:
+            send_message(token, chat_id, "Заявок нет.", reply_markup=build_admin_tickets_filter_keyboard())
+            return True
+        lines = []
+        for ticket in page_items:
+            booking = "—"
+            if ticket.get("booking_date") or ticket.get("booking_time"):
+                booking = f"{ticket.get('booking_date', '-')}, {ticket.get('booking_time', '-')}"
+            lines.append(
+                " | ".join(
+                    [
+                        ticket.get("ticket_id", "—"),
+                        format_dt(ticket.get("created_at"), timezone),
+                        ticket.get("fio") or "—",
+                        ticket.get("phone") or "—",
+                        format_scenario(ticket.get("scenario_type")),
+                        f"запись: {booking}",
+                        f"вложений: {ticket.get('attachments_count', 0)}",
+                        f"статус: {format_ticket_status(ticket.get('status'))}",
+                    ]
+                )
+            )
+        header = f"Заявки ({format_ticket_status(status)}) стр. {page}/{total_pages}"
+        send_message(
+            token,
+            chat_id,
+            "\n".join([header] + lines),
+            reply_markup=build_admin_ticket_list_keyboard(page_items, status, page, total_pages),
+        )
+        return True
+    if data.startswith("admin:ticket:"):
+        ticket_id = data.split(":", 2)[2]
+        ticket = next(
+            (item for item in storage.get("tickets", []) if item.get("ticket_id") == ticket_id),
+            None,
+        )
+        if not ticket:
+            send_message(token, chat_id, "Заявка не найдена.")
+            return True
+        send_message(
+            token,
+            chat_id,
+            build_admin_ticket_card(ticket, timezone),
+            reply_markup=build_admin_ticket_detail_keyboard(ticket),
+        )
+        return True
+    if data.startswith("admin:ticket_status:"):
+        parts = data.split(":")
+        if len(parts) != 4:
+            return True
+        ticket_id = parts[2]
+        new_status = parts[3]
+        ticket = next(
+            (item for item in storage.get("tickets", []) if item.get("ticket_id") == ticket_id),
+            None,
+        )
+        if not ticket:
+            if callback_id:
+                answer_callback_query(token, callback_id, "Заявка не найдена.")
+            return True
+        ticket["status"] = new_status
+        ticket["updated_at"] = now_iso(timezone)
+        save_storage(storage)
+        if callback_id:
+            answer_callback_query(token, callback_id, "Статус обновлён.")
+        send_message(token, chat_id, build_admin_ticket_card(ticket, timezone))
+        return True
+    if data.startswith("admin:ticket_contact:"):
+        ticket_id = data.split(":", 2)[2]
+        ticket = next(
+            (item for item in storage.get("tickets", []) if item.get("ticket_id") == ticket_id),
+            None,
+        )
+        tg_id = ticket.get("client_chat_id") if ticket else None
+        message = f"tg_id клиента: {tg_id}" if tg_id else "tg_id клиента не найден."
+        send_message(token, chat_id, message)
+        return True
+    if data == "admin:export":
+        set_admin_session(storage, chat_id, ADMIN_STATE_EXPORT_RANGE, {})
+        save_storage(storage)
+        send_message(token, chat_id, "Выберите период:", reply_markup=build_admin_export_range_keyboard())
+        return True
+    if data.startswith("admin:export_range:"):
+        range_value = data.split(":", 2)[2]
+        session = get_admin_session(storage, chat_id)
+        session["data"] = {"range": range_value}
+        session["state"] = ADMIN_STATE_EXPORT_STATUS
+        storage["admin_sessions"][str(chat_id)] = session
+        save_storage(storage)
+        send_message(token, chat_id, "Выберите статус:", reply_markup=build_admin_export_status_keyboard())
+        return True
+    if data.startswith("admin:export_status:"):
+        status_value = data.split(":", 2)[2]
+        session = get_admin_session(storage, chat_id)
+        session["data"] = {**session.get("data", {}), "status": status_value}
+        session["state"] = ADMIN_STATE_EXPORT_FORMAT
+        storage["admin_sessions"][str(chat_id)] = session
+        save_storage(storage)
+        send_message(token, chat_id, "Выберите формат:", reply_markup=build_admin_export_format_keyboard())
+        return True
+    if data.startswith("admin:export_format:"):
+        format_value = data.split(":", 2)[2]
+        session = get_admin_session(storage, chat_id)
+        range_value = session.get("data", {}).get("range", "today")
+        status_value = session.get("data", {}).get("status", "any")
+        days = {"today": 1, "7": 7, "30": 30}.get(range_value)
+        tickets = filter_tickets_by_days(storage.get("tickets", []), days, timezone)
+        tickets = filter_tickets_by_status(tickets, status_value)
+        filename_prefix = f"tickets_{range_value}_{status_value}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        export_dir = os.path.join(os.path.dirname(__file__), "exports")
+        csv_path, xlsx_path = build_export_files(tickets, export_dir, filename_prefix)
+        if format_value == "csv":
+            send_document(token, chat_id, csv_path, caption="Выгрузка CSV")
+        else:
+            send_document(token, chat_id, xlsx_path, caption="Выгрузка XLSX")
+        clear_admin_session(storage, chat_id)
+        save_storage(storage)
+        return True
+    if data == "admin:stats":
+        send_message(token, chat_id, build_stats(storage, timezone), reply_markup=build_admin_main_keyboard())
+        return True
+    if data == "admin:modes":
+        settings = get_settings(storage)
+        send_message(token, chat_id, "Режимы работы:", reply_markup=build_admin_modes_keyboard(settings))
+        return True
+    if data == "admin:modes:ai":
+        storage["settings"]["force_fallback"] = 0
+        save_storage(storage)
+        send_message(token, chat_id, "AI включён.", reply_markup=build_admin_modes_keyboard(get_settings(storage)))
+        return True
+    if data == "admin:modes:fallback":
+        storage["settings"]["force_fallback"] = 1
+        save_storage(storage)
+        send_message(token, chat_id, "Принудительный fallback включён.", reply_markup=build_admin_modes_keyboard(get_settings(storage)))
+        return True
+    if data.startswith("admin:modes:timeout:"):
+        timeout_value = data.split(":")[3]
+        if timeout_value.isdigit():
+            storage["settings"]["ai_timeout_seconds"] = int(timeout_value)
+            save_storage(storage)
+        send_message(token, chat_id, "Таймаут обновлён.", reply_markup=build_admin_modes_keyboard(get_settings(storage)))
+        return True
+    if data == "admin:reminders":
+        settings = get_settings(storage)
+        send_message(token, chat_id, "Напоминания:", reply_markup=build_admin_reminders_keyboard(settings))
+        return True
+    if data.startswith("admin:reminders:set:"):
+        minutes_value = data.split(":")[3]
+        if minutes_value.isdigit():
+            storage["settings"]["reminder_minutes"] = int(minutes_value)
+            save_storage(storage)
+        send_message(token, chat_id, "Настройки напоминаний обновлены.", reply_markup=build_admin_reminders_keyboard(get_settings(storage)))
+        return True
+    if data == "admin:reminders:send_all":
+        count = send_reminders_now(token, storage, timezone, master_usernames, logger)
+        send_message(token, chat_id, f"Напоминания отправлены: {count}")
+        return True
+    if data == "admin:admins":
+        admin_ids = sorted(get_admin_ids(storage))
+        text = "Администраторы:\n" + "\n".join([str(admin_id) for admin_id in admin_ids])
+        send_message(token, chat_id, text, reply_markup=build_admin_admins_keyboard())
+        return True
+    if data == "admin:admins:add":
+        set_admin_session(storage, chat_id, ADMIN_STATE_ADD_ADMIN, {})
+        save_storage(storage)
+        send_message(token, chat_id, "Отправьте tg_id нового администратора (числом).")
+        return True
+    if data == "admin:admins:remove":
+        admin_ids = sorted(get_admin_ids(storage))
+        send_message(token, chat_id, "Выберите администратора для удаления:", reply_markup=build_admin_admins_remove_keyboard(admin_ids))
+        return True
+    if data.startswith("admin:admins:remove_id:"):
+        admin_id = data.split(":")[3]
+        admin_ids = sorted(get_admin_ids(storage))
+        if admin_id.isdigit() and int(admin_id) in admin_ids:
+            if len(admin_ids) <= 1:
+                send_message(token, chat_id, "Нельзя удалить последнего администратора.")
+                return True
+            admin_ids.remove(int(admin_id))
+            storage["admins"] = admin_ids
+            save_storage(storage)
+            send_message(token, chat_id, "Администратор удалён.")
+        return True
+    if data == "admin:logs":
+        send_message(token, chat_id, "Логи:", reply_markup=build_admin_logs_keyboard())
+        return True
+    if data.startswith("admin:logs:filter:"):
+        mode = data.split(":")[3]
+        log_path = os.path.join(os.path.dirname(__file__), "logs", "client_bot.log")
+        lines = read_log_lines(log_path, mode)
+        text = "\n".join(lines)
+        if len(text) > 3500:
+            text = text[-3500:]
+        send_message(token, chat_id, text or "Нет данных.", reply_markup=build_admin_logs_keyboard())
+        return True
+    if data == "admin:logs:download":
+        log_path = os.path.join(os.path.dirname(__file__), "logs", "client_bot.log")
+        send_document(token, chat_id, log_path, caption="client_bot.log")
+        return True
+    if data == "admin:blocklist":
+        blocklist = [int(item) for item in storage.get("blocklist", []) if str(item).isdigit()]
+        text = "Блок-лист:\n" + ("\n".join([str(item) for item in blocklist]) if blocklist else "пусто")
+        send_message(token, chat_id, text, reply_markup=build_admin_blocklist_keyboard())
+        return True
+    if data == "admin:blocklist:add":
+        set_admin_session(storage, chat_id, ADMIN_STATE_ADD_BLOCK, {})
+        save_storage(storage)
+        send_message(token, chat_id, "Отправьте tg_id для блок-листа (числом).")
+        return True
+    if data == "admin:blocklist:remove":
+        blocklist = [int(item) for item in storage.get("blocklist", []) if str(item).isdigit()]
+        send_message(token, chat_id, "Выберите tg_id для удаления:", reply_markup=build_admin_blocklist_remove_keyboard(blocklist))
+        return True
+    if data.startswith("admin:blocklist:remove_id:"):
+        block_id = data.split(":")[3]
+        if block_id.isdigit():
+            block_ids = [int(item) for item in storage.get("blocklist", []) if str(item).isdigit()]
+            if int(block_id) in block_ids:
+                block_ids.remove(int(block_id))
+                storage["blocklist"] = block_ids
+                save_storage(storage)
+                send_message(token, chat_id, "Удалено из блок-листа.")
+        return True
+    return True
+
+
 def process_callback(
     token: str,
     update: dict,
@@ -1203,6 +2028,9 @@ def process_callback(
     if not callback:
         return False
     data = callback.get("data") or ""
+    master_usernames = parse_master_usernames()
+    if handle_admin_callback(token, callback, storage, timezone, logger, master_usernames):
+        return True
     if data.startswith("ticket:"):
         update_ticket_status(token, callback, storage, timezone, logger)
         return True
@@ -1219,7 +2047,8 @@ def check_reminders(
     master_usernames: list[str],
     logger: logging.Logger,
 ) -> None:
-    reminder_minutes = int(os.getenv("REMINDER_MINUTES", "30"))
+    settings = get_settings(storage)
+    reminder_minutes = settings.get("reminder_minutes", 30)
     now_value = datetime.now(ZoneInfo(timezone))
     for ticket in storage.get("tickets", []):
         if ticket.get("status") != "new":
@@ -1266,9 +2095,11 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
 
     timezone = os.getenv("TIMEZONE", "Europe/Moscow")
     storage = load_storage()
+    ensure_storage_defaults(storage)
     session = ensure_session(storage, chat_id, timezone)
     master_usernames = parse_master_usernames()
-    ai_service = AIService(logger)
+    settings = get_settings(storage)
+    ai_service = AIService(logger, settings=settings)
 
     if process_callback(token, update, storage, timezone, logger):
         return
@@ -1280,6 +2111,37 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
         return
 
     update_session_client_context(session, chat)
+
+    if text.startswith("/admin"):
+        if not is_admin(chat_id, storage):
+            send_message(token, chat_id, "Недостаточно прав доступа")
+            return
+        send_message(token, chat_id, "Админ-меню:", reply_markup=build_admin_main_keyboard())
+        return
+
+    if is_admin(chat_id, storage):
+        admin_session = get_admin_session(storage, chat_id)
+        if admin_session.get("state") == ADMIN_STATE_ADD_ADMIN:
+            if not text.isdigit():
+                send_message(token, chat_id, "tg_id должен быть числом. Повторите ввод.")
+                return
+            admin_ids = sorted(get_admin_ids(storage) | {int(text)})
+            storage["admins"] = admin_ids
+            clear_admin_session(storage, chat_id)
+            save_storage(storage)
+            send_message(token, chat_id, "Администратор добавлен.")
+            return
+        if admin_session.get("state") == ADMIN_STATE_ADD_BLOCK:
+            if not text.isdigit():
+                send_message(token, chat_id, "tg_id должен быть числом. Повторите ввод.")
+                return
+            block_ids = {int(value) for value in storage.get("blocklist", []) if str(value).isdigit()}
+            block_ids.add(int(text))
+            storage["blocklist"] = sorted(block_ids)
+            clear_admin_session(storage, chat_id)
+            save_storage(storage)
+            send_message(token, chat_id, "Добавлено в блок-лист.")
+            return
 
     if handle_attachment(
         token,
@@ -1592,7 +2454,7 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
         update_session_ttl(session, timezone)
         save_session(storage, chat_id, session)
         finalize_ticket(
-            token, chat_id, session, storage, timezone, logger, master_usernames
+            token, chat_id, session, storage, timezone, logger, master_usernames, ai_service
         )
         return
 
@@ -1628,7 +2490,7 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
         update_session_ttl(session, timezone)
         save_session(storage, chat_id, session)
         finalize_ticket(
-            token, chat_id, session, storage, timezone, logger, master_usernames
+            token, chat_id, session, storage, timezone, logger, master_usernames, ai_service
         )
         return
 
@@ -1654,7 +2516,7 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
             update_session_ttl(session, timezone)
             save_session(storage, chat_id, session)
             finalize_ticket(
-                token, chat_id, session, storage, timezone, logger, master_usernames
+                token, chat_id, session, storage, timezone, logger, master_usernames, ai_service
             )
             return
         else:
@@ -1688,7 +2550,7 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
             update_session_ttl(session, timezone)
             save_session(storage, chat_id, session)
             finalize_ticket(
-                token, chat_id, session, storage, timezone, logger, master_usernames
+                token, chat_id, session, storage, timezone, logger, master_usernames, ai_service
             )
             return
         else:
@@ -1708,7 +2570,7 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
         update_session_ttl(session, timezone)
         save_session(storage, chat_id, session)
         finalize_ticket(
-            token, chat_id, session, storage, timezone, logger, master_usernames
+            token, chat_id, session, storage, timezone, logger, master_usernames, ai_service
         )
         return
 
@@ -1808,7 +2670,10 @@ def main() -> None:
     logger = build_logger(timezone)
     token, token_source = get_client_token()
     logger.info("client_bot token source: %s", token_source)
-    ai_service = AIService(logger)
+    storage = load_storage()
+    ensure_storage_defaults(storage)
+    settings = get_settings(storage)
+    ai_service = AIService(logger, settings=settings)
     logger.info(
         "client_bot config: ai_enabled=%s, force_fallback=%s, timeout=%s, model=%s, base_url=%s",
         ai_service.is_enabled(),
