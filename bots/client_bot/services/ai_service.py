@@ -33,7 +33,8 @@ FORBIDDEN_PATTERNS = {
     "availability": re.compile(r"\b(в\s*наличии|есть\s*запчаст|имеется\s*на\s*склад)\b", re.IGNORECASE),
     "upsell": re.compile(r"\b(рекомендуем|советуем|предлагаем|лучше\s*сделать)\b", re.IGNORECASE),
     "already_done": re.compile(
-        r"\b(мы\s*записали|уже\s*записали|передали\s*мастеру|" r"заявка\s*создана)\b",
+        r"\b(мы\s*записали|уже\s*записали|вы\s*записан\w*|передали\s*мастеру|"
+        r"заявка\s*создана)\b",
         re.IGNORECASE,
     ),
 }
@@ -55,6 +56,8 @@ class AIService:
         self.model = self._get_env_value("CLIENT_DEEPSEEK_MODEL")
         self.timeout = self._get_timeout_seconds()
         self.force_fallback = self._get_env_value("CLIENT_FORCE_FALLBACK") == "1"
+        if not self.force_fallback:
+            self.force_fallback = self._get_env_value("FORCE_FALLBACK") == "1"
         if settings:
             if "ai_timeout_seconds" in settings and settings["ai_timeout_seconds"] is not None:
                 try:
@@ -176,7 +179,7 @@ class AIService:
             "анкеты и задавать короткие вопросы. СТРОГИЕ ЗАПРЕТЫ: не называй цены, сроки ремонта, "
             "наличие запчастей, не навязывай услуги. НЕ выдумывай факты. НЕ утверждай, что запись "
             "или передача мастеру уже сделаны. Разрешено: короткие уточняющие вопросы и помощь "
-            "в формулировке проблемы. Можно объяснить: запись только на следующий день, Пн–Пт 09–18. "
+            "в формулировке проблемы. Можно объяснить: запись только на следующий день, Пн–Пт 09–19. "
             "Отвечай строго JSON без пояснений. Формат: {\"reply\":\"...\", \"fields\":{...}}. "
             "В fields добавляй только то, что явно сказано пользователем, иначе не добавляй."
         )
