@@ -15,11 +15,22 @@ def ttl_iso(timezone: str, hours: int = 24) -> str:
     return (datetime.now(ZoneInfo(timezone)) + timedelta(hours=hours)).isoformat()
 
 
+def ensure_storage_schema(storage: dict) -> dict:
+    storage.setdefault("tickets", [])
+    storage.setdefault("sessions", {})
+    storage.setdefault("admins", [])
+    storage.setdefault("settings", {})
+    storage.setdefault("admin_sessions", {})
+    storage.setdefault("blocklist", [])
+    return storage
+
+
 def load_storage() -> dict:
     if not os.path.exists(STORAGE_FILE):
-        return {"tickets": [], "sessions": {}}
+        return ensure_storage_schema({"tickets": [], "sessions": {}})
     with open(STORAGE_FILE, "r", encoding="utf-8") as file:
-        return json.load(file)
+        data = json.load(file)
+    return ensure_storage_schema(data)
 
 
 def save_storage(data: dict) -> None:
