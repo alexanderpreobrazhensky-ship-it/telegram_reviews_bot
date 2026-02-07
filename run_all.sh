@@ -1,21 +1,37 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "Starting reviews_bot..."
-python main.py &
-reviews_pid=$!
+RUN_CLIENT_BOT=${RUN_CLIENT_BOT:-1}
+RUN_REVIEWS_BOT=${RUN_REVIEWS_BOT:-0}
 
-echo "Starting client_bot (polling)..."
-python bots/client_bot/main.py &
-client_pid=$!
+pids=()
+
+if [[ "${RUN_REVIEWS_BOT}" == "1" ]]; then
+  echo "Starting reviews_bot..."
+  python main.py &
+  pids+=("$!")
+fi
+
+if [[ "${RUN_CLIENT_BOT}" == "1" ]]; then
+  echo "Starting client_bot..."
+  python bots/client_bot/main.py &
+  pids+=("$!")
+fi
+
+if [[ ${#pids[@]} -eq 0 ]]; then
+  echo "Nothing to run. Set RUN_CLIENT_BOT=1 or RUN_REVIEWS_BOT=1."
+  exit 1
+fi
 
 terminate() {
-  kill "${reviews_pid}" "${client_pid}" 2>/dev/null || true
+  for pid in "${pids[@]}"; do
+    kill "${pid}" 2>/dev/null || true
+  done
 }
 
 trap terminate SIGINT SIGTERM
 
-wait -n "${reviews_pid}" "${client_pid}"
+wait -n "${pids[@]}"
 status=$?
 
 terminate
