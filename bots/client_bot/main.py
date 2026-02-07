@@ -11,7 +11,12 @@ from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import requests
-from PIL import Image, ImageDraw, ImageFont
+
+PIL_AVAILABLE = True
+try:
+    from PIL import Image, ImageDraw, ImageFont
+except Exception:
+    PIL_AVAILABLE = False
 
 from services.ai_service import AIService, normalize_date_string
 from services.outgoing_queue import (
@@ -1778,28 +1783,33 @@ def send_directions(
     timezone: str,
 ) -> None:
     address = "Удмуртская, 10"
-    content = generate_directions_image(address)
-    file_path = store_outgoing_file(content, "directions.png")
-    caption = "Схема проезда"
-    if is_queue_enabled():
-        enqueue_document(
-            storage,
-            chat_id,
-            "directions",
-            file_path,
-            caption,
-            message_key=f"directions:{chat_id}",
-            timezone=timezone,
-        )
-        save_storage(storage)
-    else:
-        send_document(token, chat_id, file_path, caption=caption)
-        try:
-            os.remove(file_path)
-        except OSError:
-            logging.getLogger("client_bot").warning(
-                "failed to remove directions image path=%s", file_path
+    if PIL_AVAILABLE:
+        content = generate_directions_image(address)
+        file_path = store_outgoing_file(content, "directions.png")
+        caption = "Схема проезда"
+        if is_queue_enabled():
+            enqueue_document(
+                storage,
+                chat_id,
+                "directions",
+                file_path,
+                caption,
+                message_key=f"directions:{chat_id}",
+                timezone=timezone,
             )
+            save_storage(storage)
+        else:
+            send_document(token, chat_id, file_path, caption=caption)
+            try:
+                os.remove(file_path)
+            except OSError:
+                logging.getLogger("client_bot").warning(
+                    "failed to remove directions image path=%s", file_path
+                )
+    else:
+        logging.getLogger("client_bot").warning(
+            "Pillow is unavailable; sending directions without image"
+        )
     send_message(
         token,
         chat_id,
