@@ -71,19 +71,32 @@ const setStatus = (text, isError = false) => {
 
 const isEmpty = (value) => !value || !String(value).trim();
 
+const setInvalid = (element, invalid) => {
+  if (!element) {
+    return;
+  }
+  element.classList.toggle("is-invalid", invalid);
+};
+
 const validateStep = (step) => {
   if (step === 1) {
     return true;
   }
   if (step === 2) {
-    if (isEmpty(elements.plate.value)) {
+    const makeField = document.getElementById("carMakeModel");
+    const yearField = document.getElementById("carYear");
+    const plateInvalid = isEmpty(elements.plate.value);
+    setInvalid(elements.plate, plateInvalid);
+    if (plateInvalid) {
       setStatus("Укажите госномер.", true);
       return false;
     }
     if (!state.carKnown) {
-      const make = document.getElementById("carMakeModel").value;
-      const year = document.getElementById("carYear").value;
-      if (isEmpty(make) || isEmpty(year)) {
+      const makeInvalid = isEmpty(makeField.value);
+      const yearInvalid = isEmpty(yearField.value);
+      setInvalid(makeField, makeInvalid);
+      setInvalid(yearField, yearInvalid);
+      if (makeInvalid || yearInvalid) {
         setStatus("Укажите марку/модель и год.", true);
         return false;
       }
@@ -91,9 +104,13 @@ const validateStep = (step) => {
     return true;
   }
   if (step === 3) {
-    const description = document.getElementById("description").value;
-    const phone = document.getElementById("phone").value;
-    if (isEmpty(description) || isEmpty(phone)) {
+    const descriptionField = document.getElementById("description");
+    const phoneField = document.getElementById("phone");
+    const descriptionInvalid = isEmpty(descriptionField.value);
+    const phoneInvalid = isEmpty(phoneField.value);
+    setInvalid(descriptionField, descriptionInvalid);
+    setInvalid(phoneField, phoneInvalid);
+    if (descriptionInvalid || phoneInvalid) {
       setStatus("Заполните описание и телефон.", true);
       return false;
     }

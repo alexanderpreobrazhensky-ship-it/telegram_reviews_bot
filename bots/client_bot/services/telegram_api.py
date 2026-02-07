@@ -300,3 +300,16 @@ def answer_callback_query(callback_query_id: str, text: str | None = None) -> bo
         payload["show_alert"] = False
     result = tg_request("answerCallbackQuery", payload)
     return result.ok
+
+
+def set_chat_menu_button_webapp(chat_id: int | str, url: str, text: str = "Мини-приложение") -> bool:
+    payload: dict[str, Any] = {
+        "chat_id": chat_id,
+        "menu_button": {
+            "type": "web_app",
+            "text": text,
+            "web_app": {"url": url},
+        },
+    }
+    result = tg_request("setChatMenuButton", payload)
+    return result.ok
