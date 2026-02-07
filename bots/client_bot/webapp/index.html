@@ -2,12 +2,9 @@
 <html lang="ru">
   <head>
     <meta charset="utf-8" />
-    <meta
-      name="viewport"
-      content="width=device-width, initial-scale=1, viewport-fit=cover"
-    />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>Автоцентр ЛИРА</title>
-    <link rel="stylesheet" href="/webapp/app.css" />
+    <link rel="stylesheet" href="./app.css" />
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
   </head>
   <body>
@@ -15,47 +12,104 @@
       <section class="card">
         <header class="header">
           <p class="eyebrow">Автоцентр ЛИРА</p>
-          <h1>Премиум-меню</h1>
-          <p class="subtitle">
-            спокойно, точно, по регламентам производителя
-          </p>
+          <h1>Быстрая заявка</h1>
+          <p class="subtitle">спокойно, точно, по регламенту</p>
         </header>
 
-        <p class="lead">
-          Ремонт и обслуживание — спокойно, точно, по регламентам производителя.
-        </p>
+        <form class="form" id="requestForm">
+          <div class="steps">
+            <div class="step step-active" data-step="1">
+              <h2>1. Тип обращения</h2>
+              <div class="option-grid">
+                <label class="option">
+                  <input type="radio" name="requestType" value="booking" checked />
+                  <span>Запись на сервис</span>
+                </label>
+                <label class="option">
+                  <input type="radio" name="requestType" value="parts" />
+                  <span>Запчасти</span>
+                </label>
+                <label class="option">
+                  <input type="radio" name="requestType" value="question" />
+                  <span>Вопрос</span>
+                </label>
+              </div>
+            </div>
 
-        <div class="cta">
-          <button class="btn primary" data-action="booking">
-            🛠️ Записаться на обслуживание
-          </button>
-          <button class="btn primary" data-action="parts">
-            ⚙️ Подбор запчастей
-          </button>
-          <button class="btn primary" data-action="question">
-            💬 Вопрос мастеру
-          </button>
-        </div>
+            <div class="step" data-step="2">
+              <h2>2. Данные авто</h2>
+              <div class="field">
+                <label for="carPlate">Госномер *</label>
+                <input id="carPlate" name="carPlate" placeholder="А123ВС18" required />
+                <p class="hint">Если авто уже было у нас, мы подтянем данные автоматически.</p>
+              </div>
+              <div class="known-car" id="knownCar" hidden>
+                <p class="known-title">Мы нашли ваш автомобиль:</p>
+                <p class="known-data" id="knownCarData"></p>
+                <button type="button" class="ghost" id="editCarButton">Изменить данные</button>
+              </div>
+              <div class="field-group" id="carDetails">
+                <div class="field">
+                  <label for="carMakeModel">Марка / модель *</label>
+                  <input id="carMakeModel" name="carMakeModel" placeholder="Volvo XC60" />
+                </div>
+                <div class="grid">
+                  <div class="field">
+                    <label for="carYear">Год *</label>
+                    <input id="carYear" name="carYear" placeholder="2020" />
+                  </div>
+                  <div class="field">
+                    <label for="carMileage">Пробег</label>
+                    <input id="carMileage" name="carMileage" placeholder="120 000" />
+                  </div>
+                </div>
+              </div>
+            </div>
 
-        <div class="divider"></div>
+            <div class="step" data-step="3">
+              <h2>3. Контакты и время</h2>
+              <div class="field">
+                <label for="description">Описание запроса *</label>
+                <textarea id="description" name="description" rows="4" placeholder="Опишите проблему или задачу" required></textarea>
+              </div>
+              <div class="grid">
+                <div class="field">
+                  <label for="preferredDate">Желаемая дата</label>
+                  <input id="preferredDate" name="preferredDate" placeholder="ДД.ММ.ГГГГ" />
+                </div>
+                <div class="field">
+                  <label for="preferredTime">Время</label>
+                  <input id="preferredTime" name="preferredTime" placeholder="10:30" />
+                </div>
+              </div>
+              <div class="grid">
+                <div class="field">
+                  <label for="name">Имя *</label>
+                  <input id="name" name="name" placeholder="Иван" required />
+                </div>
+                <div class="field">
+                  <label for="phone">Телефон *</label>
+                  <input id="phone" name="phone" placeholder="+7 999 000-00-00" required />
+                </div>
+              </div>
+            </div>
+          </div>
 
-        <div class="secondary">
-          <button class="btn secondary" data-action="route" id="routeButton">
-            📍 Как доехать
-          </button>
-          <button class="btn secondary" data-action="call" id="callButton">
-            📞 Позвонить
-          </button>
-        </div>
+          <div class="form-actions">
+            <button type="button" class="ghost" id="backButton">Назад</button>
+            <button type="button" class="primary" id="nextButton">Далее</button>
+            <button type="submit" class="primary" id="submitButton">Отправить заявку</button>
+          </div>
 
-        <p class="address" id="addressText"></p>
+          <p class="status" id="formStatus"></p>
+        </form>
 
         <footer class="footer">
-          Без спешки. Без лишних слов. Как и должно быть.
+          <span id="addressText"></span>
         </footer>
       </section>
     </main>
 
-    <script src="/webapp/app.js"></script>
+    <script src="./app.js"></script>
   </body>
 </html>
