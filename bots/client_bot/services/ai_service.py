@@ -139,6 +139,22 @@ class AIService:
         response_status = getattr(response, "status_code", None)
         return response_status == 401
 
+    @staticmethod
+    def _extract_status_code(exc: Exception) -> int | None:
+        status_code = getattr(exc, "status_code", None)
+        if isinstance(status_code, int):
+            return status_code
+        response = getattr(exc, "response", None)
+        response_status = getattr(response, "status_code", None)
+        if isinstance(response_status, int):
+            return response_status
+        return None
+
+    @staticmethod
+    def _is_timeout(exc: Exception) -> bool:
+        message = str(exc).lower()
+        return "timeout" in message or "timed out" in message
+
     def _parse_json(self, content: str) -> dict[str, Any] | None:
         try:
             payload = json.loads(content)
@@ -236,6 +252,13 @@ class AIService:
             if self._is_unauthorized(exc):
                 self.logger.warning("ai_unauthorized: %s", exc)
                 return AIResult(reply="", fields={}, used=False, reason="unauthorized")
+            status_code = self._extract_status_code(exc)
+            if status_code:
+                self.logger.warning("ai_http_error status=%s error=%s", status_code, exc)
+                return AIResult(reply="", fields={}, used=False, reason=f"http_{status_code}")
+            if self._is_timeout(exc):
+                self.logger.warning("ai_timeout: %s", exc)
+                return AIResult(reply="", fields={}, used=False, reason="timeout")
             self.logger.exception("ai_error: %s", exc)
             return AIResult(reply="", fields={}, used=False, reason="ai_error")
 
@@ -259,6 +282,13 @@ class AIService:
             if self._is_unauthorized(exc):
                 self.logger.warning("ai_unauthorized_tldr: %s", exc)
                 return AIResult(reply="", fields={}, used=False, reason="unauthorized")
+            status_code = self._extract_status_code(exc)
+            if status_code:
+                self.logger.warning("ai_http_error_tldr status=%s error=%s", status_code, exc)
+                return AIResult(reply="", fields={}, used=False, reason=f"http_{status_code}")
+            if self._is_timeout(exc):
+                self.logger.warning("ai_timeout_tldr: %s", exc)
+                return AIResult(reply="", fields={}, used=False, reason="timeout")
             self.logger.exception("ai_error_tldr: %s", exc)
             return AIResult(reply="", fields={}, used=False, reason="ai_error")
 
