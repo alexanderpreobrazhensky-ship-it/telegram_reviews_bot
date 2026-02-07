@@ -189,6 +189,56 @@ def send_document(
     return result.ok
 
 
+def send_photo(
+    chat_id: int | str,
+    file_path: str,
+    caption: str | None = None,
+    reply_markup: dict | None = None,
+) -> TgRequestResult:
+    logger = logging.getLogger("client_bot")
+    if not os.path.exists(file_path):
+        logger.error("telegram sendPhoto missing file chat_id=%s path=%s", chat_id, file_path)
+        return TgRequestResult(False, False, None, "file_missing")
+    data: dict[str, Any] = {"chat_id": chat_id}
+    if caption:
+        data["caption"] = caption
+        data["parse_mode"] = "HTML"
+    if reply_markup:
+        data["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
+    try:
+        with open(file_path, "rb") as file_handle:
+            return tg_request("sendPhoto", None, files={"photo": file_handle}, data=data)
+    except OSError as exc:
+        logger.error("telegram sendPhoto file error chat_id=%s error=%s", chat_id, exc)
+        return TgRequestResult(False, False, None, str(exc))
+
+
+def edit_message_caption(
+    chat_id: int | str,
+    message_id: int,
+    caption: str,
+    reply_markup: dict | None = None,
+) -> TgRequestResult:
+    payload: dict[str, Any] = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "caption": caption,
+        "parse_mode": "HTML",
+    }
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+    return tg_request("editMessageCaption", payload)
+
+
+def pin_message(chat_id: int | str, message_id: int) -> TgRequestResult:
+    payload: dict[str, Any] = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "disable_notification": True,
+    }
+    return tg_request("pinChatMessage", payload)
+
+
 def answer_callback_query(callback_query_id: str, text: str | None = None) -> bool:
     payload: dict[str, Any] = {"callback_query_id": callback_query_id}
     if text:
