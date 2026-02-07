@@ -1,4 +1,5 @@
 import csv
+import json
 import importlib.util
 import io
 import logging
@@ -43,6 +44,7 @@ from services.telegram_api import (
     send_document as safe_send_document,
     send_message as safe_send_message,
     send_photo as safe_send_photo,
+    TgRequestResult,
     pin_chat_message,
     unpin_chat_message,
     tg_request,
@@ -104,6 +106,7 @@ ADMIN_STATE_POST_UPDATE_CONFIRM = "await_post_update_confirm"
 ADMIN_STATE_POST_EDIT_TEXT = "await_post_edit_text"
 ADMIN_STATE_POST_EDIT_IMAGE = "await_post_edit_image"
 ADMIN_STATE_POST_EDIT_CONFIRM = "await_post_edit_confirm"
+ADMIN_STATE_MASTER_INBOX_FORWARD = "await_master_inbox_forward"
 ADMIN_STATE_EXPORT_RANGE = "await_export_range"
 ADMIN_STATE_EXPORT_STATUS = "await_export_status"
 ADMIN_STATE_EXPORT_FORMAT = "await_export_format"
@@ -121,7 +124,8 @@ CALLBACK_DEBOUNCE_CACHE: dict[tuple[int, str], float] = {}
 AI_HEALTH_OK = "OK"
 AI_HEALTH_DOWN = "DOWN"
 AI_HEALTH_COOLDOWN = "COOLDOWN"
-AI_HEALTH_COOLDOWN_MINUTES = 60
+AI_HEALTH_COOLDOWN_MINUTES = 30
+AI_TEMP_DISABLE_MINUTES = 30
 
 STATUS_NEW = "new"
 STATUS_IN_PROGRESS = "in_progress"
@@ -371,6 +375,22 @@ def send_safe_message(
     return send_message(token, chat_id, text, reply_markup=reply_markup)
 
 
+def send_message_with_result(
+    chat_id: int | str,
+    text: str,
+    reply_markup: dict | None = None,
+    disable_web_page_preview: bool = True,
+) -> TgRequestResult:
+    payload: dict = {
+        "chat_id": chat_id,
+        "text": text,
+        "disable_web_page_preview": disable_web_page_preview,
+    }
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+    return tg_request("sendMessage", payload)
+
+
 def send_document(token: str, chat_id: int, file_path: str, caption: str | None = None) -> bool:
     return safe_send_document(chat_id, file_path, caption=caption)
 
@@ -432,17 +452,22 @@ def parse_master_usernames() -> list[str]:
     return usernames
 
 
-def get_master_recipients(storage: dict) -> list[str | int]:
-    usernames = parse_master_usernames()
-    admin_ids = sorted(get_admin_ids(storage))
-    combined: list[str | int] = []
-    seen: set[str | int] = set()
-    for item in usernames + admin_ids:
-        if item in seen:
-            continue
-        seen.add(item)
-        combined.append(item)
-    return combined
+def get_master_inbox_chat_id(storage: dict) -> int | None:
+    ensure_storage_defaults(storage)
+    settings = storage.get("settings", {})
+    chat_id = settings.get("master_inbox_chat_id")
+    if isinstance(chat_id, int):
+        return chat_id
+    if isinstance(chat_id, str) and chat_id.strip().lstrip("-").isdigit():
+        return int(chat_id)
+    return None
+
+
+def get_master_recipients(storage: dict) -> list[int]:
+    master_inbox = get_master_inbox_chat_id(storage)
+    if master_inbox is None:
+        return []
+    return [master_inbox]
 
 
 def get_master_contact_username(logger: logging.Logger) -> tuple[str | None, bool, bool]:
@@ -544,6 +569,7 @@ def ensure_storage_defaults(storage: dict) -> None:
     storage.setdefault("post_settings", {})
     storage.setdefault("pinned_post", {})
     storage.setdefault("button_clicks", {})
+    storage.setdefault("unreachable_users", {})
     settings = storage.setdefault("settings", {})
     force_fallback_env = get_env_value("CLIENT_FORCE_FALLBACK", "FORCE_FALLBACK", "0")
     settings.setdefault("force_fallback", 1 if force_fallback_env == "1" else 0)
@@ -565,6 +591,11 @@ def ensure_storage_defaults(storage: dict) -> None:
     )
     settings.setdefault("auto_pin_enabled", 1)
     settings.setdefault("ai_health", {"state": AI_HEALTH_OK, "last_failed_at": None, "reason": None})
+    settings.setdefault("ai_temp_disabled_until", None)
+    settings.setdefault("ai_temp_disabled_notice_until", None)
+    settings.setdefault("master_inbox_chat_id", None)
+    settings.setdefault("master_inbox_notice_at", None)
+    settings.setdefault("unreachable_notice_at", None)
     settings.setdefault("admins_bootstrapped", 0)
     post_settings = storage.setdefault("post_settings", {})
     target_env = os.getenv("CLIENT_POST_TARGET_ID") or os.getenv("CLIENT_POST_CHAT_ID")
@@ -595,6 +626,19 @@ def get_ai_health(storage: dict, timezone: str) -> dict:
     state = str(health.get("state") or AI_HEALTH_OK)
     last_failed_at = health.get("last_failed_at")
     reason = health.get("reason")
+    disabled_until = settings.get("ai_temp_disabled_until")
+    if disabled_until:
+        try:
+            disabled_dt = datetime.fromisoformat(disabled_until).astimezone(ZoneInfo(timezone))
+        except ValueError:
+            disabled_dt = None
+        if disabled_dt and disabled_dt <= datetime.now(ZoneInfo(timezone)):
+            settings["ai_temp_disabled_until"] = None
+            settings["ai_temp_disabled_notice_until"] = None
+            if state == AI_HEALTH_DOWN:
+                state = AI_HEALTH_OK
+                last_failed_at = None
+                reason = None
     if state == AI_HEALTH_DOWN and last_failed_at:
         try:
             last_dt = datetime.fromisoformat(last_failed_at).astimezone(ZoneInfo(timezone))
@@ -616,16 +660,49 @@ def get_ai_health(storage: dict, timezone: str) -> dict:
 def mark_ai_down(storage: dict, timezone: str, reason: str) -> None:
     ensure_storage_defaults(storage)
     settings = storage.setdefault("settings", {})
+    disabled_until = datetime.now(ZoneInfo(timezone)) + timedelta(minutes=AI_TEMP_DISABLE_MINUTES)
+    settings["ai_temp_disabled_until"] = disabled_until.isoformat()
     settings["ai_health"] = {
         "state": AI_HEALTH_DOWN,
         "last_failed_at": now_iso(timezone),
         "reason": reason,
     }
+    maybe_notify_ai_down(storage, timezone, reason)
+
+
+def maybe_notify_ai_down(storage: dict, timezone: str, reason: str) -> None:
+    settings = storage.setdefault("settings", {})
+    disabled_until = settings.get("ai_temp_disabled_until")
+    if not disabled_until:
+        return
+    notice_until = settings.get("ai_temp_disabled_notice_until")
+    if notice_until == disabled_until:
+        return
+    admin_ids = sorted(get_admin_ids(storage))
+    if not admin_ids:
+        return
+    text = (
+        "⚠️ ИИ недоступен, бот временно работает без ИИ.\n"
+        f"Причина: {reason}"
+    )
+    for admin_id in admin_ids:
+        send_message_with_result(admin_id, text)
+    settings["ai_temp_disabled_notice_until"] = disabled_until
+    save_storage(storage)
 
 
 def should_use_ai(storage: dict, timezone: str, ai_service: AIService) -> bool:
     if not ai_service.is_enabled():
         return False
+    settings = storage.get("settings", {})
+    disabled_until = settings.get("ai_temp_disabled_until")
+    if disabled_until:
+        try:
+            disabled_dt = datetime.fromisoformat(disabled_until).astimezone(ZoneInfo(timezone))
+        except ValueError:
+            disabled_dt = None
+        if disabled_dt and disabled_dt > datetime.now(ZoneInfo(timezone)):
+            return False
     health = get_ai_health(storage, timezone)
     return health.get("state") == AI_HEALTH_OK
 
@@ -736,6 +813,23 @@ def is_admin(chat_id: int | None, storage: dict) -> bool:
     if chat_id is None:
         return False
     return chat_id in get_admin_ids(storage)
+
+
+def is_unreachable_user(storage: dict, chat_id: int | None) -> bool:
+    if chat_id is None:
+        return False
+    unreachable = storage.get("unreachable_users", {})
+    return str(chat_id) in unreachable
+
+
+def mark_unreachable_user(storage: dict, chat_id: int, timezone: str, reason: str) -> None:
+    unreachable = storage.setdefault("unreachable_users", {})
+    unreachable[str(chat_id)] = {
+        "marked_at": now_iso(timezone),
+        "reason": reason,
+        "notified": False,
+    }
+    save_storage(storage)
 
 
 def get_admin_session(storage: dict, chat_id: int) -> dict:
@@ -1116,7 +1210,10 @@ def build_admin_settings_keyboard() -> dict:
                 {"text": "🚫 Блок-лист", "callback_data": "admin:blocklist"},
             ],
             [
+                {"text": "👨‍🔧 Чат мастера", "callback_data": "admin:settings:master_inbox"},
                 {"text": "📄 Логи", "callback_data": "admin:logs"},
+            ],
+            [
                 {"text": "⬅️ Назад", "callback_data": "admin:menu"},
             ],
             [
@@ -1157,10 +1254,21 @@ def build_post_target_keyboard() -> dict:
     return {
         "inline_keyboard": [
             [{"text": "📩 Переслать сообщение из канала", "callback_data": "admin:posts:target:forward"}],
-            [{"text": "✍️ Ввести chat_id", "callback_data": "admin:posts:target:manual"}],
-            [{"text": "✨ Создать первый пост", "callback_data": "admin:posts:target:first_post"}],
+            [{"text": "➕ Создать первый пост и привязать канал", "callback_data": "admin:posts:target:first_post"}],
             [
                 {"text": "⬅️ Назад", "callback_data": "admin:posts"},
+                {"text": "🏠 В меню", "callback_data": "admin:menu"},
+            ],
+        ]
+    }
+
+
+def build_master_inbox_keyboard() -> dict:
+    return {
+        "inline_keyboard": [
+            [{"text": "📩 Переслать сообщение из чата", "callback_data": "admin:settings:master_inbox:forward"}],
+            [
+                {"text": "⬅️ Назад", "callback_data": "admin:settings"},
                 {"text": "🏠 В меню", "callback_data": "admin:menu"},
             ],
         ]
@@ -1664,8 +1772,8 @@ def build_helpadmin_text() -> str:
             "— Выберите «📩 Переслать сообщение из канала»",
             "— Перешлите сюда любое сообщение из канала → бот привяжет канал автоматически",
             "",
-            "2) ✨ Создать первый пост (для привязки)",
-            "— В «Канал публикации» нажмите «Создать первый пост»",
+            "2) ➕ Создать первый пост и привязать канал",
+            "— В «Канал публикации» нажмите «Создать первый пост и привязать канал»",
             "— Бот опубликует первый технический пост и запомнит его для закрепа",
             "",
             "3) 📝 Посты → ➕ Добавить пост",
@@ -1969,17 +2077,40 @@ def get_posts_queue_file_path() -> str:
     return os.path.join(base_dir, "data", "posts_queue.json")
 
 
-def sync_posts_queue_file(storage: dict) -> None:
+def ensure_posts_queue_file(storage: dict, logger: logging.Logger) -> bool:
+    file_path = get_posts_queue_file_path()
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+    if os.path.exists(file_path):
+        return True
+    payload = {
+        "posts": storage.get("posts", []),
+        "post_settings": storage.get("post_settings", {}),
+    }
+    try:
+        with open(file_path, "w", encoding="utf-8") as file_handle:
+            json.dump(payload, file_handle, ensure_ascii=False, indent=2)
+        return True
+    except OSError as exc:
+        logger.error("posts queue file init failed: %s", exc)
+        return False
+
+
+def sync_posts_queue_file(storage: dict) -> bool:
     payload = {
         "posts": storage.get("posts", []),
         "post_settings": storage.get("post_settings", {}),
     }
     file_path = get_posts_queue_file_path()
-    os.makedirs(os.path.dirname(file_path), exist_ok=True)
-    tmp_path = f"{file_path}.tmp"
-    with open(tmp_path, "w", encoding="utf-8") as file_handle:
-        json.dump(payload, file_handle, ensure_ascii=False, indent=2)
-    os.replace(tmp_path, file_path)
+    try:
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+        tmp_path = f"{file_path}.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as file_handle:
+            json.dump(payload, file_handle, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, file_path)
+        return True
+    except Exception as exc:  # noqa: BLE001 - do not crash polling
+        logging.getLogger("client_bot").error("posts queue sync failed: %s", exc)
+        return False
 
 
 def restore_posts_queue_from_file(storage: dict, logger: logging.Logger) -> bool:
@@ -2005,6 +2136,20 @@ def restore_posts_queue_from_file(storage: dict, logger: logging.Logger) -> bool
         return True
     return False
 
+
+def sync_posts_queue_file_with_notice(
+    storage: dict,
+    token: str,
+    chat_id: int,
+    logger: logging.Logger,
+) -> bool:
+    ok = sync_posts_queue_file(storage)
+    if not ok:
+        logger.error("posts queue sync failed for admin=%s", chat_id)
+        send_message(token, chat_id, "⚠️ Не удалось сохранить очередь постов.")
+    return ok
+
+
 def get_last_post_reference(storage: dict) -> tuple[str | None, int | None]:
     post_settings = storage.get("post_settings", {})
     chat_id = post_settings.get("last_post_chat_id")
@@ -2026,8 +2171,10 @@ def create_first_post(storage: dict, timezone: str, logger: logging.Logger) -> t
     post_settings = storage.setdefault("post_settings", {})
     post_settings["last_post_chat_id"] = target_chat_id
     post_settings["last_post_message_id"] = message_id
+    post_settings["last_post_ts"] = now_iso(timezone)
     save_storage(storage)
-    sync_posts_queue_file(storage)
+    if not sync_posts_queue_file(storage):
+        return False, "Первый пост опубликован, но не удалось сохранить очередь постов."
     return True, "Первый пост опубликован и сохранён для закрепа."
 
 
@@ -2200,6 +2347,9 @@ def send_attachment_to_master(
     ticket_id: str | None = None,
 ) -> bool:
     logger = logging.getLogger("client_bot")
+    if isinstance(master_username, int) and master_username > 0 and is_unreachable_user(storage, master_username):
+        logger.warning("skip attachment to unreachable user_id=%s", master_username)
+        return False
     file_path = store_outgoing_file(content, filename)
     if is_queue_enabled():
         enqueue_document(
@@ -2228,6 +2378,46 @@ def send_attachment_to_master(
     return sent
 
 
+def maybe_notify_missing_master_inbox(storage: dict, timezone: str, logger: logging.Logger) -> None:
+    settings = storage.setdefault("settings", {})
+    last_notice = settings.get("master_inbox_notice_at")
+    if last_notice:
+        try:
+            last_dt = datetime.fromisoformat(last_notice).astimezone(ZoneInfo(timezone))
+        except ValueError:
+            last_dt = None
+        if last_dt and datetime.now(ZoneInfo(timezone)) - last_dt < timedelta(minutes=30):
+            return
+    admin_ids = sorted(get_admin_ids(storage))
+    if not admin_ids:
+        return
+    text = "⚠️ Не настроен чат мастера. Зайдите в Админ → Настройки → Чат мастера."
+    for admin_id in admin_ids:
+        send_message_with_result(admin_id, text)
+    settings["master_inbox_notice_at"] = now_iso(timezone)
+    save_storage(storage)
+    logger.warning("master inbox is not configured")
+
+
+def maybe_notify_unreachable_user(storage: dict, timezone: str, logger: logging.Logger, chat_id: int) -> None:
+    unreachable = storage.get("unreachable_users", {})
+    entry = unreachable.get(str(chat_id))
+    if not entry or entry.get("notified"):
+        return
+    admin_ids = sorted(get_admin_ids(storage))
+    if not admin_ids:
+        return
+    text = (
+        "⚠️ Не удалось отправить сообщение пользователю. "
+        "Похоже, он не писал боту первым."
+    )
+    for admin_id in admin_ids:
+        send_message_with_result(admin_id, text)
+    entry["notified"] = True
+    save_storage(storage)
+    logger.warning("user unreachable chat_id=%s", chat_id)
+
+
 def notify_masters(
     token: str,
     master_usernames: list[str | int],
@@ -2240,6 +2430,9 @@ def notify_masters(
     ticket_id: str | None = None,
     message_key: str | None = None,
 ) -> None:
+    if not master_usernames:
+        maybe_notify_missing_master_inbox(storage, timezone, logger)
+        return
     sanitized_markup = sanitize_reply_markup(reply_markup)
     if is_queue_enabled():
         for master in master_usernames:
@@ -2263,9 +2456,16 @@ def notify_masters(
     for master in master_usernames:
         if ticket_id:
             logger.info("Sending ticket %s to master %s", ticket_id, master)
-        success = send_message(token, master, text, reply_markup=sanitized_markup)
-        if not success:
-            logger.error("failed to send message to master %s ticket_id=%s", master, ticket_id)
+        if isinstance(master, int) and master > 0 and is_unreachable_user(storage, master):
+            logger.warning("skip unreachable master user_id=%s", master)
+            continue
+        result = send_message_with_result(master, text, reply_markup=sanitized_markup)
+        if result.ok:
+            continue
+        if result.status_code == 403 and isinstance(master, int) and master > 0:
+            mark_unreachable_user(storage, master, timezone, result.error or "forbidden")
+            maybe_notify_unreachable_user(storage, timezone, logger, master)
+        logger.error("failed to send message to master %s ticket_id=%s", master, ticket_id)
 
 
 def notify_ticket_update(
@@ -3324,6 +3524,8 @@ def handle_attachment(
         "Вложение получено, я передал мастеру. "
         "Продублируйте, пожалуйста, суть обращения кратко текстом.",
     )
+    if not master_usernames:
+        maybe_notify_missing_master_inbox(storage, timezone, logger)
     download = download_file(token, file_id)
     if not download:
         logger.error("attachment download failed draft=%s file_id=%s", draft_id, file_id)
@@ -3881,6 +4083,31 @@ def handle_admin_callback(
     if data == "admin:settings":
         send_message(token, chat_id, "Настройки:", reply_markup=build_admin_settings_keyboard())
         return True
+    if data == "admin:settings:master_inbox":
+        current_inbox = get_master_inbox_chat_id(storage)
+        current_text = f"Текущий чат мастера: {current_inbox}" if current_inbox else "Чат мастера не настроен."
+        send_message(
+            token,
+            chat_id,
+            "\n".join(
+                [
+                    "Настройка чата мастера.",
+                    current_text,
+                    "Добавьте бота в группу/канал мастеров админом и перешлите сюда любое сообщение.",
+                ]
+            ),
+            reply_markup=build_master_inbox_keyboard(),
+        )
+        return True
+    if data == "admin:settings:master_inbox:forward":
+        set_admin_session(storage, chat_id, ADMIN_STATE_MASTER_INBOX_FORWARD, {})
+        save_storage(storage)
+        send_message(
+            token,
+            chat_id,
+            "Перешлите сообщение из группы или канала мастеров. Бот сохранит chat_id автоматически.",
+        )
+        return True
     if data == "admin:help":
         send_safe_message(token, chat_id, build_helpadmin_text(), reply_markup=build_admin_main_keyboard())
         return True
@@ -3913,7 +4140,7 @@ def handle_admin_callback(
         send_message(
             token,
             chat_id,
-            "Перешлите сюда любое сообщение из вашего канала. Бот возьмёт chat_id автоматически.",
+            "Добавьте бота в канал админом и перешлите сюда любое сообщение из канала.",
         )
         return True
     if data == "admin:posts:target:manual":
@@ -3922,7 +4149,21 @@ def handle_admin_callback(
         send_message(token, chat_id, "Введите chat_id канала или группы для публикаций.")
         return True
     if data == "admin:posts:target:first_post":
-        ok, message = create_first_post(storage, timezone, logger)
+        if not get_post_target_chat_id(storage):
+            set_admin_session(storage, chat_id, ADMIN_STATE_POST_TARGET_FORWARD, {"after_action": "first_post"})
+            save_storage(storage)
+            send_message(
+                token,
+                chat_id,
+                "Сначала привяжем канал. Перешлите сюда сообщение из канала.",
+            )
+            return True
+        try:
+            ok, message = create_first_post(storage, timezone, logger)
+        except Exception as exc:  # noqa: BLE001 - keep admin flow alive
+            logger.exception("create_first_post failed: %s", exc)
+            send_message(token, chat_id, "⚠️ Ошибка, попробуйте ещё раз /admin, смотрите логи")
+            return True
         send_message(token, chat_id, message, reply_markup=build_post_target_keyboard())
         return True
     if data == "admin:posts:update_pinned":
@@ -3952,7 +4193,7 @@ def handle_admin_callback(
             pinned["has_media"] = bool(matching_post and matching_post.get("image_file_id"))
             pinned["updated_at"] = now_iso(timezone)
             save_storage(storage)
-            sync_posts_queue_file(storage)
+            sync_posts_queue_file_with_notice(storage, token, chat_id, logger)
             send_message(token, chat_id, "Закреп обновлён.", reply_markup=build_admin_posts_keyboard())
         else:
             send_message(token, chat_id, "Не удалось обновить закреп.", reply_markup=build_admin_posts_keyboard())
@@ -4005,7 +4246,7 @@ def handle_admin_callback(
         storage.setdefault("posts", []).append(post)
         clear_admin_session(storage, chat_id)
         save_storage(storage)
-        sync_posts_queue_file(storage)
+        sync_posts_queue_file_with_notice(storage, token, chat_id, logger)
         send_message(token, chat_id, f"Пост добавлен в очередь: {post_id}", reply_markup=build_admin_posts_keyboard())
         return True
     if data == "admin:posts:update:confirm":
@@ -4034,7 +4275,7 @@ def handle_admin_callback(
         if result.ok:
             pinned["updated_at"] = now_iso(timezone)
             save_storage(storage)
-            sync_posts_queue_file(storage)
+            sync_posts_queue_file_with_notice(storage, token, chat_id, logger)
             send_message(token, chat_id, "Закреп обновлён.", reply_markup=build_admin_posts_keyboard())
         else:
             send_message(token, chat_id, "Не удалось обновить закреп.", reply_markup=build_admin_posts_keyboard())
@@ -4059,7 +4300,7 @@ def handle_admin_callback(
             post["image_file_id"] = payload.get("image_file_id")
         post["updated_at"] = now_iso(timezone)
         save_storage(storage)
-        sync_posts_queue_file(storage)
+        sync_posts_queue_file_with_notice(storage, token, chat_id, logger)
         clear_admin_session(storage, chat_id)
         save_storage(storage)
         send_message(token, chat_id, "Пост обновлён.", reply_markup=build_admin_posts_keyboard())
@@ -4084,7 +4325,7 @@ def handle_admin_callback(
         post["status"] = "canceled"
         post["updated_at"] = now_iso(timezone)
         save_storage(storage)
-        sync_posts_queue_file(storage)
+        sync_posts_queue_file_with_notice(storage, token, chat_id, logger)
         send_message(token, chat_id, f"Пост {post_id} удалён из очереди.", reply_markup=build_admin_posts_keyboard())
         return True
     if data.startswith("admin:posts:publish:"):
@@ -4110,8 +4351,8 @@ def handle_admin_callback(
         mode = "FORCED" if settings.get("force_fallback") else ("AI" if ai_service.is_enabled() else "FALLBACK")
         deepseek_status = "доступен" if ai_service.ping() else "недоступен"
         ai_health = get_ai_health(storage, timezone)
-        master_ids = parse_csv_ints(os.getenv("CLIENT_MASTER_CHAT_IDS", ""))
-        masters_count = len(master_ids) if master_ids else len(master_usernames)
+        master_inbox = get_master_inbox_chat_id(storage)
+        masters_count = 1 if master_inbox else 0
         log_path = os.path.join(os.path.dirname(__file__), "logs", "client_bot.log")
         last_error = get_last_error_line(log_path)
         queue_stats = get_queue_stats(storage, timezone)
@@ -4125,7 +4366,7 @@ def handle_admin_callback(
                 f"режим: {mode}",
                 f"ai_health: {ai_health.get('state')} ({ai_health.get('reason') or 'ok'})",
                 "storage: OK",
-                f"masters configured: count={masters_count}",
+                f"masters configured: count={masters_count} inbox={master_inbox or '—'}",
                 f"outgoing queue: enabled={int(is_queue_enabled())} pending={queue_stats['pending']} sent={queue_stats['sent']} failed={queue_stats['failed']}",
                 f"queue last error: {queue_last_error}",
                 f"последняя ошибка: {last_error}",
@@ -4495,7 +4736,14 @@ def process_callback(
     if handle_client_menu_callback(token, callback, storage, timezone, logger):
         return True
     master_usernames = get_master_recipients(storage)
-    if handle_admin_callback(token, callback, storage, timezone, logger, master_usernames):
+    try:
+        if handle_admin_callback(token, callback, storage, timezone, logger, master_usernames):
+            return True
+    except Exception as exc:  # noqa: BLE001 - keep polling alive
+        logger.exception("admin callback error: %s", exc)
+        chat_id = callback.get("from", {}).get("id")
+        if chat_id:
+            send_message(token, chat_id, "⚠️ Ошибка, попробуйте ещё раз /admin, смотрите логи")
         return True
     if data.startswith("ticket:"):
         parts = data.split(":")
@@ -4660,143 +4908,180 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
         return
 
     if is_admin(chat_id, storage):
-        admin_session = get_admin_session(storage, chat_id)
-        if handle_ask_more_free_text(token, chat_id, text, storage, timezone):
-            return
-        if admin_session.get("state") == ADMIN_STATE_POST_TEXT:
-            if not normalize_text(text):
-                send_message(token, chat_id, "Введите текст поста.")
+        try:
+            admin_session = get_admin_session(storage, chat_id)
+            if handle_ask_more_free_text(token, chat_id, text, storage, timezone):
                 return
-            payload = {"text": normalize_text(text)}
-            set_admin_session(storage, chat_id, ADMIN_STATE_POST_IMAGE, payload)
-            save_storage(storage)
-            send_message(token, chat_id, "Прикрепите изображение или выберите «Без изображения».", reply_markup=build_post_image_skip_keyboard())
-            return
-        if admin_session.get("state") == ADMIN_STATE_POST_IMAGE:
-            if message.get("photo"):
-                file_id = message["photo"][-1].get("file_id")
-                payload = admin_session.get("data", {})
-                payload["image_file_id"] = file_id
-                set_admin_session(storage, chat_id, ADMIN_STATE_POST_SCHEDULE, payload)
+            if admin_session.get("state") == ADMIN_STATE_POST_TEXT:
+                if not normalize_text(text):
+                    send_message(token, chat_id, "Введите текст поста.")
+                    return
+                payload = {"text": normalize_text(text)}
+                set_admin_session(storage, chat_id, ADMIN_STATE_POST_IMAGE, payload)
                 save_storage(storage)
-                send_message(token, chat_id, "Укажите дату и время публикации (например, завтра 12:00).")
+                send_message(token, chat_id, "Прикрепите изображение или выберите «Без изображения».", reply_markup=build_post_image_skip_keyboard())
                 return
-            if text:
-                send_message(token, chat_id, "Отправьте изображение или выберите «Без изображения».", reply_markup=build_post_image_skip_keyboard())
-                return
-        if admin_session.get("state") == ADMIN_STATE_POST_SCHEDULE:
-            scheduled_at, error = parse_schedule_datetime(text, timezone)
-            if error:
-                send_message(token, chat_id, error)
-                return
-            payload = admin_session.get("data", {})
-            payload["scheduled_at"] = scheduled_at
-            set_admin_session(storage, chat_id, ADMIN_STATE_POST_CONFIRM, payload)
-            save_storage(storage)
-            preview = build_post_preview_text(
-                {
-                    "post_id": "NEW",
-                    "text": payload.get("text"),
-                    "scheduled_at": scheduled_at,
-                    "image_file_id": payload.get("image_file_id"),
-                },
-                timezone,
-            )
-            image_file_id = payload.get("image_file_id")
-            if image_file_id:
-                send_photo(token, chat_id, image_file_id, caption=payload.get("text", ""))
-            send_message(token, chat_id, preview, reply_markup=build_post_confirm_keyboard("add"))
-            return
-        if admin_session.get("state") == ADMIN_STATE_POST_TARGET_FORWARD:
-            forward_chat = message.get("forward_from_chat")
-            if not forward_chat:
-                forward_origin = message.get("forward_origin", {})
-                if isinstance(forward_origin, dict):
-                    forward_chat = forward_origin.get("chat")
-            if not forward_chat or not forward_chat.get("id"):
-                send_message(token, chat_id, "Не удалось определить канал. Перешлите сообщение из канала.")
-                return
-            target_id = forward_chat.get("id")
-            storage.setdefault("post_settings", {})["target_chat_id"] = target_id
-            clear_admin_session(storage, chat_id)
-            save_storage(storage)
-            sync_posts_queue_file(storage)
-            title = forward_chat.get("title") or "—"
-            send_message(token, chat_id, f"Канал привязан: {title} ({target_id}).", reply_markup=build_admin_posts_keyboard())
-            return
-        if admin_session.get("state") == ADMIN_STATE_POST_TARGET:
-            if not text:
-                send_message(token, chat_id, "Введите chat_id канала или группы.")
-                return
-            storage.setdefault("post_settings", {})["target_chat_id"] = text.strip()
-            clear_admin_session(storage, chat_id)
-            save_storage(storage)
-            sync_posts_queue_file(storage)
-            send_message(token, chat_id, "Канал публикации сохранён.", reply_markup=build_admin_posts_keyboard())
-            return
-        if admin_session.get("state") == ADMIN_STATE_POST_UPDATE_TEXT:
-            if not normalize_text(text):
-                send_message(token, chat_id, "Введите новый текст для закрепа.")
-                return
-            payload = {"text": normalize_text(text)}
-            set_admin_session(storage, chat_id, ADMIN_STATE_POST_UPDATE_IMAGE, payload)
-            save_storage(storage)
-            send_message(token, chat_id, "Прикрепите новое изображение или выберите «Без изображения».", reply_markup=build_post_image_skip_keyboard())
-            return
-        if admin_session.get("state") == ADMIN_STATE_POST_EDIT_TEXT:
-            if not normalize_text(text):
-                send_message(token, chat_id, "Введите новый текст поста.")
-                return
-            payload = admin_session.get("data", {})
-            payload["text"] = normalize_text(text)
-            set_admin_session(storage, chat_id, ADMIN_STATE_POST_EDIT_IMAGE, payload)
-            save_storage(storage)
-            send_message(token, chat_id, "Прикрепите новое изображение или выберите «Без фото».", reply_markup=build_post_image_skip_keyboard())
-            return
-        if admin_session.get("state") == ADMIN_STATE_POST_EDIT_IMAGE:
-            if message.get("photo"):
-                file_id = message["photo"][-1].get("file_id")
+            if admin_session.get("state") == ADMIN_STATE_POST_IMAGE:
+                if message.get("photo"):
+                    file_id = message["photo"][-1].get("file_id")
+                    payload = admin_session.get("data", {})
+                    payload["image_file_id"] = file_id
+                    set_admin_session(storage, chat_id, ADMIN_STATE_POST_SCHEDULE, payload)
+                    save_storage(storage)
+                    send_message(token, chat_id, "Укажите дату и время публикации (например, завтра 12:00).")
+                    return
+                if text:
+                    send_message(token, chat_id, "Отправьте изображение или выберите «Без изображения».", reply_markup=build_post_image_skip_keyboard())
+                    return
+            if admin_session.get("state") == ADMIN_STATE_POST_SCHEDULE:
+                scheduled_at, error = parse_schedule_datetime(text, timezone)
+                if error:
+                    send_message(token, chat_id, error)
+                    return
                 payload = admin_session.get("data", {})
-                payload["image_file_id"] = file_id
-                set_admin_session(storage, chat_id, ADMIN_STATE_POST_EDIT_CONFIRM, payload)
+                payload["scheduled_at"] = scheduled_at
+                set_admin_session(storage, chat_id, ADMIN_STATE_POST_CONFIRM, payload)
                 save_storage(storage)
-                send_message(token, chat_id, "Подтвердите обновление поста.", reply_markup=build_post_confirm_keyboard("edit"))
+                preview = build_post_preview_text(
+                    {
+                        "post_id": "NEW",
+                        "text": payload.get("text"),
+                        "scheduled_at": scheduled_at,
+                        "image_file_id": payload.get("image_file_id"),
+                    },
+                    timezone,
+                )
+                image_file_id = payload.get("image_file_id")
+                if image_file_id:
+                    send_photo(token, chat_id, image_file_id, caption=payload.get("text", ""))
+                send_message(token, chat_id, preview, reply_markup=build_post_confirm_keyboard("add"))
                 return
-            if text:
-                send_message(token, chat_id, "Отправьте изображение или выберите «Без фото».", reply_markup=build_post_image_skip_keyboard())
+            if admin_session.get("state") == ADMIN_STATE_POST_TARGET_FORWARD:
+                forward_chat = message.get("forward_from_chat")
+                if not forward_chat:
+                    forward_origin = message.get("forward_origin", {})
+                    if isinstance(forward_origin, dict):
+                        forward_chat = forward_origin.get("chat")
+                if not forward_chat or not forward_chat.get("id"):
+                    send_message(token, chat_id, "Не удалось определить канал. Перешлите сообщение из канала.")
+                    return
+                if forward_chat.get("type") != "channel":
+                    send_message(token, chat_id, "Это не канал. Перешлите сообщение именно из канала.")
+                    return
+                target_id = forward_chat.get("id")
+                storage.setdefault("post_settings", {})["target_chat_id"] = target_id
+                after_action = admin_session.get("data", {}).get("after_action")
+                clear_admin_session(storage, chat_id)
+                save_storage(storage)
+                title = forward_chat.get("title") or "—"
+                sync_posts_queue_file_with_notice(storage, token, chat_id, logger)
+                if after_action == "first_post":
+                    ok, message = create_first_post(storage, timezone, logger)
+                    send_message(token, chat_id, message, reply_markup=build_post_target_keyboard())
+                    return
+                send_message(token, chat_id, f"✅ Канал привязан: {title} (ID: {target_id}).", reply_markup=build_post_target_keyboard())
                 return
-        if admin_session.get("state") == ADMIN_STATE_POST_UPDATE_IMAGE:
-            if message.get("photo"):
-                file_id = message["photo"][-1].get("file_id")
+            if admin_session.get("state") == ADMIN_STATE_MASTER_INBOX_FORWARD:
+                forward_chat = message.get("forward_from_chat")
+                if not forward_chat:
+                    forward_origin = message.get("forward_origin", {})
+                    if isinstance(forward_origin, dict):
+                        forward_chat = forward_origin.get("chat")
+                if not forward_chat or not forward_chat.get("id"):
+                    send_message(token, chat_id, "Не удалось определить чат. Перешлите сообщение из группы/канала.")
+                    return
+                if forward_chat.get("type") not in {"group", "supergroup", "channel"}:
+                    send_message(token, chat_id, "Перешлите сообщение из группы или канала.")
+                    return
+                target_id = forward_chat.get("id")
+                storage.setdefault("settings", {})["master_inbox_chat_id"] = target_id
+                clear_admin_session(storage, chat_id)
+                save_storage(storage)
+                title = forward_chat.get("title") or "—"
+                send_message(
+                    token,
+                    chat_id,
+                    f"✅ Чат мастера сохранён: {title} (ID: {target_id}).",
+                    reply_markup=build_admin_settings_keyboard(),
+                )
+                return
+            if admin_session.get("state") == ADMIN_STATE_POST_TARGET:
+                if not text:
+                    send_message(token, chat_id, "Введите chat_id канала или группы.")
+                    return
+                storage.setdefault("post_settings", {})["target_chat_id"] = text.strip()
+                clear_admin_session(storage, chat_id)
+                save_storage(storage)
+                sync_posts_queue_file_with_notice(storage, token, chat_id, logger)
+                send_message(token, chat_id, "Канал публикации сохранён.", reply_markup=build_admin_posts_keyboard())
+                return
+            if admin_session.get("state") == ADMIN_STATE_POST_UPDATE_TEXT:
+                if not normalize_text(text):
+                    send_message(token, chat_id, "Введите новый текст для закрепа.")
+                    return
+                payload = {"text": normalize_text(text)}
+                set_admin_session(storage, chat_id, ADMIN_STATE_POST_UPDATE_IMAGE, payload)
+                save_storage(storage)
+                send_message(token, chat_id, "Прикрепите новое изображение или выберите «Без изображения».", reply_markup=build_post_image_skip_keyboard())
+                return
+            if admin_session.get("state") == ADMIN_STATE_POST_EDIT_TEXT:
+                if not normalize_text(text):
+                    send_message(token, chat_id, "Введите новый текст поста.")
+                    return
                 payload = admin_session.get("data", {})
-                payload["image_file_id"] = file_id
-                set_admin_session(storage, chat_id, ADMIN_STATE_POST_UPDATE_CONFIRM, payload)
+                payload["text"] = normalize_text(text)
+                set_admin_session(storage, chat_id, ADMIN_STATE_POST_EDIT_IMAGE, payload)
                 save_storage(storage)
-                send_message(token, chat_id, "Подтвердите обновление закрепа.", reply_markup=build_post_confirm_keyboard("update"))
+                send_message(token, chat_id, "Прикрепите новое изображение или выберите «Без фото».", reply_markup=build_post_image_skip_keyboard())
                 return
-            if text:
-                send_message(token, chat_id, "Отправьте изображение или выберите «Без изображения».", reply_markup=build_post_image_skip_keyboard())
+            if admin_session.get("state") == ADMIN_STATE_POST_EDIT_IMAGE:
+                if message.get("photo"):
+                    file_id = message["photo"][-1].get("file_id")
+                    payload = admin_session.get("data", {})
+                    payload["image_file_id"] = file_id
+                    set_admin_session(storage, chat_id, ADMIN_STATE_POST_EDIT_CONFIRM, payload)
+                    save_storage(storage)
+                    send_message(token, chat_id, "Подтвердите обновление поста.", reply_markup=build_post_confirm_keyboard("edit"))
+                    return
+                if text:
+                    send_message(token, chat_id, "Отправьте изображение или выберите «Без фото».", reply_markup=build_post_image_skip_keyboard())
+                    return
+            if admin_session.get("state") == ADMIN_STATE_POST_UPDATE_IMAGE:
+                if message.get("photo"):
+                    file_id = message["photo"][-1].get("file_id")
+                    payload = admin_session.get("data", {})
+                    payload["image_file_id"] = file_id
+                    set_admin_session(storage, chat_id, ADMIN_STATE_POST_UPDATE_CONFIRM, payload)
+                    save_storage(storage)
+                    send_message(token, chat_id, "Подтвердите обновление закрепа.", reply_markup=build_post_confirm_keyboard("update"))
+                    return
+                if text:
+                    send_message(token, chat_id, "Отправьте изображение или выберите «Без изображения».", reply_markup=build_post_image_skip_keyboard())
+                    return
+            if admin_session.get("state") == ADMIN_STATE_ADD_ADMIN:
+                if not text.isdigit():
+                    send_message(token, chat_id, "tg_id должен быть числом. Повторите ввод.")
+                    return
+                admin_ids = sorted(get_admin_ids(storage) | {int(text)})
+                storage["admins"] = admin_ids
+                clear_admin_session(storage, chat_id)
+                save_storage(storage)
+                send_message(token, chat_id, "Администратор добавлен.")
                 return
-        if admin_session.get("state") == ADMIN_STATE_ADD_ADMIN:
-            if not text.isdigit():
-                send_message(token, chat_id, "tg_id должен быть числом. Повторите ввод.")
+            if admin_session.get("state") == ADMIN_STATE_ADD_BLOCK:
+                if not text.isdigit():
+                    send_message(token, chat_id, "tg_id должен быть числом. Повторите ввод.")
+                    return
+                block_ids = {int(value) for value in storage.get("blocklist", []) if str(value).isdigit()}
+                block_ids.add(int(text))
+                storage["blocklist"] = sorted(block_ids)
+                clear_admin_session(storage, chat_id)
+                save_storage(storage)
+                send_message(token, chat_id, "Добавлено в блок-лист.")
                 return
-            admin_ids = sorted(get_admin_ids(storage) | {int(text)})
-            storage["admins"] = admin_ids
-            clear_admin_session(storage, chat_id)
-            save_storage(storage)
-            send_message(token, chat_id, "Администратор добавлен.")
-            return
-        if admin_session.get("state") == ADMIN_STATE_ADD_BLOCK:
-            if not text.isdigit():
-                send_message(token, chat_id, "tg_id должен быть числом. Повторите ввод.")
-                return
-            block_ids = {int(value) for value in storage.get("blocklist", []) if str(value).isdigit()}
-            block_ids.add(int(text))
-            storage["blocklist"] = sorted(block_ids)
-            clear_admin_session(storage, chat_id)
-            save_storage(storage)
-            send_message(token, chat_id, "Добавлено в блок-лист.")
+        except Exception as exc:  # noqa: BLE001 - keep polling alive
+            logger.exception("admin update error: %s", exc)
+            send_message(token, chat_id, "⚠️ Ошибка, попробуйте ещё раз /admin, смотрите логи")
             return
 
     if handle_attachment(
@@ -5427,6 +5712,7 @@ def publish_post(
     post_settings = storage.setdefault("post_settings", {})
     post_settings["last_post_message_id"] = message_id
     post_settings["last_post_chat_id"] = target_chat_id
+    post_settings["last_post_ts"] = now_iso(timezone)
     pinned = storage.setdefault("pinned_post", {})
     if int(get_settings(storage).get("auto_pin_enabled", 1)):
         previous_chat = pinned.get("chat_id")
@@ -5553,6 +5839,7 @@ def main() -> None:
     logger.info("client_bot token source: %s", token_source)
     storage = load_storage()
     ensure_storage_defaults(storage)
+    ensure_posts_queue_file(storage, logger)
     restored = restore_posts_queue_from_file(storage, logger)
     bootstrapped = bootstrap_admins(storage)
     if restored or bootstrapped:
