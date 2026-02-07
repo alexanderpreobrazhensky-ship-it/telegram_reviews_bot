@@ -25,6 +25,10 @@ def ensure_storage_schema(storage: dict) -> dict:
     storage.setdefault("admin_sessions", {})
     storage.setdefault("blocklist", [])
     storage.setdefault("outgoing_messages", [])
+    storage.setdefault("posts", [])
+    storage.setdefault("post_settings", {})
+    storage.setdefault("pinned_post", {})
+    storage.setdefault("button_clicks", {})
     return storage
 
 
