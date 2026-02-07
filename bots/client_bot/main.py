@@ -104,27 +104,16 @@ FALLBACK_OUT_OF_SCOPE = "Я передам ваш вопрос мастеру, �
 YES_OPTIONS = {"да", "yes", "ага"}
 NO_OPTIONS = {"нет", "no"}
 
-PIN_REGULATIONS_LINE_ENABLED = (os.getenv("SHOW_REGLAMENT_PHRASE") or "0").strip() == "1"  # TODO: включить позже
-PIN_POST_TEXT = (
-    "Автоцентр ЛИРА 🛠️\n\n"
-    "Ремонт и обслуживание — спокойно, точно, по регламенту.\n"
-)
-if PIN_REGULATIONS_LINE_ENABLED:
-    PIN_POST_TEXT += "Работаем по регламентам производителя.\n"
-PIN_POST_TEXT += (
-    "\n"
-    "Без спешки. Без лишних слов.\n"
-    "Как и должно быть.\n\n"
-    "Выберите действие ниже."
-)
+PIN_REGULATIONS_LINE_ENABLED = (os.getenv("SHOW_REGLAMENT_PHRASE") or "1").strip() == "1"
 PIN_POST_BUTTONS = [
-    {"text": "🛠️ Записаться", "action": "start_booking"},
+    {"text": "🛠 Запись на сервис", "action": "start_booking"},
     {"text": "⚙️ Подбор запчастей", "action": "start_parts"},
+    {"text": "🌐 Быстрая заявка (WebApp)", "action": "open_webapp"},
     {"text": "💬 Вопрос мастеру", "action": "start_question"},
-    {"text": "✨ Быстрая заявка (WebApp)", "action": "open_webapp"},
-    {"text": "📍 Адрес и режим", "action": "show_contacts"},
 ]
-AUTO_PIN_ON_DEPLOY = (os.getenv("AUTO_PIN_ON_START") or "1").strip().lower() not in {"0", "false", "no"}
+AUTO_PIN_ON_DEPLOY = (
+    os.getenv("AUTO_PIN_ON_DEPLOY") or os.getenv("AUTO_PIN_ON_START") or "1"
+).strip().lower() not in {"0", "false", "no"}
 SHOW_ROUTE_IMAGE = (os.getenv("SHOW_ROUTE_IMAGE") or "0").strip().lower() in {"1", "true", "yes"}
 
 START_PAYLOAD_SCENARIOS = {
@@ -231,12 +220,15 @@ CLIENT_MENU_ACTIONS = {
 RUN_MODE = (os.getenv("RUN_MODE") or "webhook").strip().lower()
 PORT = int(os.getenv("PORT", "8000"))
 DOMAIN = (os.getenv("DOMAIN") or "").strip().rstrip("/")
-WEBAPP_PATH = (os.getenv("WEBAPP_PATH") or "/app").strip() or "/app"
+PUBLIC_BASE_URL = (os.getenv("PUBLIC_BASE_URL") or "").strip().rstrip("/")
+WEBAPP_PATH = (os.getenv("WEBAPP_PATH") or "/WEBAPP").strip() or "/WEBAPP"
 WEBAPP_ENABLED = (os.getenv("WEBAPP_ENABLED") or "1").strip().lower() not in {"0", "false", "no"}
 WEBAPP_URL = os.getenv("WEBAPP_URL", "").strip()
+MASTER_CHAT_MODE = (os.getenv("MASTER_CHAT_MODE") or "OFF").strip().upper()
+MASTER_CHAT_ID_ENV = (os.getenv("MASTER_CHAT_ID") or "").strip()
 if not WEBAPP_PATH.startswith("/"):
     WEBAPP_PATH = f"/{WEBAPP_PATH}"
-WEBAPP_PATH = WEBAPP_PATH.rstrip("/") or "/app"
+WEBAPP_PATH = WEBAPP_PATH.rstrip("/") or "/WEBAPP"
 LIRA_PHONE = os.getenv("LIRA_PHONE", "").strip()
 LIRA_ADDRESS = (os.getenv("LIRA_ADDRESS") or "Удмуртская 10").strip()
 LIRA_MAP_URL = os.getenv("LIRA_MAP_URL", "").strip()
@@ -244,9 +236,13 @@ WEBAPP_DIR = os.path.join(os.path.dirname(__file__), "webapp")
 
 DICTIONARY_RULES = load_dictionary_rules()
 
-SETTINGS_KEY_PUBLICATION_CHANNEL_ID = "publication_channel_id"
+CORE_SETTINGS_TABLE = "public.settings"
+CORE_SETTING_CLIENT_CHANNEL_ID = "client_channel_id"
+CORE_SETTING_PINNED_MESSAGE_ID = "pinned_message_id"
+CORE_SETTING_WEBAPP_URL = "webapp_url"
+CORE_SETTING_PIN_TEMPLATE_VERSION = "pin_template_version"
+
 SETTINGS_KEY_PUBLICATION_CHANNEL_TITLE = "publication_channel_title"
-SETTINGS_KEY_PINNED_MESSAGE_ID = "pinned_message_id"
 SETTINGS_KEY_MASTER_CHAT_ID = "master_chat_id"
 SETTINGS_KEY_MASTER_CHAT_TITLE = "master_chat_title"
 SETTINGS_KEY_WEBAPP_PUBLIC_URL = "webapp_public_url"
@@ -306,6 +302,15 @@ def db_init_settings() -> None:
                 );
                 """
             )
+            cur.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS {CORE_SETTINGS_TABLE} (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                );
+                """
+            )
         conn.commit()
         DB_OK = True
         DB_LAST_ERROR = None
@@ -319,7 +324,7 @@ def db_init_settings() -> None:
             pass
 
 
-def db_get_text_setting(key: str) -> str | None:
+def db_get_text_setting(key: str, table: str = "public.client_bot_settings") -> str | None:
     if not DB_OK:
         return None
     conn = db_connect()
@@ -327,7 +332,7 @@ def db_get_text_setting(key: str) -> str | None:
         return None
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT value FROM public.client_bot_settings WHERE key=%s", (key,))
+            cur.execute(f"SELECT value FROM {table} WHERE key=%s", (key,))
             row = cur.fetchone()
             return row[0] if row else None
     except Exception:
@@ -339,7 +344,7 @@ def db_get_text_setting(key: str) -> str | None:
             pass
 
 
-def db_set_text_setting(key: str, value: str | None) -> None:
+def db_set_text_setting(key: str, value: str | None, table: str = "public.client_bot_settings") -> None:
     if not DB_OK:
         return
     conn = db_connect()
@@ -348,8 +353,8 @@ def db_set_text_setting(key: str, value: str | None) -> None:
     try:
         with conn.cursor() as cur:
             cur.execute(
-                """
-                INSERT INTO public.client_bot_settings (key, value)
+                f"""
+                INSERT INTO {table} (key, value)
                 VALUES (%s, %s)
                 ON CONFLICT (key)
                 DO UPDATE SET value=EXCLUDED.value, updated_at=now()
@@ -366,6 +371,14 @@ def db_set_text_setting(key: str, value: str | None) -> None:
             pass
 
 
+def db_get_core_setting(key: str) -> str | None:
+    return db_get_text_setting(key, table=CORE_SETTINGS_TABLE)
+
+
+def db_set_core_setting(key: str, value: str | None) -> None:
+    db_set_text_setting(key, value, table=CORE_SETTINGS_TABLE)
+
+
 def get_persistent_setting(key: str) -> str | None:
     value = db_get_text_setting(key)
     if value is not None:
@@ -375,6 +388,17 @@ def get_persistent_setting(key: str) -> str | None:
 
 def set_persistent_setting(key: str, value: str | None) -> None:
     db_set_text_setting(key, value)
+
+
+def get_core_setting(key: str) -> str | None:
+    value = db_get_core_setting(key)
+    if value is not None:
+        return value
+    return None
+
+
+def set_core_setting(key: str, value: str | None) -> None:
+    db_set_core_setting(key, value)
 
 
 def ensure_persistent_defaults() -> None:
@@ -394,15 +418,36 @@ def ensure_persistent_defaults() -> None:
         set_persistent_setting(SETTINGS_KEY_WEBAPP_PUBLIC_URL, webapp_url)
 
 
+def ensure_core_settings_defaults() -> None:
+    if not DB_OK:
+        return
+    channel_env = (os.getenv("CLIENT_CHANNEL_ID") or "").strip()
+    if channel_env and get_core_setting(CORE_SETTING_CLIENT_CHANNEL_ID) is None:
+        normalized = normalize_target_chat_id(channel_env) or channel_env
+        set_core_setting(CORE_SETTING_CLIENT_CHANNEL_ID, normalized)
+    pin_version = (os.getenv("PIN_TEMPLATE_VERSION") or "v1").strip()
+    if get_core_setting(CORE_SETTING_PIN_TEMPLATE_VERSION) is None:
+        set_core_setting(CORE_SETTING_PIN_TEMPLATE_VERSION, pin_version)
+    webapp_url = (os.getenv("WEBAPP_URL") or "").strip()
+    if not webapp_url:
+        base = PUBLIC_BASE_URL
+        if base:
+            if not base.startswith(("http://", "https://")):
+                base = f"https://{base}"
+            webapp_url = f"{base.rstrip('/')}{WEBAPP_PATH}"
+    if webapp_url and get_core_setting(CORE_SETTING_WEBAPP_URL) is None:
+        set_core_setting(CORE_SETTING_WEBAPP_URL, webapp_url)
+
+
 def get_publication_channel_id(storage: dict) -> str | None:
-    value = get_persistent_setting(SETTINGS_KEY_PUBLICATION_CHANNEL_ID)
+    value = get_core_setting(CORE_SETTING_CLIENT_CHANNEL_ID)
     if value:
         return value
     return get_post_target_chat_id(storage)
 
 
 def set_publication_channel(channel_id: str, title: str | None, storage: dict) -> None:
-    set_persistent_setting(SETTINGS_KEY_PUBLICATION_CHANNEL_ID, channel_id)
+    set_core_setting(CORE_SETTING_CLIENT_CHANNEL_ID, channel_id)
     if title:
         set_persistent_setting(SETTINGS_KEY_PUBLICATION_CHANNEL_TITLE, title)
     storage.setdefault("post_settings", {})["target_chat_id"] = channel_id
@@ -416,6 +461,8 @@ def get_master_inbox_chat_id(storage: dict) -> int | None:
     value = get_persistent_setting(SETTINGS_KEY_MASTER_CHAT_ID)
     if value and value.lstrip("-").isdigit():
         return int(value)
+    if MASTER_CHAT_ID_ENV and MASTER_CHAT_ID_ENV.lstrip("-").isdigit():
+        return int(MASTER_CHAT_ID_ENV)
     settings = storage.get("settings", {})
     chat_id = settings.get("master_inbox_chat_id")
     if isinstance(chat_id, int):
@@ -437,7 +484,7 @@ def get_master_inbox_title() -> str | None:
 
 
 def get_pinned_message_id() -> int | None:
-    value = get_persistent_setting(SETTINGS_KEY_PINNED_MESSAGE_ID)
+    value = get_core_setting(CORE_SETTING_PINNED_MESSAGE_ID)
     if value and value.isdigit():
         return int(value)
     if value and value.lstrip("-").isdigit():
@@ -446,7 +493,7 @@ def get_pinned_message_id() -> int | None:
 
 
 def set_pinned_message_id(message_id: int) -> None:
-    set_persistent_setting(SETTINGS_KEY_PINNED_MESSAGE_ID, str(message_id))
+    set_core_setting(CORE_SETTING_PINNED_MESSAGE_ID, str(message_id))
 
 
 def get_webapp_public_url() -> str | None:
@@ -458,6 +505,11 @@ def get_webapp_public_url() -> str | None:
     stored = get_persistent_setting(SETTINGS_KEY_WEBAPP_PUBLIC_URL)
     if stored:
         return stored
+    if PUBLIC_BASE_URL:
+        base = PUBLIC_BASE_URL
+        if not base.startswith(("http://", "https://")):
+            base = f"https://{base}"
+        return f"{base.rstrip('/')}{WEBAPP_PATH}"
     if DOMAIN and WEBAPP_PATH:
         if DOMAIN.startswith(("http://", "https://")):
             base = DOMAIN.rstrip("/")
@@ -471,13 +523,13 @@ def migrate_storage_settings_to_db(storage: dict) -> None:
     if not DB_OK:
         return
     channel_id = storage.get("post_settings", {}).get("target_chat_id")
-    if channel_id and get_persistent_setting(SETTINGS_KEY_PUBLICATION_CHANNEL_ID) is None:
+    if channel_id and get_core_setting(CORE_SETTING_CLIENT_CHANNEL_ID) is None:
         set_publication_channel(str(channel_id), None, storage)
     master_chat_id = storage.get("settings", {}).get("master_inbox_chat_id")
     if master_chat_id and get_persistent_setting(SETTINGS_KEY_MASTER_CHAT_ID) is None:
         set_master_inbox_chat(int(master_chat_id), None, storage)
     pinned_message = storage.get("pinned_post", {}).get("message_id")
-    if pinned_message and get_persistent_setting(SETTINGS_KEY_PINNED_MESSAGE_ID) is None:
+    if pinned_message and get_core_setting(CORE_SETTING_PINNED_MESSAGE_ID) is None:
         set_pinned_message_id(int(pinned_message))
 
 
@@ -514,6 +566,9 @@ def build_logger(timezone: str) -> logging.Logger:
 def get_webapp_url() -> str | None:
     if not WEBAPP_ENABLED:
         return None
+    stored = get_core_setting(CORE_SETTING_WEBAPP_URL)
+    if stored:
+        return stored
     url = (os.getenv("WEBAPP_URL") or WEBAPP_URL).strip()
     if url:
         return url
@@ -542,6 +597,28 @@ def get_map_urls(address: str) -> tuple[str | None, str, str]:
     yandex_url = f"https://yandex.ru/maps/?text={encoded}"
     google_url = f"https://www.google.com/maps/search/?api=1&query={encoded}"
     return map_url, yandex_url, google_url
+
+
+def get_pin_template_version() -> str:
+    stored = get_core_setting(CORE_SETTING_PIN_TEMPLATE_VERSION)
+    if stored:
+        return stored
+    return (os.getenv("PIN_TEMPLATE_VERSION") or "v1").strip()
+
+
+def build_pin_text() -> str:
+    version = get_pin_template_version()
+    if version != "v1":
+        version = "v1"
+    lines = [
+        "Автоцентр ЛИРА",
+        "",
+        "Ремонт и обслуживание — спокойно, точно, по регламенту.",
+    ]
+    if PIN_REGULATIONS_LINE_ENABLED:
+        lines.append("Работаем по регламентам производителя.")
+    lines.extend(["", "Выберите действие:"])
+    return "\n".join(lines)
 
 
 def build_main_menu_keyboard() -> dict:
@@ -809,6 +886,9 @@ def parse_master_usernames() -> list[str]:
 
 
 def get_master_recipients(storage: dict) -> list[int]:
+    if MASTER_CHAT_MODE == "OFF":
+        admin_ids = sorted(get_admin_ids(storage))
+        return admin_ids
     master_inbox = get_master_inbox_chat_id(storage)
     if master_inbox is None:
         return []
@@ -1693,6 +1773,13 @@ def build_master_inbox_keyboard() -> dict:
 
 
 def build_master_contacts_text(storage: dict) -> str:
+    if MASTER_CHAT_MODE == "OFF":
+        return "\n".join(
+            [
+                "👥 Контакты мастеров",
+                "Режим мастер-чата отключён. Включим, когда создадим чат мастеров.",
+            ]
+        )
     inbox = get_master_inbox_chat_id(storage)
     inbox_title = get_master_inbox_title() or "—"
     unreachable = storage.get("unreachable_users", {})
@@ -1720,12 +1807,15 @@ def build_system_status_text(storage: dict, timezone: str) -> str:
     webapp_url = get_webapp_url()
     ai_service = AIService(logging.getLogger("ai"), settings=get_settings(storage))
     ai_state = build_ai_status_text(storage, timezone)
+    master_status = (
+        "OFF" if MASTER_CHAT_MODE == "OFF" else f"{'✅' if master_id else '⚠️'} {master_title} (id: {master_id or '—'})"
+    )
     return "\n".join(
         [
             "🧭 Статус системы",
             f"Канал: {'✅' if channel_id else '⚠️'} {channel_title} (id: {channel_id or '—'})",
             f"Закреп: {'✅' if pinned_id else '⚠️'} message_id={pinned_id or '—'}",
-            f"Чат мастеров: {'✅' if master_id else '⚠️'} {master_title} (id: {master_id or '—'})",
+            f"Чат мастеров: {master_status}",
             f"WebApp: {'✅' if (WEBAPP_ENABLED and webapp_url) else '⚠️'} {webapp_url or '—'}",
             f"AI: {'ON' if ai_service.is_enabled() else 'OFF'}",
             "",
@@ -2588,6 +2678,7 @@ def verify_webapp_init_data(init_data: str, token: str) -> tuple[bool, dict]:
 def create_flask_app(token: str, logger: logging.Logger) -> Flask:
     app = Flask(__name__)
     webhook_path = build_webhook_path(token)
+    webapp_route = "/WEBAPP"
 
     @app.get("/")
     def root() -> object:
@@ -2599,30 +2690,41 @@ def create_flask_app(token: str, logger: logging.Logger) -> Flask:
         handle_update(token, update, logger)
         return "ok"
 
+    def webapp_disabled_response() -> tuple[str, int]:
+        return "disabled", 404
+
     @app.get("/webapp")
     @app.get("/webapp/")
     def legacy_webapp_redirect() -> object:
+        if not WEBAPP_ENABLED:
+            return webapp_disabled_response()
         if WEBAPP_PATH == "/webapp":
             return send_from_directory(WEBAPP_DIR, "index.html")
-        return redirect(WEBAPP_PATH)
+        return redirect(webapp_route)
 
-    @app.get(f"{WEBAPP_PATH}")
-    @app.get(f"{WEBAPP_PATH}/")
+    @app.get(webapp_route)
+    @app.get(f"{webapp_route}/")
     def webapp_index() -> object:
+        if not WEBAPP_ENABLED:
+            return webapp_disabled_response()
         return send_from_directory(WEBAPP_DIR, "index.html")
 
-    @app.get(f"{WEBAPP_PATH}/config.json")
+    @app.get(f"{webapp_route}/config.json")
     def webapp_config() -> object:
+        if not WEBAPP_ENABLED:
+            return webapp_disabled_response()
         return jsonify(build_webapp_config())
 
-    @app.get(f"{WEBAPP_PATH}/<path:filename>")
+    @app.get(f"{webapp_route}/<path:filename>")
     def webapp_static(filename: str) -> object:
+        if not WEBAPP_ENABLED:
+            return webapp_disabled_response()
         return send_from_directory(WEBAPP_DIR, filename)
 
     @app.get("/api/webapp/lookup")
     def webapp_lookup() -> object:
         if not WEBAPP_ENABLED:
-            return jsonify({"ok": False, "error": "webapp_disabled"}), 403
+            return webapp_disabled_response()
         plate = (request.args.get("plate") or "").strip()
         if not plate:
             return jsonify({"ok": False, "error": "missing_plate"}), 400
@@ -2633,7 +2735,14 @@ def create_flask_app(token: str, logger: logging.Logger) -> Flask:
 
     @app.post("/api/webapp/submit")
     def webapp_submit() -> object:
+        if not WEBAPP_ENABLED:
+            return webapp_disabled_response()
         payload = request.get_json(silent=True) or {}
+        if not payload:
+            payload = {
+                "form": request.form.to_dict(),
+                "initData": request.form.get("initData", ""),
+            }
         init_data = payload.get("initData") or ""
         ok, parsed = verify_webapp_init_data(init_data, token)
         if not ok:
@@ -2778,9 +2887,15 @@ def handle_webapp_submission(
         return jsonify({"ok": False, "error": "user_missing"}), 400
     if not isinstance(form, dict):
         return jsonify({"ok": False, "error": "invalid_form"}), 400
-    required_fields = ["carPlate", "description", "name", "phone"]
+    required_fields = ["carPlate", "description", "phone"]
     if any(not str(form.get(field) or "").strip() for field in required_fields):
         return jsonify({"ok": False, "error": "missing_required"}), 400
+    car_known = str(form.get("car_known") or "").strip().lower() in {"1", "true", "yes", "y"}
+    form["car_known"] = car_known
+    if not car_known:
+        extra_fields = ["carMakeModel", "carYear"]
+        if any(not str(form.get(field) or "").strip() for field in extra_fields):
+            return jsonify({"ok": False, "error": "missing_vehicle_details"}), 400
     storage = load_storage()
     ensure_storage_defaults(storage)
     ticket = build_ticket_from_webapp(form, user, timezone, storage)
@@ -2804,7 +2919,7 @@ def handle_webapp_submission(
 
 def get_post_target_chat_id(storage: dict) -> str | None:
     ensure_storage_defaults(storage)
-    persistent = get_persistent_setting(SETTINGS_KEY_PUBLICATION_CHANNEL_ID)
+    persistent = get_core_setting(CORE_SETTING_CLIENT_CHANNEL_ID)
     if persistent:
         return persistent
     target = storage.get("post_settings", {}).get("target_chat_id")
@@ -2829,20 +2944,19 @@ def normalize_target_chat_id(raw_value: str) -> str | None:
 def build_pin_keyboard() -> dict:
     webapp_url = get_webapp_url()
     rows: list[list[dict]] = [
-        [{"text": PIN_POST_BUTTONS[0]["text"], "callback_data": PIN_POST_BUTTONS[0]["action"]}],
         [
+            {"text": PIN_POST_BUTTONS[0]["text"], "callback_data": PIN_POST_BUTTONS[0]["action"]},
             {"text": PIN_POST_BUTTONS[1]["text"], "callback_data": PIN_POST_BUTTONS[1]["action"]},
-            {"text": PIN_POST_BUTTONS[2]["text"], "callback_data": PIN_POST_BUTTONS[2]["action"]},
         ],
     ]
     if webapp_url:
-        rows.append([{"text": PIN_POST_BUTTONS[3]["text"], "web_app": {"url": webapp_url}}])
-    rows.append([{"text": PIN_POST_BUTTONS[4]["text"], "callback_data": PIN_POST_BUTTONS[4]["action"]}])
+        rows.append([{"text": PIN_POST_BUTTONS[2]["text"], "web_app": {"url": webapp_url}}])
+    rows.append([{"text": PIN_POST_BUTTONS[3]["text"], "callback_data": PIN_POST_BUTTONS[3]["action"]}])
     return {"inline_keyboard": rows}
 
 
 def build_technical_post_payload() -> tuple[str, dict]:
-    return PIN_POST_TEXT, build_pin_keyboard()
+    return build_pin_text(), build_pin_keyboard()
 
 
 def get_posts_queue_file_path() -> str:
@@ -3019,13 +3133,27 @@ def ensure_channel_pin(
         "reply_markup": keyboard,
     }
     if message_id:
-        edit_result = tg_request("editMessageText", {**payload, "message_id": message_id})
-        if edit_result.ok:
+        logger.info("pin update start channel_id=%s message_id=%s", channel_id, message_id)
+        edit_text_result = tg_request("editMessageText", {**payload, "message_id": message_id})
+        if edit_text_result.ok:
+            edit_markup_result = tg_request(
+                "editMessageReplyMarkup",
+                {
+                    "chat_id": channel_id,
+                    "message_id": message_id,
+                    "reply_markup": keyboard,
+                },
+            )
+            if not edit_markup_result.ok:
+                logger.info("pin update markup failed channel_id=%s message_id=%s", channel_id, message_id)
             pin_result = pin_chat_message(channel_id, int(message_id))
             if pin_result.ok:
                 set_pinned_message_id(int(message_id))
+                logger.info("pin update done channel_id=%s message_id=%s", channel_id, message_id)
                 return True, f"✅ Закреп обновлён (message_id: {message_id})."
+            logger.info("pin update pin failed channel_id=%s message_id=%s", channel_id, message_id)
             return False, "⚠️ Не удалось закрепить сообщение."
+        logger.info("pin update edit failed channel_id=%s message_id=%s", channel_id, message_id)
     result = tg_request("sendMessage", payload)
     if not result.ok or not result.response_json:
         return False, "⚠️ Не удалось отправить закреп."
@@ -3036,6 +3164,7 @@ def ensure_channel_pin(
     if not pin_result.ok:
         return False, "⚠️ Не удалось закрепить сообщение."
     set_pinned_message_id(int(message_id))
+    logger.info("pin created channel_id=%s message_id=%s", channel_id, message_id)
     return True, f"✅ Закреп создан (message_id: {message_id})."
 
 
@@ -3241,6 +3370,8 @@ def send_attachment_to_master(
 
 
 def maybe_notify_missing_master_inbox(storage: dict, timezone: str, logger: logging.Logger) -> None:
+    if MASTER_CHAT_MODE == "OFF":
+        return
     settings = storage.setdefault("settings", {})
     last_notice = settings.get("master_inbox_notice_at")
     if last_notice:
@@ -5107,7 +5238,7 @@ def handle_admin_callback(
         send_message(
             token,
             chat_id,
-            "\n".join(["Настройка канала публикации.", current_text]),
+            "\n".join(["Канал публикации.", current_text]),
             reply_markup=build_post_target_keyboard(),
         )
         return True
@@ -5117,13 +5248,14 @@ def handle_admin_callback(
         send_message(
             token,
             chat_id,
-            "Перешлите сообщение из нужного канала. Бот должен быть админом (права: публикация и закреп).",
+            "1) Добавьте бота в админы канала (права: публикация и закреп).\n"
+            "2) Перешлите сюда любое сообщение из канала.",
         )
         return True
     if data == "admin:posts:target:manual":
         set_admin_session(storage, chat_id, ADMIN_STATE_POST_TARGET, {})
         save_storage(storage)
-        send_message(token, chat_id, "Введите chat_id канала или группы для публикаций.")
+        send_message(token, chat_id, "Введите ID канала в формате -100xxxxxxxxxx.")
         return True
     if data == "admin:posts:target:technical":
         if not get_publication_channel_id(storage):
@@ -6021,7 +6153,7 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
                 send_message(
                     token,
                     chat_id,
-                    f"✅ Канал подключён: {title} (ID: {target_id}).",
+                    f"✅ Канал подключён: {title}. Теперь можно создать/обновить закреп.",
                     reply_markup=build_post_target_keyboard(),
                 )
                 return
@@ -6076,11 +6208,11 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
                 return
             if admin_session.get("state") == ADMIN_STATE_POST_TARGET:
                 if not text:
-                    send_message(token, chat_id, "Введите chat_id канала или группы.")
+                    send_message(token, chat_id, "Введите ID канала в формате -100xxxxxxxxxx.")
                     return
                 normalized = normalize_target_chat_id(text)
                 if not normalized:
-                    send_message(token, chat_id, "Введите числовой chat_id (например, -1001234567890).")
+                    send_message(token, chat_id, "Введите ID канала в формате -1001234567890.")
                     return
                 check = tg_request("getChat", {"chat_id": normalized})
                 if not check.ok:
@@ -6102,7 +6234,7 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
                 send_message(
                     token,
                     chat_id,
-                    "✅ Канал подключён. Теперь создайте техпост для закрепа.",
+                    f"✅ Канал подключён: {title or '—'}. Теперь можно создать/обновить закреп.",
                     reply_markup=build_post_target_keyboard(),
                 )
                 return
@@ -7012,6 +7144,7 @@ def main() -> None:
     logger.info("client_bot token source: %s", token_source)
     db_init_settings()
     ensure_persistent_defaults()
+    ensure_core_settings_defaults()
     storage = load_storage()
     ensure_storage_defaults(storage)
     migrate_storage_settings_to_db(storage)
