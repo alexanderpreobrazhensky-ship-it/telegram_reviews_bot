@@ -91,6 +91,35 @@ FALLBACK_OUT_OF_SCOPE = "Я передам ваш вопрос мастеру, �
 
 YES_OPTIONS = {"да", "yes", "ага"}
 NO_OPTIONS = {"нет", "no"}
+
+PIN_REGULATIONS_LINE_ENABLED = False  # TODO: включить позже
+PIN_POST_TEXT = (
+    "Автоцентр ЛИРА 🛠️\n\n"
+    "Ремонт и обслуживание автомобилей —\n"
+    "спокойно, точно, по регламенту.\n"
+)
+if PIN_REGULATIONS_LINE_ENABLED:
+    PIN_POST_TEXT += "Работаем по регламентам производителя.\n"
+PIN_POST_TEXT += (
+    "\n"
+    "Без спешки. Без лишних слов.\n"
+    "Как и должно быть."
+)
+PIN_POST_BUTTONS = [
+    {"text": "🛠 Записаться на обслуживание", "action": "start_service_booking"},
+    {"text": "⚙️ Подбор запчастей", "action": "start_parts_request"},
+    {"text": "💬 Вопрос мастеру", "action": "start_master_chat"},
+]
+AUTO_PIN_ON_DEPLOY = True
+
+START_PAYLOAD_SCENARIOS = {
+    "book": "booking",
+    "booking": "booking",
+    "start_service_booking": "booking",
+    "parts": "parts",
+    "start_parts_request": "parts",
+}
+START_PAYLOAD_MASTER_CHAT = {"start_master_chat", "master_chat", "master"}
 ADMIN_PAGE_SIZE = 5
 ADMIN_LOG_LINES = 200
 ADMIN_STATE_NONE = "none"
@@ -601,7 +630,7 @@ def ensure_storage_defaults(storage: dict) -> None:
         "auto_reply_hours",
         get_env_int("CLIENT_AUTO_REPLY_HOURS", "AUTO_REPLY_HOURS", 6),
     )
-    settings.setdefault("auto_pin_enabled", 1)
+    settings.setdefault("auto_pin_enabled", 1 if AUTO_PIN_ON_DEPLOY else 0)
     settings.setdefault("ai_health", {"state": AI_HEALTH_OK, "last_failed_at": None, "reason": None})
     settings.setdefault("ai_temp_disabled_until", None)
     settings.setdefault("ai_temp_disabled_notice_until", None)
@@ -2148,21 +2177,13 @@ def build_deeplink(payload: str) -> str:
 
 
 def build_technical_post_payload() -> tuple[str, dict]:
-    text = (
-        "<b>Автоцентр ЛИРА</b> 🛠️\n"
-        "Запись на ремонт и запрос запчастей — в 1 клик:\n\n"
-        "Выберите действие:"
-    )
     keyboard = {
         "inline_keyboard": [
-            [
-                {"text": "🛠 Запись на ремонт", "url": build_deeplink("book")},
-                {"text": "🔧 Запчасти", "url": build_deeplink("parts")},
-            ],
-            [{"text": "💬 Написать в бот", "url": build_deeplink("home")}],
+            [{"text": button["text"], "url": build_deeplink(button["action"])}]
+            for button in PIN_POST_BUTTONS
         ]
     }
-    return text, keyboard
+    return PIN_POST_TEXT, keyboard
 
 
 def get_posts_queue_file_path() -> str:
@@ -5429,7 +5450,7 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
             if session.get("stage"):
                 ask_current_step(token, chat_id, session)
             return
-        if payload in {"book", "booking"}:
+        if payload in START_PAYLOAD_SCENARIOS:
             ai_service = AIService(logging.getLogger("ai"), settings=get_settings(storage))
             start_client_scenario(
                 token,
@@ -5439,20 +5460,19 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
                 storage,
                 timezone,
                 ai_service,
-                "booking",
+                START_PAYLOAD_SCENARIOS[payload],
             )
             return
-        if payload in {"parts"}:
-            ai_service = AIService(logging.getLogger("ai"), settings=get_settings(storage))
-            start_client_scenario(
+        if payload in START_PAYLOAD_MASTER_CHAT:
+            process_master_request(
                 token,
                 chat_id,
                 chat,
                 session,
                 storage,
                 timezone,
-                ai_service,
-                "parts",
+                master_usernames,
+                logger,
             )
             return
         send_message(
