@@ -59,6 +59,7 @@ from services.telegram_api import (
     TgRequestResult,
     pin_chat_message,
     unpin_chat_message,
+    set_chat_menu_button_webapp,
     tg_request,
 )
 from storage import (
@@ -104,16 +105,20 @@ FALLBACK_OUT_OF_SCOPE = "Я передам ваш вопрос мастеру, �
 YES_OPTIONS = {"да", "yes", "ага"}
 NO_OPTIONS = {"нет", "no"}
 
-PIN_REGULATIONS_LINE_ENABLED = (os.getenv("SHOW_REGLAMENT_PHRASE") or "1").strip() == "1"
+PIN_REGULATIONS_LINE_ENABLED = (
+    (os.getenv("CLIENT_SHOW_REGLAMENT_PHRASE") or os.getenv("SHOW_REGLAMENT_PHRASE") or "0").strip() == "1"
+)
 PIN_POST_BUTTONS = [
-    {"text": "🛠 Запись на сервис", "action": "start_booking"},
+    {"text": "🛠 Записаться на обслуживание", "action": "start_booking"},
     {"text": "⚙️ Подбор запчастей", "action": "start_parts"},
-    {"text": "🌐 Быстрая заявка (WebApp)", "action": "open_webapp"},
     {"text": "💬 Вопрос мастеру", "action": "start_question"},
 ]
 AUTO_PIN_ON_DEPLOY = (
-    os.getenv("AUTO_PIN_ON_DEPLOY") or os.getenv("AUTO_PIN_ON_START") or "1"
-).strip().lower() not in {"0", "false", "no"}
+    os.getenv("CLIENT_AUTO_PIN_ON_DEPLOY")
+    or os.getenv("AUTO_PIN_ON_DEPLOY")
+    or os.getenv("AUTO_PIN_ON_START")
+    or "1"
+).strip().lower() not in {"0", "false", "no", "off", "disabled"}
 SHOW_ROUTE_IMAGE = (os.getenv("SHOW_ROUTE_IMAGE") or "0").strip().lower() in {"1", "true", "yes"}
 
 START_PAYLOAD_SCENARIOS = {
@@ -217,15 +222,20 @@ CLIENT_MENU_ACTIONS = {
     MENU_HELP: "help",
 }
 
-RUN_MODE = (os.getenv("RUN_MODE") or "webhook").strip().lower()
+RUN_MODE = (os.getenv("CLIENT_RUN_MODE") or os.getenv("RUN_MODE") or "webhook").strip().lower()
 PORT = int(os.getenv("PORT", "8000"))
 DOMAIN = (os.getenv("DOMAIN") or "").strip().rstrip("/")
 PUBLIC_BASE_URL = (os.getenv("PUBLIC_BASE_URL") or "").strip().rstrip("/")
 WEBAPP_PATH = (os.getenv("WEBAPP_PATH") or "/WEBAPP").strip() or "/WEBAPP"
-WEBAPP_ENABLED = (os.getenv("WEBAPP_ENABLED") or "1").strip().lower() not in {"0", "false", "no"}
-WEBAPP_URL = os.getenv("WEBAPP_URL", "").strip()
-MASTER_CHAT_MODE = (os.getenv("MASTER_CHAT_MODE") or "OFF").strip().upper()
-MASTER_CHAT_ID_ENV = (os.getenv("MASTER_CHAT_ID") or "").strip()
+WEBAPP_ENABLED = (
+    (os.getenv("CLIENT_WEBAPP_ENABLED") or os.getenv("WEBAPP_ENABLED") or "1")
+    .strip()
+    .lower()
+    not in {"0", "false", "no", "off", "disabled"}
+)
+WEBAPP_URL = (os.getenv("CLIENT_WEBAPP_URL") or os.getenv("WEBAPP_URL") or "").strip()
+MASTER_CHAT_MODE = (os.getenv("CLIENT_MASTER_CHAT_MODE") or os.getenv("MASTER_CHAT_MODE") or "OFF").strip().upper()
+MASTER_CHAT_ID_ENV = (os.getenv("CLIENT_MASTER_CHAT_ID") or os.getenv("MASTER_CHAT_ID") or "").strip()
 if not WEBAPP_PATH.startswith("/"):
     WEBAPP_PATH = f"/{WEBAPP_PATH}"
 WEBAPP_PATH = WEBAPP_PATH.rstrip("/") or "/WEBAPP"
@@ -428,7 +438,7 @@ def ensure_core_settings_defaults() -> None:
     pin_version = (os.getenv("PIN_TEMPLATE_VERSION") or "v1").strip()
     if get_core_setting(CORE_SETTING_PIN_TEMPLATE_VERSION) is None:
         set_core_setting(CORE_SETTING_PIN_TEMPLATE_VERSION, pin_version)
-    webapp_url = (os.getenv("WEBAPP_URL") or "").strip()
+    webapp_url = (os.getenv("CLIENT_WEBAPP_URL") or os.getenv("WEBAPP_URL") or "").strip()
     if not webapp_url:
         base = PUBLIC_BASE_URL
         if base:
@@ -497,7 +507,7 @@ def set_pinned_message_id(message_id: int) -> None:
 
 
 def get_webapp_public_url() -> str | None:
-    value = (os.getenv("WEBAPP_PUBLIC_URL") or "").strip()
+    value = (os.getenv("CLIENT_WEBAPP_URL") or os.getenv("WEBAPP_PUBLIC_URL") or os.getenv("WEBAPP_URL") or "").strip()
     if value:
         if value.startswith(("http://", "https://")):
             return value.rstrip("/")
@@ -569,7 +579,7 @@ def get_webapp_url() -> str | None:
     stored = get_core_setting(CORE_SETTING_WEBAPP_URL)
     if stored:
         return stored
-    url = (os.getenv("WEBAPP_URL") or WEBAPP_URL).strip()
+    url = (os.getenv("CLIENT_WEBAPP_URL") or os.getenv("WEBAPP_URL") or WEBAPP_URL).strip()
     if url:
         return url
     return get_webapp_public_url()
@@ -611,7 +621,7 @@ def build_pin_text() -> str:
     if version != "v1":
         version = "v1"
     lines = [
-        "Автоцентр ЛИРА",
+        "Автоцентр ЛИРА 🛠",
         "",
         "Ремонт и обслуживание — спокойно, точно, по регламенту.",
     ]
@@ -958,6 +968,14 @@ def get_client_env_int(primary: str, default: int) -> int:
         return default
 
 
+def get_env_flag(primary: str, fallback: str | None = None, default: str = "0") -> bool:
+    if fallback:
+        raw_value = get_env_value(primary, fallback, default)
+    else:
+        raw_value = get_client_env_value(primary, default)
+    return raw_value.strip().lower() not in ("0", "false", "no", "off", "disabled")
+
+
 def get_ai_config_source() -> str:
     keys = [
         "CLIENT_DEEPSEEK_API_KEY",
@@ -1014,7 +1032,8 @@ def ensure_storage_defaults(storage: dict) -> None:
         "auto_reply_hours",
         get_env_int("CLIENT_AUTO_REPLY_HOURS", "AUTO_REPLY_HOURS", 6),
     )
-    settings.setdefault("auto_pin_enabled", 1 if AUTO_PIN_ON_DEPLOY else 0)
+    auto_pin_enabled = get_env_flag("CLIENT_AUTO_PIN_ENABLED", "AUTO_PIN_ENABLED", "1")
+    settings.setdefault("auto_pin_enabled", 1 if auto_pin_enabled else 0)
     settings.setdefault("ai_health", {"state": AI_HEALTH_OK, "last_failed_at": None, "reason": None})
     settings.setdefault("ai_temp_disabled_until", None)
     settings.setdefault("ai_temp_disabled_notice_until", None)
@@ -2675,23 +2694,11 @@ def verify_webapp_init_data(init_data: str, token: str) -> tuple[bool, dict]:
     return computed == received_hash, parsed
 
 
-def create_flask_app(token: str, logger: logging.Logger) -> Flask:
-    app = Flask(__name__)
-    webhook_path = build_webhook_path(token)
-    webapp_route = "/WEBAPP"
-
-    @app.get("/")
-    def root() -> object:
-        return "OK"
-
-    @app.post(webhook_path)
-    def telegram_webhook() -> object:
-        update = request.get_json(silent=True) or {}
-        handle_update(token, update, logger)
-        return "ok"
+def register_webapp_routes(app: Flask, token: str, logger: logging.Logger) -> Flask:
+    webapp_route = WEBAPP_PATH
 
     def webapp_disabled_response() -> tuple[str, int]:
-        return "disabled", 404
+        return "WebApp disabled", 404
 
     @app.get("/webapp")
     @app.get("/webapp/")
@@ -2725,12 +2732,14 @@ def create_flask_app(token: str, logger: logging.Logger) -> Flask:
     def webapp_lookup() -> object:
         if not WEBAPP_ENABLED:
             return webapp_disabled_response()
-        plate = (request.args.get("plate") or "").strip()
+        plate = (request.args.get("plate") or "").strip().upper()
         if not plate:
             return jsonify({"ok": False, "error": "missing_plate"}), 400
         storage = load_storage()
         ensure_storage_defaults(storage)
-        known = find_known_car(storage, plate) or {}
+        known = find_known_car(storage, plate)
+        if not known:
+            return jsonify({"ok": True, "data": None})
         return jsonify({"ok": True, "data": known})
 
     @app.post("/api/webapp/submit")
@@ -2750,6 +2759,23 @@ def create_flask_app(token: str, logger: logging.Logger) -> Flask:
         return handle_webapp_submission(parsed, payload.get("form") or {}, token, logger)
 
     return app
+
+
+def create_flask_app(token: str, logger: logging.Logger) -> Flask:
+    app = Flask(__name__)
+    webhook_path = build_webhook_path(token)
+
+    @app.get("/")
+    def root() -> object:
+        return "OK"
+
+    @app.post(webhook_path)
+    def telegram_webhook() -> object:
+        update = request.get_json(silent=True) or {}
+        handle_update(token, update, logger)
+        return "ok"
+
+    return register_webapp_routes(app, token, logger)
 
 
 def handle_webapp_data(
@@ -2943,15 +2969,13 @@ def normalize_target_chat_id(raw_value: str) -> str | None:
 
 def build_pin_keyboard() -> dict:
     webapp_url = get_webapp_url()
-    rows: list[list[dict]] = [
-        [
-            {"text": PIN_POST_BUTTONS[0]["text"], "callback_data": PIN_POST_BUTTONS[0]["action"]},
-            {"text": PIN_POST_BUTTONS[1]["text"], "callback_data": PIN_POST_BUTTONS[1]["action"]},
-        ],
-    ]
+    rows: list[list[dict]] = []
     if webapp_url:
-        rows.append([{"text": PIN_POST_BUTTONS[2]["text"], "web_app": {"url": webapp_url}}])
-    rows.append([{"text": PIN_POST_BUTTONS[3]["text"], "callback_data": PIN_POST_BUTTONS[3]["action"]}])
+        rows.append([{"text": PIN_POST_BUTTONS[0]["text"], "web_app": {"url": webapp_url}}])
+    else:
+        rows.append([{"text": PIN_POST_BUTTONS[0]["text"], "callback_data": PIN_POST_BUTTONS[0]["action"]}])
+    rows.append([{"text": PIN_POST_BUTTONS[1]["text"], "callback_data": PIN_POST_BUTTONS[1]["action"]}])
+    rows.append([{"text": PIN_POST_BUTTONS[2]["text"], "callback_data": PIN_POST_BUTTONS[2]["action"]}])
     return {"inline_keyboard": rows}
 
 
@@ -6380,6 +6404,9 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
             "webapp" if get_webapp_url() else "fallback",
             chat_id,
         )
+        webapp_url = get_webapp_url()
+        if webapp_url:
+            set_chat_menu_button_webapp(chat_id, webapp_url, "Мини-приложение")
         if session.get("stage") or active_ticket:
             send_message(
                 token,
@@ -7202,7 +7229,7 @@ def main() -> None:
         ai_config_source,
     )
     if AUTO_PIN_ON_DEPLOY:
-        ok, message = ensure_channel_pin(storage, timezone, logger, force_new=True)
+        ok, message = ensure_channel_pin(storage, timezone, logger, force_new=False)
         logger.info("auto pin on start: %s", message)
     if RUN_MODE == "polling":
         logger.info("client_bot starting (polling mode)")
@@ -7213,6 +7240,18 @@ def main() -> None:
     set_webhook(token, logger)
     app = create_flask_app(token, logger)
     app.run(host="0.0.0.0", port=PORT, debug=False, use_reloader=False)
+
+
+def start_polling_background() -> threading.Thread | None:
+    global RUN_MODE
+    token = os.getenv("CLIENT_TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN_CLIENT")
+    if not token:
+        logging.getLogger("client_bot").warning("client_bot polling skipped: token is not configured")
+        return None
+    RUN_MODE = "polling"
+    thread = threading.Thread(target=main, name="client_bot_polling", daemon=True)
+    thread.start()
+    return thread
 
 
 if __name__ == "__main__":

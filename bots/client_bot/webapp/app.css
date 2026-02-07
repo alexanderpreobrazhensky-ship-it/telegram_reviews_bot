@@ -115,6 +115,12 @@ h2 {
   font-size: 15px;
 }
 
+.field input.is-invalid,
+.field textarea.is-invalid {
+  border-color: rgba(255, 122, 122, 0.8);
+  box-shadow: 0 0 0 1px rgba(255, 122, 122, 0.3);
+}
+
 .field textarea {
   resize: vertical;
 }

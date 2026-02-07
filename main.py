@@ -15,9 +15,10 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode, urlparse, urlunparse, quote
 
 import requests
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify
 
 from review_fetch import detect_platform, fetch_url, parse_2gis_review, parse_yandex_review
+from bots.client_bot import main as client_bot_main
 
 # -----------------------------
 # Logging
@@ -259,44 +260,6 @@ UI_VERSION = "2025-03-05"
 # Flask
 # -----------------------------
 app = Flask(__name__)
-
-WEBAPP_DIR = os.path.join(os.path.dirname(__file__), "bots", "client_bot", "webapp")
-
-def _webapp_address() -> str:
-    return (os.getenv("LIRA_ADDRESS") or "Удмуртская 10").strip() or "Удмуртская 10"
-
-def _webapp_phone() -> str:
-    return (os.getenv("LIRA_PHONE") or "").strip()
-
-def _webapp_map_urls(address: str) -> Tuple[Optional[str], str, str]:
-    map_url = (os.getenv("LIRA_MAP_URL") or "").strip() or None
-    encoded = requests.utils.quote(address)
-    yandex_url = f"https://yandex.ru/maps/?text={encoded}"
-    google_url = f"https://www.google.com/maps/search/?api=1&query={encoded}"
-    return map_url, yandex_url, google_url
-
-@app.get("/webapp")
-@app.get("/webapp/")
-def webapp_index() -> object:
-    return send_from_directory(WEBAPP_DIR, "index.html")
-
-@app.get("/webapp/config.json")
-def webapp_config() -> object:
-    address = _webapp_address()
-    map_url, yandex_url, google_url = _webapp_map_urls(address)
-    return jsonify(
-        {
-            "address": address,
-            "phone": _webapp_phone(),
-            "mapUrl": map_url or "",
-            "yandexUrl": yandex_url,
-            "googleUrl": google_url,
-        }
-    )
-
-@app.get("/webapp/<path:filename>")
-def webapp_static(filename: str) -> object:
-    return send_from_directory(WEBAPP_DIR, filename)
 
 # -----------------------------
 # Redaction
@@ -5242,10 +5205,21 @@ def telegram_webhook():
 # -----------------------------
 # Startup
 # -----------------------------
+def setup_client_bot() -> None:
+    token = os.getenv("CLIENT_TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN_CLIENT")
+    if not token:
+        logger.warning("client_bot token missing; skipping WebApp routes and polling start")
+        return
+    client_logger = logging.getLogger("client_bot")
+    client_bot_main.register_webapp_routes(app, token, client_logger)
+    client_bot_main.start_polling_background()
+
+
 db_init()
 set_webhook_once()
 ensure_channel_pin()
 start_schedule_worker()
+setup_client_bot()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=PORT)
