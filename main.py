@@ -327,6 +327,10 @@ def db_enabled() -> bool:
 def tg_api(method: str) -> str:
     return f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{method}"
 
+MAX_TG_MESSAGE_LEN = 3500
+HTML_ALLOWED_TAGS = {"b", "i", "u", "code", "pre", "a"}
+HTML_TAG_RE = re.compile(r"</?([a-zA-Z0-9]+)([^>]*)>")
+
 def extract_chat_user(update: dict) -> Tuple[Optional[int], Optional[int]]:
     if not update:
         return None, None
@@ -348,24 +352,118 @@ def extract_chat_user(update: dict) -> Tuple[Optional[int], Optional[int]]:
         return chat_id, user_id
     return None, None
 
+def _strip_html_tags(text: str) -> str:
+    return re.sub(r"</?[^>]+>", "", text)
+
+def _validate_html(text: str) -> bool:
+    stack: list[str] = []
+    for match in HTML_TAG_RE.finditer(text):
+        tag = match.group(1).lower()
+        attrs = match.group(2) or ""
+        is_closing = match.group(0).startswith("</")
+        if tag not in HTML_ALLOWED_TAGS:
+            return False
+        if not is_closing:
+            if tag == "a" and "href=" not in attrs.lower():
+                return False
+            stack.append(tag)
+            continue
+        if not stack or stack[-1] != tag:
+            return False
+        stack.pop()
+    return not stack
+
+def _chunk_text(text: str, max_len: int = MAX_TG_MESSAGE_LEN) -> list[str]:
+    if len(text) <= max_len:
+        return [text]
+    chunks: list[str] = []
+    current = ""
+    for line in text.splitlines(keepends=True):
+        if len(current) + len(line) > max_len and current:
+            chunks.append(current.rstrip("\n"))
+            current = line
+        else:
+            current += line
+    if current:
+        chunks.append(current.rstrip("\n"))
+    return chunks
+
+def _send_message_request(payload: dict) -> Optional[requests.Response]:
+    try:
+        return requests.post(tg_api("sendMessage"), json=payload, timeout=TG_TIMEOUT)
+    except Exception as exc:
+        logger.exception(
+            "sendMessage exception chat_id=%s text=%s err=%s",
+            payload.get("chat_id"),
+            _redact(str(payload.get("text", ""))[:200]),
+            exc,
+        )
+        return None
+
+def _send_plain_chunks(chat_id: int, text: str, reply_markup: Optional[dict] = None) -> None:
+    chunks = _chunk_text(text)
+    for idx, chunk in enumerate(chunks):
+        send_message(chat_id, chunk, reply_markup=reply_markup if idx == 0 else None)
+
+def _is_parse_error_response(response_text: str) -> bool:
+    return "can't parse entities" in response_text.lower()
+
+def send_safe_formatted_message(
+    chat_id: int,
+    text: str,
+    preferred_parse_mode: str = "HTML",
+    reply_markup: Optional[dict] = None,
+) -> None:
+    parse_mode = preferred_parse_mode or "HTML"
+    if len(text) > MAX_TG_MESSAGE_LEN:
+        logger.info("safe_send: message too long, fallback to plain chat_id=%s", chat_id)
+        _send_plain_chunks(chat_id, _strip_html_tags(text), reply_markup=reply_markup)
+        return
+    if parse_mode.upper() == "HTML" and not _validate_html(text):
+        logger.info("html_invalid_fallback chat_id=%s", chat_id)
+        _send_plain_chunks(chat_id, _strip_html_tags(text), reply_markup=reply_markup)
+        return
+    payload = {"chat_id": chat_id, "text": text, "parse_mode": parse_mode}
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+    response = _send_message_request(payload)
+    if response is None:
+        return
+    if response.status_code == 200:
+        return
+    if response.status_code == 400 and _is_parse_error_response(response.text):
+        logger.error(
+            "sendMessage parse error fallback chat_id=%s body=%s",
+            chat_id,
+            _redact(response.text[:400]),
+        )
+        _send_plain_chunks(chat_id, _strip_html_tags(text), reply_markup=reply_markup)
+        return
+    logger.error(
+        "sendMessage failed status=%s chat_id=%s text=%s body=%s",
+        response.status_code,
+        chat_id,
+        _redact(text[:200]),
+        _redact(response.text[:900]),
+    )
+
 def send_message(chat_id: int, text: str, reply_markup: Optional[dict] = None, parse_mode: Optional[str] = None) -> None:
     payload = {"chat_id": chat_id, "text": text}
     if parse_mode:
         payload["parse_mode"] = parse_mode
     if reply_markup:
         payload["reply_markup"] = reply_markup
-    try:
-        r = requests.post(tg_api("sendMessage"), json=payload, timeout=TG_TIMEOUT)
-        if r.status_code != 200:
-            logger.error(
-                "sendMessage failed status=%s chat_id=%s text=%s body=%s",
-                r.status_code,
-                chat_id,
-                _redact(text[:200]),
-                _redact(r.text[:900]),
-            )
-    except Exception as e:
-        logger.exception("sendMessage exception chat_id=%s text=%s err=%s", chat_id, _redact(text[:200]), e)
+    response = _send_message_request(payload)
+    if response is None:
+        return
+    if response.status_code != 200:
+        logger.error(
+            "sendMessage failed status=%s chat_id=%s text=%s body=%s",
+            response.status_code,
+            chat_id,
+            _redact(text[:200]),
+            _redact(response.text[:900]),
+        )
 
 def send_photo(
     chat_id: int,
@@ -2719,22 +2817,23 @@ HELP_TEXT = (
 )
 
 INSTRUCTION_TEXT = (
-    f"🤖 Бот для **{SERVICE_NAME}** 🛠️🚗.\n\n"
-    "**Как пользоваться (очень просто):**\n\n"
-    "1. Нажми **➕ Добавить отзыв**\n"
-    "2. Выбери метод: **✍️ Ручной ввод** или **🔗 По ссылке**\n"
+    f"🤖 Бот для <b>{SERVICE_NAME}</b> 🛠️🚗.\n\n"
+    "<b>Как пользоваться (очень просто):</b>\n\n"
+    "1. Нажми <b>➕ Добавить отзыв</b>\n"
+    "2. Выбери метод: <b>✍️ Ручной ввод</b> или <b>🔗 По ссылке</b>\n"
     "3. Следуй подсказкам бота (площадка, рейтинг, автор, текст)\n"
-    "4. Бот сохранит отзыв и предложит **🧠 Проанализировать**\n"
+    "4. Бот сохранит отзыв и предложит <b>🧠 Проанализировать</b>\n"
     "5. После анализа появятся кнопки:\n"
-    "   **✍️ Ответ** — готовый публичный ответ клиенту\n"
-    "   **⚠️ Жалоба** — текст жалобы (если отзыв нарушает правила или ⭐1)\n"
-    "   **🧾 JSON** — полный результат анализа (для выгрузки/отчётов)\n\n"
-    "**О сервисе 🛠️🚗**\n"
+    "   <b>✍️ Ответ</b> — готовый публичный ответ клиенту\n"
+    "   <b>⚠️ Жалоба</b> — текст жалобы (если отзыв нарушает правила или ⭐1)\n"
+    "   <b>🧾 JSON</b> — полный результат анализа (для выгрузки/отчётов)\n\n"
+    "<b>О сервисе 🛠️🚗</b>\n"
     f"- {SERVICE_NAME}\n"
     f"- Адрес: {SERVICE_ADDRESS}\n"
     f"- Режим работы: {SERVICE_HOURS}\n"
     f"- Телефоны: {', '.join(SERVICE_PHONES)}\n\n"
-    "**Если что-то не работает:** открой **⚙️ Настройки → 🛠 Самодиагностика** и пришли результат разработчику."
+    "<b>Если что-то не работает:</b> открой <b>⚙️ Настройки → 🛠 Самодиагностика</b> "
+    "и пришли результат разработчику."
 )
 
 UI = {
@@ -4286,7 +4385,7 @@ def telegram_webhook():
 
         if _matches_label("instruction", text_clean, text_norm):
             _log_route("menu_instruction", chat_id, user_id)
-            send_message(chat_id, f"{INSTRUCTION_TEXT}\n\n{HELP_TEXT}", parse_mode="Markdown")
+            send_safe_formatted_message(chat_id, f"{INSTRUCTION_TEXT}\n\n{HELP_TEXT}", preferred_parse_mode="HTML")
             return "ok"
 
         if cmd == "/help" or _matches_label("help", text_clean, text_norm):
@@ -4314,7 +4413,12 @@ def telegram_webhook():
                 send_message(chat_id, "❌ Текст справки содержит запрещённую фразу.")
                 return "ok"
             sent_to = user_id if user_id else chat_id
-            send_message(sent_to, text_payload, reply_markup=_helpadmin_keyboard())
+            send_safe_formatted_message(
+                sent_to,
+                text_payload,
+                preferred_parse_mode="HTML",
+                reply_markup=_helpadmin_keyboard(),
+            )
             if chat_id != sent_to:
                 send_message(chat_id, "Справка отправлена в личные сообщения.")
             logger.info("helpadmin sent user_id=%s", user_id)
