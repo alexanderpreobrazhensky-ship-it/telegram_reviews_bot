@@ -1,7 +1,9 @@
 import csv
 import importlib.util
+import io
 import logging
 import os
+import re
 import threading
 import time
 from collections import deque
@@ -9,6 +11,7 @@ from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import requests
+from PIL import Image, ImageDraw, ImageFont
 
 from services.ai_service import AIService, normalize_date_string
 from services.outgoing_queue import (
@@ -51,13 +54,23 @@ POLLING_SLEEP_SECONDS = 1
 TTL_HOURS = 24
 OUTGOING_QUEUE_INTERVAL_SECONDS = 3
 
-MENU_BOOKING = "🗓 Записаться на сервис"
-MENU_LAST_VISIT = "🧾 Вопрос по прошлому визиту"
+MENU_BOOKING = "📅 Записаться на сервис"
+MENU_WARRANTY = "✅ Гарантия / повторная проблема"
+MENU_REPAIR = "🔧 Ремонт (что беспокоит)"
 MENU_PARTS = "🧩 Запчасти"
-MENU_REPAIR = "🔧 Ремонт"
+MENU_LAST_VISIT = "🧾 Вопрос по прошлому визиту"
 MENU_OTHER = "❓ Другое"
+MENU_DIRECTIONS = "📍 Как проехать"
 MENU_MASTER = "👨‍🔧 Связаться с мастером / Написать мастеру"
 UNIVERSAL_QUESTION = "Опишите, пожалуйста, коротко, с чем вы обращаетесь."
+FALLBACK_AI_UNAVAILABLE = (
+    "Я сейчас работаю в стандартном режиме. "
+    "Задам несколько уточняющих вопросов и передам информацию мастеру."
+)
+FALLBACK_NOT_UNDERSTOOD = (
+    "Я могу ошибиться. Напишите, пожалуйста, чуть подробнее — я передам это мастеру."
+)
+FALLBACK_OUT_OF_SCOPE = "Я передам ваш вопрос мастеру, он свяжется с вами."
 
 YES_OPTIONS = {"да", "yes", "ага"}
 NO_OPTIONS = {"нет", "no"}
@@ -112,6 +125,25 @@ ASK_MORE_OPTIONS = [
     ("other", "Другое (свободный текст)"),
 ]
 WEEKEND_DAYS = {5, 6}
+WEEKDAY_ALIASES = {
+    0: {"пн", "понедельник"},
+    1: {"вт", "вторник"},
+    2: {"ср", "среда"},
+    3: {"чт", "четверг", "четв"},
+    4: {"пт", "пятница"},
+    5: {"сб", "суббота"},
+    6: {"вс", "воскресенье"},
+}
+
+CLIENT_MENU_ACTIONS = {
+    MENU_BOOKING: "booking",
+    MENU_WARRANTY: "last_visit",
+    MENU_REPAIR: "repair",
+    MENU_PARTS: "parts",
+    MENU_LAST_VISIT: "last_visit",
+    MENU_OTHER: "other",
+    MENU_DIRECTIONS: "directions",
+}
 
 
 def build_logger(timezone: str) -> logging.Logger:
@@ -146,16 +178,28 @@ def build_logger(timezone: str) -> logging.Logger:
 
 def build_main_menu_keyboard() -> dict:
     return {
-        "keyboard": [
-            [{"text": MENU_BOOKING}],
-            [{"text": MENU_LAST_VISIT}],
-            [{"text": MENU_PARTS}, {"text": MENU_REPAIR}],
-            [{"text": MENU_OTHER}],
-            [{"text": MENU_MASTER}],
+        "inline_keyboard": [
+            [{"text": MENU_BOOKING, "callback_data": "menu:booking"}],
+            [{"text": MENU_WARRANTY, "callback_data": "menu:warranty"}],
+            [
+                {"text": MENU_REPAIR, "callback_data": "menu:repair"},
+                {"text": MENU_PARTS, "callback_data": "menu:parts"},
+            ],
+            [
+                {"text": MENU_LAST_VISIT, "callback_data": "menu:last_visit"},
+                {"text": MENU_OTHER, "callback_data": "menu:other"},
+            ],
+            [{"text": MENU_DIRECTIONS, "callback_data": "menu:directions"}],
         ],
-        "resize_keyboard": True,
-        "one_time_keyboard": False,
     }
+
+
+def is_client_menu_text(text: str) -> bool:
+    return text in CLIENT_MENU_ACTIONS
+
+
+def resolve_menu_action(text: str) -> str | None:
+    return CLIENT_MENU_ACTIONS.get(text)
 
 
 def build_master_keyboard(master_username: str) -> dict:
@@ -163,6 +207,21 @@ def build_master_keyboard(master_username: str) -> dict:
     return {
         "inline_keyboard": [
             [{"text": "Связаться с мастером", "url": f"https://t.me/{username}"}]
+        ]
+    }
+
+
+def build_directions_keyboard() -> dict:
+    address = "Удмуртская, 10"
+    yandex_url = f"https://yandex.ru/maps/?text={requests.utils.quote(address)}"
+    google_url = (
+        "https://www.google.com/maps/search/?api=1&query="
+        f"{requests.utils.quote(address)}"
+    )
+    return {
+        "inline_keyboard": [
+            [{"text": "🗺 Открыть в Яндекс Картах", "url": yandex_url}],
+            [{"text": "🗺 Открыть в Google Maps", "url": google_url}],
         ]
     }
 
@@ -317,6 +376,19 @@ def parse_master_usernames() -> list[str]:
     logger = logging.getLogger("client_bot")
     usernames, _, _ = parse_master_usernames_with_meta(raw, logger)
     return usernames
+
+
+def get_master_recipients(storage: dict) -> list[str | int]:
+    usernames = parse_master_usernames()
+    admin_ids = sorted(get_admin_ids(storage))
+    combined: list[str | int] = []
+    seen: set[str | int] = set()
+    for item in usernames + admin_ids:
+        if item in seen:
+            continue
+        seen.add(item)
+        combined.append(item)
+    return combined
 
 
 def get_master_contact_username(logger: logging.Logger) -> tuple[str | None, bool, bool]:
@@ -751,6 +823,33 @@ def build_master_card(ticket: dict, timezone: str) -> str:
             f"⏱️ В ожидании: {wait_minutes} мин • {overdue_flag}",
             f"📎 Вложения: {ticket.get('attachments_count', 0)}",
             f"⚙️ Источник: client_bot • created_at:{created_display}",
+        ]
+    )
+
+
+def build_master_notification(ticket: dict) -> str:
+    scenario = ticket.get("scenario_type")
+    if scenario == "booking":
+        scenario_label = "Запись на сервис"
+    else:
+        scenario_label = format_scenario(scenario)
+    comment = (
+        ticket.get("problem_text")
+        or ticket.get("parts_text")
+        or ticket.get("last_visit_text")
+        or "—"
+    )
+    return "\n".join(
+        [
+            "📥 Новая заявка",
+            "",
+            f"Тип: {scenario_label}",
+            f"Имя клиента: {ticket.get('fio') or '—'}",
+            f"Телефон: {ticket.get('phone') or '—'}",
+            f"Дата: {ticket.get('booking_date') or '—'}",
+            f"Время: {ticket.get('booking_time') or '—'}",
+            f"Комментарий: {comment}",
+            "Источник: клиентский бот",
         ]
     )
 
@@ -1370,7 +1469,7 @@ def send_reminders_now(
     token: str,
     storage: dict,
     timezone: str,
-    master_usernames: list[str],
+    master_usernames: list[str | int],
     logger: logging.Logger,
 ) -> int:
     count = 0
@@ -1503,6 +1602,61 @@ def build_draft_card(session: dict, chat: dict) -> str:
     )
 
 
+def generate_directions_image(address: str) -> bytes:
+    width, height = 900, 500
+    image = Image.new("RGB", (width, height), color=(250, 250, 250))
+    draw = ImageDraw.Draw(image)
+    font = ImageFont.load_default()
+    title = "Схема проезда"
+    subtitle = f"Адрес: {address}"
+    draw.text((40, 40), title, fill=(20, 20, 20), font=font)
+    draw.text((40, 80), subtitle, fill=(50, 50, 50), font=font)
+    draw.rectangle([(60, 140), (840, 440)], outline=(160, 160, 160), width=3)
+    draw.line([(100, 380), (760, 200)], fill=(80, 130, 200), width=6)
+    draw.ellipse([(730, 180), (770, 220)], outline=(200, 80, 80), width=6)
+    draw.text((780, 185), "📍", fill=(200, 80, 80), font=font)
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def send_directions(
+    token: str,
+    chat_id: int,
+    storage: dict,
+    timezone: str,
+) -> None:
+    address = "Удмуртская, 10"
+    content = generate_directions_image(address)
+    file_path = store_outgoing_file(content, "directions.png")
+    caption = "Схема проезда"
+    if is_queue_enabled():
+        enqueue_document(
+            storage,
+            chat_id,
+            "directions",
+            file_path,
+            caption,
+            message_key=f"directions:{chat_id}",
+            timezone=timezone,
+        )
+        save_storage(storage)
+    else:
+        send_document(token, chat_id, file_path, caption=caption)
+        try:
+            os.remove(file_path)
+        except OSError:
+            logging.getLogger("client_bot").warning(
+                "failed to remove directions image path=%s", file_path
+            )
+    send_message(
+        token,
+        chat_id,
+        f"Адрес: {address}",
+        reply_markup=build_directions_keyboard(),
+    )
+
+
 def extract_attachment(message: dict) -> tuple[str, str, int | None] | None:
     if message.get("photo"):
         photo = message["photo"][-1]
@@ -1548,7 +1702,7 @@ def download_file(token: str, file_id: str) -> tuple[bytes, str] | None:
 
 def send_attachment_to_master(
     token: str,
-    master_username: str,
+    master_username: str | int,
     filename: str,
     content: bytes,
     caption: str,
@@ -1588,7 +1742,7 @@ def send_attachment_to_master(
 
 def notify_masters(
     token: str,
-    master_usernames: list[str],
+    master_usernames: list[str | int],
     text: str,
     logger: logging.Logger,
     storage: dict,
@@ -1628,7 +1782,7 @@ def notify_masters(
 
 def notify_ticket_update(
     token: str,
-    master_usernames: list[str],
+    master_usernames: list[str | int],
     ticket: dict,
     fields_changed: list[str],
     logger: logging.Logger,
@@ -1655,7 +1809,7 @@ def run_tg_send_test(
     chat_id: int,
     storage: dict,
     timezone: str,
-    master_usernames: list[str],
+    master_usernames: list[str | int],
     logger: logging.Logger,
 ) -> None:
     total = 0
@@ -1828,28 +1982,55 @@ def build_updates_from_text(text: str, ticket: dict, timezone: str) -> dict:
     return updates
 
 
-def parse_date_value(raw_text: str, timezone: str) -> tuple[date | None, str | None]:
+def parse_date_value(
+    raw_text: str,
+    timezone: str,
+    ai_service: AIService | None = None,
+) -> tuple[date | None, str | None]:
     text = raw_text.strip().lower()
-    if "сегодня" in text:
+    today = datetime.now(ZoneInfo(timezone)).date()
+    tokens = re.findall(r"[a-zа-яё]+", text, flags=re.IGNORECASE)
+    if "сегодня" in tokens:
         return None, "Запись день-в-день недоступна. Минимальная дата — завтра."
+    if "послезавтра" in tokens:
+        return today + timedelta(days=2), None
+    if "завтра" in tokens:
+        return today + timedelta(days=1), None
+    for token in tokens:
+        for weekday, aliases in WEEKDAY_ALIASES.items():
+            if token in aliases:
+                days_ahead = (weekday - today.weekday()) % 7
+                if days_ahead == 0:
+                    days_ahead = 7
+                return today + timedelta(days=days_ahead), None
     formats = ("%d.%m.%Y", "%d.%m.%y", "%d.%m")
     for fmt in formats:
         try:
             parsed = datetime.strptime(text, fmt).date()
             if fmt == "%d.%m":
-                parsed = parsed.replace(year=datetime.now(ZoneInfo(timezone)).year)
+                parsed = parsed.replace(year=today.year)
             return parsed, None
         except ValueError:
             continue
-    return None, "Не понял дату. Напишите в формате ДД.ММ.ГГГГ."
+    if ai_service and ai_service.is_enabled():
+        ai_date = ai_service.parse_date(raw_text, today.strftime("%Y-%m-%d"))
+        normalized = normalize_date_string(ai_date) if ai_date else None
+        if normalized:
+            try:
+                parsed = datetime.strptime(normalized, "%Y-%m-%d").date()
+            except ValueError:
+                parsed = None
+            if parsed:
+                return parsed, None
+    return None, "Не понял дату. Напишите дату (например, 12.03) или день недели (вт, среда)."
 
 
 def validate_booking_date(value: date, timezone: str) -> str | None:
     today = datetime.now(ZoneInfo(timezone)).date()
     if value <= today:
         return "Запись день-в-день недоступна. Минимальная дата — завтра."
-    if value.weekday() >= 5:
-        return "Мы работаем только по будням (Пн–Пт). Выберите другой день."
+    if today.weekday() >= 5 and value.weekday() == 0:
+        return "Понедельник недоступен. Выберите дату со вторника по пятницу."
     return None
 
 
@@ -1958,12 +2139,24 @@ def ask_current_step(token: str, chat_id: int, session: dict) -> None:
     elif stage == "booking_purpose":
         send_message(token, chat_id, UNIVERSAL_QUESTION)
     elif stage == "booking_date":
-        send_message(
-            token,
-            chat_id,
-            "Укажите желаемую дату и время визита.\n"
-            "График работы: Пн–Пт с 09:00 до 19:00.",
-        )
+        timezone = os.getenv("TIMEZONE", "Europe/Moscow")
+        today = datetime.now(ZoneInfo(timezone)).date()
+        if today.weekday() >= 5:
+            send_message(
+                token,
+                chat_id,
+                "Сейчас выходной день. Я приму заявку, мастер получит её в рабочее время "
+                "и свяжется с вами для подтверждения записи.\n"
+                "Укажите желаемую дату визита (доступны даты со вторника по пятницу; "
+                "понедельник — день обработки заявок).",
+            )
+        else:
+            send_message(
+                token,
+                chat_id,
+                "Укажите желаемую дату визита (минимум — завтра).\n"
+                "График работы: Пн–Пт с 09:00 до 19:00.",
+            )
     elif stage == "booking_time":
         send_message(
             token,
@@ -2267,7 +2460,7 @@ def handle_ai_message(
     logger: logging.Logger,
     ai_service: AIService,
     text: str,
-    master_usernames: list[str],
+    master_usernames: list[str | int],
 ) -> bool:
     ai_logger = logging.getLogger("ai")
     stage = session.get("stage")
@@ -2292,6 +2485,7 @@ def handle_ai_message(
         save_session(storage, chat_id, session)
         save_storage(storage)
         ai_logger.warning("ai_fallback activated for session (401)")
+        maybe_send_ai_fallback_notice(token, chat_id, session, storage, timezone, ai_service)
         return False
     ai_logger.info("ai_used=%s reason=%s", ai_result.used, ai_result.reason)
     if not ai_result.used:
@@ -2331,7 +2525,7 @@ def finalize_ticket(
     storage: dict,
     timezone: str,
     logger: logging.Logger,
-    master_usernames: list[str],
+    master_usernames: list[str | int],
     ai_service: AIService,
 ) -> None:
     ai_logger = logging.getLogger("ai")
@@ -2394,16 +2588,14 @@ def finalize_ticket(
         send_message(
             token,
             chat_id,
-            "Заявка принята.\n"
-            "Сейчас выходной день, мастер свяжется с вами\n"
-            "в рабочее время для подтверждения записи.",
+            "Сейчас выходной день. Я приму заявку, мастер получит её в рабочее время "
+            "и свяжется с вами для подтверждения записи.",
         )
     else:
         send_message(
             token,
             chat_id,
-            "Спасибо! Я передал вашу заявку мастеру.\n"
-            "Мастер свяжется с вами в рабочее время.",
+            "Я передал заявку мастеру. Он свяжется с вами для подтверждения записи.",
         )
     ticket["finalized_at"] = now_iso(timezone)
     ticket["last_master_notify_at"] = now_iso(timezone)
@@ -2411,7 +2603,7 @@ def finalize_ticket(
     notify_masters(
         token,
         master_usernames,
-        build_master_card(ticket, timezone),
+        build_master_notification(ticket),
         logger,
         storage,
         timezone,
@@ -2463,7 +2655,7 @@ def process_master_request(
     session: dict,
     storage: dict,
     timezone: str,
-    master_usernames: list[str],
+    master_usernames: list[str | int],
     logger: logging.Logger,
 ) -> None:
     if not session.get("created_at"):
@@ -2495,7 +2687,7 @@ def handle_attachment(
     session: dict,
     storage: dict,
     timezone: str,
-    master_usernames: list[str],
+    master_usernames: list[str | int],
     logger: logging.Logger,
 ) -> bool:
     attachment = extract_attachment(message)
@@ -2512,7 +2704,12 @@ def handle_attachment(
     data["attachments_count"] = data.get("attachments_count", 0) + 1
     save_session(storage, chat_id, session)
     save_storage(storage)
-    send_message(token, chat_id, "Пока не принимаем вложения. Опишите, пожалуйста, текстом.")
+    send_message(
+        token,
+        chat_id,
+        "Вложение получено, я передал его мастеру. "
+        "Продублируйте, пожалуйста, суть проблемы текстом.",
+    )
     download = download_file(token, file_id)
     if not download:
         logger.error("attachment download failed draft=%s file_id=%s", draft_id, file_id)
@@ -2538,6 +2735,119 @@ def handle_attachment(
         draft_id,
     )
     return True
+
+
+def build_freeform_notification(chat: dict, text: str) -> str:
+    first_name = chat.get("first_name") or ""
+    last_name = chat.get("last_name") or ""
+    name = " ".join(part for part in [first_name, last_name] if part).strip() or "—"
+    username = chat.get("username")
+    if username and name == "—":
+        name = f"@{username}"
+    return "\n".join(
+        [
+            "📥 Новая заявка",
+            "",
+            "Тип: Другое обращение",
+            f"Имя клиента: {name}",
+            "Телефон: —",
+            "Дата: —",
+            "Время: —",
+            f"Комментарий: {text.strip() or '—'}",
+            "Источник: клиентский бот",
+        ]
+    )
+
+
+def maybe_send_ai_fallback_notice(
+    token: str,
+    chat_id: int,
+    session: dict,
+    storage: dict,
+    timezone: str,
+    ai_service: AIService,
+) -> None:
+    if session.get("ai_fallback_notice"):
+        return
+    if ai_service.is_enabled() and not session.get("ai_fallback"):
+        return
+    send_message(token, chat_id, FALLBACK_AI_UNAVAILABLE)
+    session["ai_fallback_notice"] = True
+    update_session_ttl(session, timezone)
+    save_session(storage, chat_id, session)
+    save_storage(storage)
+
+
+def start_client_scenario(
+    token: str,
+    chat_id: int,
+    chat: dict,
+    session: dict,
+    storage: dict,
+    timezone: str,
+    ai_service: AIService,
+    scenario: str,
+) -> None:
+    session = {
+        "scenario": scenario,
+        "stage": "fio",
+        "created_at": now_iso(timezone),
+        "updated_at": now_iso(timezone),
+        "ttl_expires_at": ttl_iso(timezone, TTL_HOURS),
+        "data": {},
+    }
+    update_session_client_context(session, chat)
+    get_or_create_draft_id(session, chat_id, timezone)
+    save_session(storage, chat_id, session)
+    save_storage(storage)
+    maybe_send_ai_fallback_notice(token, chat_id, session, storage, timezone, ai_service)
+    send_message(token, chat_id, "Отлично! Начнём. Как вас зовут? Укажите имя и фамилию.")
+
+
+def handle_client_menu_action(
+    token: str,
+    chat_id: int,
+    chat: dict,
+    session: dict,
+    storage: dict,
+    timezone: str,
+    ai_service: AIService,
+    active_ticket: dict | None,
+    action: str,
+    logger: logging.Logger,
+) -> None:
+    if action == "directions":
+        send_directions(token, chat_id, storage, timezone)
+        return
+    if active_ticket and not session.get("stage"):
+        send_message(
+            token,
+            chat_id,
+            "У вас уже есть активная заявка. Напишите, что хотите дополнить, "
+            "я передам обновление мастеру.",
+        )
+        return
+    if session.get("stage"):
+        send_message(
+            token,
+            chat_id,
+            "Сейчас у вас активная заявка. Продолжим её. Если нужно начать заново — /cancel.",
+        )
+        ask_current_step(token, chat_id, session)
+        return
+    if action not in {"booking", "last_visit", "parts", "repair", "other"}:
+        return
+    start_client_scenario(
+        token,
+        chat_id,
+        chat,
+        session,
+        storage,
+        timezone,
+        ai_service,
+        action,
+    )
+    logger.info("client menu action started scenario=%s chat_id=%s", action, chat_id)
 
 
 def update_ticket_status(
@@ -2781,7 +3091,7 @@ def handle_clarification_response(
     text: str,
     storage: dict,
     timezone: str,
-    master_usernames: list[str],
+    master_usernames: list[str | int],
     logger: logging.Logger,
 ) -> bool:
     ticket = find_pending_clarification_ticket(storage, chat_id)
@@ -2860,13 +3170,65 @@ def handle_client_contact_callback(token: str, callback: dict, storage: dict) ->
     send_message(token, callback.get("from", {}).get("id"), message)
 
 
+def handle_client_menu_callback(
+    token: str,
+    callback: dict,
+    storage: dict,
+    timezone: str,
+    logger: logging.Logger,
+) -> bool:
+    data = callback.get("data") or ""
+    if not data.startswith("menu:"):
+        return False
+    chat_id = callback.get("from", {}).get("id")
+    callback_id = callback.get("id")
+    if callback_id:
+        answer_callback_query(token, callback_id)
+    if not chat_id:
+        return True
+    action_key = data.split(":", 1)[1]
+    action_map = {
+        "booking": "booking",
+        "warranty": "last_visit",
+        "last_visit": "last_visit",
+        "parts": "parts",
+        "repair": "repair",
+        "other": "other",
+        "directions": "directions",
+    }
+    action = action_map.get(action_key)
+    if not action:
+        return True
+    session = ensure_session(storage, chat_id, timezone)
+    active_ticket = find_active_ticket(storage, chat_id, timezone)
+    if active_ticket:
+        if session.get("active_ticket_id") != active_ticket.get("ticket_id"):
+            session["active_ticket_id"] = active_ticket.get("ticket_id")
+            save_session(storage, chat_id, session)
+            save_storage(storage)
+    ai_service = AIService(logging.getLogger("ai"), settings=get_settings(storage))
+    handle_client_menu_action(
+        token,
+        chat_id,
+        callback.get("from", {}),
+        session,
+        storage,
+        timezone,
+        ai_service,
+        active_ticket,
+        action,
+        logger,
+    )
+    return True
+
+
 def handle_admin_callback(
     token: str,
     callback: dict,
     storage: dict,
     timezone: str,
     logger: logging.Logger,
-    master_usernames: list[str],
+    master_usernames: list[str | int],
 ) -> bool:
     data = callback.get("data") or ""
     if not data.startswith("admin:"):
@@ -3272,7 +3634,9 @@ def process_callback(
             answer_callback_query(token, callback_id)
         return True
     data = callback.get("data") or ""
-    master_usernames = parse_master_usernames()
+    if handle_client_menu_callback(token, callback, storage, timezone, logger):
+        return True
+    master_usernames = get_master_recipients(storage)
     if handle_admin_callback(token, callback, storage, timezone, logger, master_usernames):
         return True
     if data.startswith("ticket:"):
@@ -3295,7 +3659,7 @@ def check_reminders(
     token: str,
     storage: dict,
     timezone: str,
-    master_usernames: list[str],
+    master_usernames: list[str | int],
     logger: logging.Logger,
 ) -> None:
     settings = get_settings(storage)
@@ -3373,9 +3737,11 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
     storage = load_storage()
     ensure_storage_defaults(storage)
     session = ensure_session(storage, chat_id, timezone)
-    master_usernames = parse_master_usernames()
+    master_usernames = get_master_recipients(storage)
     settings = get_settings(storage)
     ai_service = AIService(logging.getLogger("ai"), settings=settings)
+    if session.get("stage"):
+        maybe_send_ai_fallback_notice(token, chat_id, session, storage, timezone, ai_service)
     active_ticket: dict | None = None
     if chat_id and not should_skip_ticket_reuse(text):
         active_ticket = find_active_ticket(storage, chat_id, timezone)
@@ -3403,21 +3769,6 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
         return
 
     update_session_client_context(session, chat)
-
-    if active_ticket and not session.get("stage") and text in {
-        MENU_BOOKING,
-        MENU_LAST_VISIT,
-        MENU_PARTS,
-        MENU_REPAIR,
-        MENU_OTHER,
-    }:
-        send_message(
-            token,
-            chat_id,
-            "У вас уже есть активная заявка. Напишите, что хотите дополнить, "
-            "я передам обновление мастеру.",
-        )
-        return
 
     if text.startswith("/whoami"):
         username = chat.get("username")
@@ -3483,7 +3834,7 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
         return
 
     if not message.get("text") and message.get("message_id"):
-        send_message(token, chat_id, "Пока не принимаем вложения. Опишите, пожалуйста, текстом.")
+        send_message(token, chat_id, "Продублируйте, пожалуйста, суть проблемы текстом.")
         return
 
     if text.startswith("/master"):
@@ -3569,6 +3920,23 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
         ):
             return
 
+    if text and not text.startswith("/") and is_client_menu_text(text):
+        action = resolve_menu_action(text)
+        if action:
+            handle_client_menu_action(
+                token,
+                chat_id,
+                chat,
+                session,
+                storage,
+                timezone,
+                ai_service,
+                active_ticket,
+                action,
+                logger,
+            )
+            return
+
     if text == MENU_MASTER:
         process_master_request(
             token,
@@ -3606,49 +3974,35 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
             )
         return
 
-    if session.get("stage") and text in {
-        MENU_BOOKING,
-        MENU_LAST_VISIT,
-        MENU_PARTS,
-        MENU_REPAIR,
-        MENU_OTHER,
-    }:
-        send_message(
-            token,
-            chat_id,
-            "Сейчас у вас активная заявка. Продолжим её. Если нужно начать заново — /cancel.",
-        )
-        ask_current_step(token, chat_id, session)
-        return
-
     if not session.get("stage"):
-        if text in {
-            MENU_BOOKING,
-            MENU_LAST_VISIT,
-            MENU_PARTS,
-            MENU_REPAIR,
-            MENU_OTHER,
-        }:
-            scenario_map = {
-                MENU_BOOKING: "booking",
-                MENU_LAST_VISIT: "last_visit",
-                MENU_PARTS: "parts",
-                MENU_REPAIR: "repair",
-                MENU_OTHER: "other",
-            }
-            session = {
-                "scenario": scenario_map[text],
-                "stage": "fio",
-                "created_at": now_iso(timezone),
-                "updated_at": now_iso(timezone),
-                "ttl_expires_at": ttl_iso(timezone, TTL_HOURS),
-                "data": {},
-            }
-            update_session_client_context(session, chat)
-            get_or_create_draft_id(session, chat_id, timezone)
-            save_session(storage, chat_id, session)
-            save_storage(storage)
-            send_message(token, chat_id, "Отлично! Начнём. Как вас зовут? Укажите имя и фамилию.")
+        if text and not text.startswith("/") and is_client_menu_text(text):
+            action = resolve_menu_action(text)
+            if action:
+                handle_client_menu_action(
+                    token,
+                    chat_id,
+                    chat,
+                    session,
+                    storage,
+                    timezone,
+                    ai_service,
+                    active_ticket,
+                    action,
+                    logger,
+                )
+                return
+        if text and not text.startswith("/"):
+            notify_masters(
+                token,
+                master_usernames,
+                build_freeform_notification(chat, text),
+                logger,
+                storage,
+                timezone,
+                "freeform",
+                message_key=f"freeform:{chat_id}:{now_iso(timezone)}",
+            )
+            send_message(token, chat_id, FALLBACK_OUT_OF_SCOPE)
             return
         send_message(
             token,
@@ -3808,7 +4162,7 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
         return
 
     if stage == "booking_date":
-        parsed, error = parse_date_value(text, timezone)
+        parsed, error = parse_date_value(text, timezone, ai_service)
         if error:
             send_message(token, chat_id, error)
             return
@@ -3953,7 +4307,7 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
         )
         return
 
-    send_message(token, chat_id, "Пожалуйста, следуйте подсказкам.")
+    send_message(token, chat_id, FALLBACK_NOT_UNDERSTOOD)
 
 
 def determine_next_stage_after_car(session: dict) -> str:
@@ -3984,7 +4338,6 @@ def poll_updates(token: str, logger: logging.Logger) -> None:
     offset = 0
     url = f"https://api.telegram.org/bot{token}/getUpdates"
     timezone = os.getenv("TIMEZONE", "Europe/Moscow")
-    master_usernames = parse_master_usernames()
     last_reminder_check = 0.0
 
     polling_logger.info("polling started (version=%s)", VERSION)
@@ -4016,7 +4369,13 @@ def poll_updates(token: str, logger: logging.Logger) -> None:
                 handle_update(token, update, logger)
             if time.time() - last_reminder_check >= 60:
                 storage = load_storage()
-                check_reminders(token, storage, timezone, master_usernames, logger)
+                check_reminders(
+                    token,
+                    storage,
+                    timezone,
+                    get_master_recipients(storage),
+                    logger,
+                )
                 last_reminder_check = time.time()
         except Exception as exc:  # noqa: BLE001 - keep polling on errors
             polling_logger.exception("polling error: %s", exc)

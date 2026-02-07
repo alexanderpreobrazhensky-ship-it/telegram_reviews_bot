@@ -262,6 +262,39 @@ class AIService:
             self.logger.exception("ai_error_tldr: %s", exc)
             return AIResult(reply="", fields={}, used=False, reason="ai_error")
 
+    def parse_date(self, user_text: str, today: str) -> str | None:
+        if self.force_fallback:
+            return None
+        if not self.is_enabled():
+            return None
+        system = (
+            "Ты помощник сервисного бота. Твоя задача — преобразовать текст пользователя в дату "
+            "записи. Сегодняшняя дата передана отдельно. Ответ строго JSON: "
+            '{"date":"YYYY-MM-DD"} или {"date":null} если не удалось понять. '
+            "Не добавляй пояснений."
+        )
+        user_payload = {"today": today, "user_text": user_text}
+        try:
+            content = self._chat(
+                [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
+                ]
+            )
+            parsed = self._parse_json(content)
+            if not parsed or "date" not in parsed:
+                return None
+            value = parsed.get("date")
+            if value in (None, "", "null"):
+                return None
+            return str(value).strip()
+        except Exception as exc:  # noqa: BLE001
+            if self._is_unauthorized(exc):
+                self.logger.warning("ai_unauthorized_date: %s", exc)
+                return None
+            self.logger.exception("ai_error_date: %s", exc)
+            return None
+
 
 def normalize_date_string(value: str) -> str | None:
     cleaned = value.strip()
