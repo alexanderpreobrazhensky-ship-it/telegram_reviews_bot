@@ -11,6 +11,47 @@ from services.telegram_api import TgRequestResult, get_retry_base_sleep_seconds,
 from storage import now_iso, save_storage
 
 OUTGOING_FILES_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "outgoing_files")
+UNREACHABLE_NOTICE_TTL_MINUTES = 30
+
+
+def _mark_unreachable_user(storage: dict, chat_id: str, timezone: str, reason: str) -> None:
+    if not str(chat_id).lstrip("-").isdigit():
+        return
+    if str(chat_id).startswith("-"):
+        return
+    unreachable = storage.setdefault("unreachable_users", {})
+    entry = unreachable.setdefault(str(chat_id), {})
+    entry["marked_at"] = now_iso(timezone)
+    entry["reason"] = reason
+    entry.setdefault("notified", False)
+
+
+def _maybe_notify_admins_unreachable(storage: dict, timezone: str, chat_id: str) -> None:
+    unreachable = storage.get("unreachable_users", {})
+    entry = unreachable.get(str(chat_id))
+    if not entry or entry.get("notified"):
+        return
+    settings = storage.setdefault("settings", {})
+    last_notice = settings.get("unreachable_notice_at")
+    if last_notice:
+        try:
+            last_dt = datetime.fromisoformat(last_notice).astimezone(ZoneInfo(timezone))
+        except ValueError:
+            last_dt = None
+        if last_dt and datetime.now(ZoneInfo(timezone)) - last_dt < timedelta(minutes=UNREACHABLE_NOTICE_TTL_MINUTES):
+            return
+    admin_ids = [int(value) for value in storage.get("admins", []) if str(value).isdigit()]
+    if not admin_ids:
+        return
+    text = (
+        "⚠️ Не удалось отправить сообщение пользователю. "
+        "Похоже, он не писал боту первым."
+    )
+    for admin_id in admin_ids:
+        tg_request("sendMessage", {"chat_id": admin_id, "text": text})
+    entry["notified"] = True
+    settings["unreachable_notice_at"] = now_iso(timezone)
+    save_storage(storage)
 
 
 def is_queue_enabled() -> bool:
@@ -210,6 +251,9 @@ def process_outgoing_queue(
         else:
             error_message = result.error or "unknown_error"
             message["last_error"] = error_message
+            if result.status_code == 403:
+                _mark_unreachable_user(storage, target_chat_id, timezone, error_message)
+                _maybe_notify_admins_unreachable(storage, timezone, target_chat_id)
             if result.retryable and attempts < retry_max:
                 message["status"] = "pending"
                 retry_after = result.retry_after_seconds
