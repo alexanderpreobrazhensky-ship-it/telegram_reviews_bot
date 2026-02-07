@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode, urlparse, urlunparse, quote
 
 import requests
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_from_directory
 
 from review_fetch import detect_platform, fetch_url, parse_2gis_review, parse_yandex_review
 
@@ -260,6 +260,44 @@ UI_VERSION = "2025-03-05"
 # -----------------------------
 app = Flask(__name__)
 
+WEBAPP_DIR = os.path.join(os.path.dirname(__file__), "bots", "client_bot", "webapp")
+
+def _webapp_address() -> str:
+    return (os.getenv("LIRA_ADDRESS") or "Удмуртская 10").strip() or "Удмуртская 10"
+
+def _webapp_phone() -> str:
+    return (os.getenv("LIRA_PHONE") or "").strip()
+
+def _webapp_map_urls(address: str) -> Tuple[Optional[str], str, str]:
+    map_url = (os.getenv("LIRA_MAP_URL") or "").strip() or None
+    encoded = requests.utils.quote(address)
+    yandex_url = f"https://yandex.ru/maps/?text={encoded}"
+    google_url = f"https://www.google.com/maps/search/?api=1&query={encoded}"
+    return map_url, yandex_url, google_url
+
+@app.get("/webapp")
+@app.get("/webapp/")
+def webapp_index() -> object:
+    return send_from_directory(WEBAPP_DIR, "index.html")
+
+@app.get("/webapp/config.json")
+def webapp_config() -> object:
+    address = _webapp_address()
+    map_url, yandex_url, google_url = _webapp_map_urls(address)
+    return jsonify(
+        {
+            "address": address,
+            "phone": _webapp_phone(),
+            "mapUrl": map_url or "",
+            "yandexUrl": yandex_url,
+            "googleUrl": google_url,
+        }
+    )
+
+@app.get("/webapp/<path:filename>")
+def webapp_static(filename: str) -> object:
+    return send_from_directory(WEBAPP_DIR, filename)
+
 # -----------------------------
 # Redaction
 # -----------------------------
@@ -452,22 +490,8 @@ def send_safe_formatted_message(
     )
 
 def send_message(chat_id: int, text: str, reply_markup: Optional[dict] = None, parse_mode: Optional[str] = None) -> None:
-    payload = {"chat_id": chat_id, "text": text}
-    if parse_mode:
-        payload["parse_mode"] = parse_mode
-    if reply_markup:
-        payload["reply_markup"] = reply_markup
-    response = _send_message_request(payload)
-    if response is None:
-        return
-    if response.status_code != 200:
-        logger.error(
-            "sendMessage failed status=%s chat_id=%s text=%s body=%s",
-            response.status_code,
-            chat_id,
-            _redact(text[:200]),
-            _redact(response.text[:900]),
-        )
+    preferred_parse_mode = parse_mode or "HTML"
+    safe_send_message(chat_id, text, reply_markup=reply_markup, preferred_parse_mode=preferred_parse_mode)
 
 def send_photo(
     chat_id: int,
@@ -758,23 +782,30 @@ def _deep_link_url(payload: str) -> str:
 
 def _channel_pin_text() -> str:
     return (
-        "<b>Автоцентр ЛИРА</b>\n\n"
-        "Сервис и вопросы по автомобилю — онлайн.\n\n"
-        "Здесь можно оставить заявку,\n"
-        "уточнить стоимость или задать вопрос мастеру.\n\n"
-        "Мы всё соберём и свяжемся с вами\n"
-        "в рабочее время.\n\n"
-        "Выберите нужный раздел:"
+        "<b>Автоцентр «Лира» — сервис Volvo</b>\n\n"
+        "Мы принимаем заявки онлайн, без спешки и лишних звонков.\n"
+        "Бот помогает корректно зафиксировать запрос, чтобы мастер сразу понял задачу.\n\n"
+        "<i>Работаем по регламентам производителя.</i>\n\n"
+        "<b>Через этот чат вы можете:</b>\n"
+        "• Записаться на сервис\n"
+        "• Рассчитать работы или запчасти\n"
+        "• Задать вопрос по автомобилю\n\n"
+        "<b>Адрес:</b> Удмуртская, 10\n"
+        "<b>Формат работы:</b> по предварительной записи\n\n"
+        "Выберите нужное действие ниже ⬇️"
     )
 
 def _channel_pin_keyboard() -> dict:
     return {
         "inline_keyboard": [
-            [{"text": "🛠 Запись на сервис", "url": _deep_link_url("service_booking")}],
-            [{"text": "🧩 Запчасти / стоимость", "url": _deep_link_url("parts_request")}],
-            [{"text": "💬 Вопрос мастеру", "url": _deep_link_url("ask_master")}],
-            [{"text": "📍 Как нас найти", "url": _deep_link_url("how_to_find")}],
-            [{"text": "⭐️ Оставить отзыв", "url": _deep_link_url("leave_review")}],
+            [
+                {"text": "🛠 Записаться на сервис", "url": _deep_link_url("booking")},
+                {"text": "📦 Запчасти и работы", "url": _deep_link_url("parts")},
+            ],
+            [
+                {"text": "💬 Задать вопрос", "url": _deep_link_url("question")},
+                {"text": "📍 Как доехать", "callback_data": "menu:route"},
+            ],
         ]
     }
 
@@ -782,6 +813,10 @@ def _channel_pin_payload() -> Tuple[str, dict]:
     text = _channel_pin_text()
     reply_markup = _channel_pin_keyboard()
     return text, reply_markup
+
+def _channel_pin_hash(text: str, reply_markup: dict) -> str:
+    payload = json.dumps({"text": text, "reply_markup": reply_markup}, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 def _log_channel_pin_error(status: int, body: str) -> None:
     if status in (400, 403):
@@ -840,6 +875,18 @@ def ensure_channel_pin() -> None:
     text, reply_markup = _channel_pin_payload()
     state = _load_channel_pin_state()
     pinned_id = state.get("pinned_message_id")
+    new_hash = _channel_pin_hash(text, reply_markup)
+    last_hash = state.get("content_hash")
+    updated_at = state.get("updated_at")
+    if pinned_id and last_hash == new_hash and updated_at:
+        try:
+            updated_dt = datetime.fromisoformat(updated_at).astimezone(timezone.utc)
+        except ValueError:
+            updated_dt = None
+        if updated_dt and datetime.now(timezone.utc) - updated_dt < timedelta(days=1):
+            pin_message(channel_id, int(pinned_id), silent=True)
+            logger.info("ensure_channel_pin skip: unchanged and updated recently message_id=%s", pinned_id)
+            return
     logger.info("ensure_channel_pin channel_id=%s pinned_message_id=%s", channel_id, pinned_id)
     if pinned_id:
         if _edit_channel_pin_message(channel_id, int(pinned_id), text, reply_markup):
@@ -847,6 +894,7 @@ def ensure_channel_pin() -> None:
             _save_channel_pin_state({
                 "pinned_message_id": int(pinned_id),
                 "chat_id": channel_id,
+                "content_hash": new_hash,
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             })
             logger.info("ensure_channel_pin action=edit result=ok message_id=%s", pinned_id)
@@ -860,6 +908,7 @@ def ensure_channel_pin() -> None:
     _save_channel_pin_state({
         "pinned_message_id": message_id,
         "chat_id": channel_id,
+        "content_hash": new_hash,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     })
     logger.info("ensure_channel_pin action=send result=ok message_id=%s", message_id)

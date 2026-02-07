@@ -1,3 +1,4 @@
+import html
 import json
 import logging
 import os
@@ -151,17 +152,27 @@ def tg_request(
     return TgRequestResult(False, True, None, "unknown_error", retry_after_seconds)
 
 
+def _escape_html_text(text: str, allow_html: bool) -> str:
+    if allow_html:
+        return text
+    return html.escape(text)
+
+
 def send_message(
     chat_id: int | str,
     text: str,
     reply_markup: dict | None = None,
     disable_web_page_preview: bool = True,
+    parse_mode: str | None = "HTML",
+    allow_html: bool = False,
 ) -> bool:
     payload: dict[str, Any] = {
         "chat_id": chat_id,
-        "text": text,
+        "text": _escape_html_text(text, allow_html),
         "disable_web_page_preview": disable_web_page_preview,
     }
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
     if reply_markup:
         payload["reply_markup"] = reply_markup
     result = tg_request("sendMessage", payload)
@@ -172,6 +183,8 @@ def send_document(
     chat_id: int | str,
     file_path: str,
     caption: str | None = None,
+    parse_mode: str | None = "HTML",
+    allow_html: bool = False,
 ) -> bool:
     logger = logging.getLogger("client_bot")
     if not os.path.exists(file_path):
@@ -179,7 +192,9 @@ def send_document(
         return False
     data: dict[str, Any] = {"chat_id": chat_id}
     if caption:
-        data["caption"] = caption
+        data["caption"] = _escape_html_text(caption, allow_html)
+        if parse_mode:
+            data["parse_mode"] = parse_mode
     try:
         with open(file_path, "rb") as file_handle:
             result = tg_request("sendDocument", None, files={"document": file_handle}, data=data)
@@ -193,10 +208,14 @@ def send_photo(
     chat_id: int | str,
     photo: str,
     caption: str | None = None,
+    parse_mode: str | None = "HTML",
+    allow_html: bool = False,
 ) -> TgRequestResult:
     data: dict[str, Any] = {"chat_id": chat_id}
     if caption:
-        data["caption"] = caption
+        data["caption"] = _escape_html_text(caption, allow_html)
+        if parse_mode:
+            data["parse_mode"] = parse_mode
     if os.path.exists(photo):
         try:
             with open(photo, "rb") as file_handle:
@@ -207,7 +226,9 @@ def send_photo(
             return TgRequestResult(False, False, None, str(exc))
     payload: dict[str, Any] = {"chat_id": chat_id, "photo": photo}
     if caption:
-        payload["caption"] = caption
+        payload["caption"] = _escape_html_text(caption, allow_html)
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
     return tg_request("sendPhoto", payload)
 
 
@@ -215,8 +236,16 @@ def edit_message_text(
     chat_id: int | str,
     message_id: int,
     text: str,
+    parse_mode: str | None = "HTML",
+    allow_html: bool = False,
 ) -> TgRequestResult:
-    payload: dict[str, Any] = {"chat_id": chat_id, "message_id": message_id, "text": text}
+    payload: dict[str, Any] = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "text": _escape_html_text(text, allow_html),
+    }
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
     return tg_request("editMessageText", payload)
 
 
@@ -224,8 +253,16 @@ def edit_message_caption(
     chat_id: int | str,
     message_id: int,
     caption: str,
+    parse_mode: str | None = "HTML",
+    allow_html: bool = False,
 ) -> TgRequestResult:
-    payload: dict[str, Any] = {"chat_id": chat_id, "message_id": message_id, "caption": caption}
+    payload: dict[str, Any] = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "caption": _escape_html_text(caption, allow_html),
+    }
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
     return tg_request("editMessageCaption", payload)
 
 
@@ -234,10 +271,14 @@ def edit_message_media(
     message_id: int,
     photo_file_id: str,
     caption: str | None = None,
+    parse_mode: str | None = "HTML",
+    allow_html: bool = False,
 ) -> TgRequestResult:
     media: dict[str, Any] = {"type": "photo", "media": photo_file_id}
     if caption:
-        media["caption"] = caption
+        media["caption"] = _escape_html_text(caption, allow_html)
+        if parse_mode:
+            media["parse_mode"] = parse_mode
     payload: dict[str, Any] = {"chat_id": chat_id, "message_id": message_id, "media": media}
     return tg_request("editMessageMedia", payload)
 

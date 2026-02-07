@@ -1,4 +1,5 @@
 import csv
+import html
 import json
 import importlib.util
 import io
@@ -308,13 +309,8 @@ def resolve_menu_action(text: str) -> str | None:
     return CLIENT_MENU_ACTIONS.get(text)
 
 
-def build_master_keyboard(master_username: str) -> dict:
-    username = master_username.lstrip("@")
-    return {
-        "inline_keyboard": [
-            [{"text": "Связаться с мастером", "url": f"https://t.me/{username}"}]
-        ]
-    }
+def build_master_keyboard(master_username: str) -> dict | None:
+    return None
 
 
 def build_directions_keyboard() -> dict:
@@ -431,7 +427,7 @@ def send_safe_message(
     chat_id: int,
     text: str,
     reply_markup: dict | None = None,
-    mode: str = "Markdown",
+    mode: str = "HTML",
 ) -> bool:
     sanitized_markup = sanitize_reply_markup(reply_markup)
     parse_mode = "HTML" if mode.upper() == "HTML" else None
@@ -440,6 +436,7 @@ def send_safe_message(
         text,
         reply_markup=sanitized_markup,
         parse_mode=parse_mode,
+        allow_html=mode.upper() == "HTML",
     )
     if result.ok:
         return True
@@ -453,16 +450,21 @@ def send_safe_message(
     return False
 
 
+def _escape_html_text(text: str, allow_html: bool) -> str:
+    return text if allow_html else html.escape(text)
+
+
 def send_message_with_result(
     chat_id: int | str,
     text: str,
     reply_markup: dict | None = None,
     disable_web_page_preview: bool = True,
-    parse_mode: str | None = None,
+    parse_mode: str | None = "HTML",
+    allow_html: bool = False,
 ) -> TgRequestResult:
     payload: dict = {
         "chat_id": chat_id,
-        "text": text,
+        "text": _escape_html_text(text, allow_html),
         "disable_web_page_preview": disable_web_page_preview,
     }
     if parse_mode:
@@ -1089,11 +1091,7 @@ def build_master_status_keyboard(ticket: dict) -> dict:
         ]
     ]
     row: list[dict] = []
-    username = ticket.get("client_username")
-    if username:
-        row.append({"text": "💬 Написать клиенту", "url": f"https://t.me/{username.lstrip('@')}"})
-    else:
-        row.append({"text": "💬 Написать клиенту", "callback_data": f"client:{ticket_id}"})
+    row.append({"text": "💬 Написать клиенту", "callback_data": f"client:{ticket_id}"})
     row.append({"text": "✍️ Запросить уточнение", "callback_data": f"ticket:{ticket_id}:ask_more"})
     keyboard.append(row)
     return {"inline_keyboard": keyboard}
@@ -1181,6 +1179,7 @@ def build_master_card(ticket: dict, timezone: str) -> str:
             f"☎️ {ticket.get('phone') or '—'}",
             f"💬 {username_display} • id:{tg_id}",
             f"🚗 {ticket.get('car_make_model') or 'не указано'} • {ticket.get('car_plate') or '—'}",
+            f"Пробег: {ticket.get('car_mileage') or '—'}",
             f"VIN: {ticket.get('vin') or '—'}",
             f"🧩 Тип: {format_scenario(ticket.get('scenario_type'))}",
             f"🔎 Категория: {issue_category} • ключевые: {keywords_text or '—'}",
@@ -1205,6 +1204,7 @@ def build_master_notification(ticket: dict) -> str:
         or ticket.get("last_visit_text")
         or "—"
     )
+    car_mileage = ticket.get("car_mileage") or "—"
     issue_category = ticket.get("issue_category") or "—"
     return "\n".join(
         [
@@ -1216,6 +1216,7 @@ def build_master_notification(ticket: dict) -> str:
             f"Телефон: {ticket.get('phone') or '—'}",
             f"Дата: {ticket.get('booking_date') or '—'}",
             f"Время: {ticket.get('booking_time') or '—'}",
+            f"Пробег: {car_mileage}",
             f"Комментарий: {comment}",
             "Источник: клиентский бот",
         ]
@@ -1226,7 +1227,7 @@ def summarize_ticket_changes(fields_changed: list[str]) -> list[str]:
     summary: list[str] = []
     if "phone" in fields_changed:
         summary.append("телефон")
-    if any(field in fields_changed for field in ("car_plate", "car_make_model", "vin")):
+    if any(field in fields_changed for field in ("car_plate", "car_make_model", "vin", "car_mileage")):
         summary.append("авто")
     if any(field in fields_changed for field in ("problem_text", "parts_text", "last_visit_text")):
         summary.append("описание")
@@ -1288,15 +1289,15 @@ def build_admin_main_keyboard() -> dict:
     return {
         "inline_keyboard": [
             [
-                {"text": "📊 Статистика", "callback_data": "admin:stats"},
-                {"text": "📋 Заявки", "callback_data": "admin:tickets"},
+                {"text": "🧾 Очередь заявок", "callback_data": "admin:queue"},
+                {"text": "📊 Статистика кнопок", "callback_data": "admin:stats"},
             ],
             [
-                {"text": "📝 Посты", "callback_data": "admin:posts"},
+                {"text": "🛠 Самодиагностика", "callback_data": "admin:diag"},
+                {"text": "📢 Управление постами", "callback_data": "admin:posts"},
+            ],
+            [
                 {"text": "⚙️ Настройки", "callback_data": "admin:settings"},
-            ],
-            [
-                {"text": "ℹ️ Помощь", "callback_data": "admin:help"},
                 {"text": "❌ Закрыть", "callback_data": "admin:close"},
             ],
         ]
@@ -2053,8 +2054,7 @@ def send_master_contact(token: str, chat_id: int, master_username: str) -> None:
     send_message(
         token,
         chat_id,
-        f"Мастер: {master_username}. Нажмите кнопку, чтобы написать мастеру.",
-        reply_markup=build_master_keyboard(master_username),
+        "Мастер свяжется с вами в рабочее время.",
     )
 
 
@@ -2124,6 +2124,8 @@ def build_draft_card(session: dict, chat: dict) -> str:
         collected.append(f"Госномер: {data['car_plate']}")
     if data.get("car_make_model"):
         collected.append(f"Марка/модель: {data['car_make_model']}")
+    if data.get("car_mileage"):
+        collected.append(f"Пробег: {data['car_mileage']}")
     if data.get("vin"):
         collected.append(f"VIN: {data['vin']}")
     if data.get("problem_text"):
@@ -2242,14 +2244,7 @@ def run_webapp_server(port: int, logger: logging.Logger) -> None:
 
 
 def start_webapp_server(logger: logging.Logger) -> None:
-    raw_port = os.getenv("CLIENT_WEBAPP_PORT") or os.getenv("PORT")
-    port = int(raw_port) if raw_port and raw_port.isdigit() else 8001
-    thread = threading.Thread(
-        target=run_webapp_server,
-        args=(port, logger),
-        daemon=True,
-    )
-    thread.start()
+    logger.info("webapp server disabled: use main service port for WebApp")
 
 
 def handle_webapp_data(
@@ -2878,6 +2873,11 @@ def is_plate_skip_request(text: str) -> bool:
     return lowered in {"без номера", "без госномера", "не знаю", "не хочу", "не писать", "нет номера"}
 
 
+def is_mileage_skip_request(text: str) -> bool:
+    lowered = text.strip().lower()
+    return lowered in {"нет", "не знаю", "без пробега", "не помню", "пропустить"}
+
+
 def find_known_car(storage: dict, car_plate: str) -> dict | None:
     cleaned = normalize_text(car_plate).lower()
     if not cleaned:
@@ -2887,6 +2887,7 @@ def find_known_car(storage: dict, car_plate: str) -> dict | None:
         if plate and plate == cleaned:
             return {
                 "car_make_model": ticket.get("car_make_model"),
+                "car_mileage": ticket.get("car_mileage"),
                 "vin": ticket.get("vin"),
             }
     return None
@@ -2906,8 +2907,6 @@ def maybe_start_clarification(
     timezone: str,
     ai_service: AIService,
 ) -> bool:
-    if should_use_ai(storage, timezone, ai_service) and not session.get("ai_fallback"):
-        return False
     if session.get("clarify_questions"):
         return False
     analysis = build_clarification_questions(text)
@@ -3015,6 +3014,7 @@ def build_updates_from_session(session: dict) -> dict:
         "was_here_before": data.get("was_here_before"),
         "car_plate": data.get("car_plate"),
         "car_make_model": data.get("car_make_model"),
+        "car_mileage": data.get("car_mileage"),
         "vin": data.get("vin"),
         "problem_text": data.get("problem_text"),
         "parts_text": data.get("parts_text"),
@@ -3196,6 +3196,8 @@ def build_summary(ticket: dict) -> str:
         car_info.append(f"Госномер: {ticket['car_plate']}")
     if ticket.get("car_make_model"):
         car_info.append(f"Марка/модель: {ticket['car_make_model']}")
+    if ticket.get("car_mileage"):
+        car_info.append(f"Пробег: {ticket['car_mileage']}")
     if ticket.get("vin"):
         car_info.append(f"VIN: {ticket['vin']}")
     if car_info:
@@ -3266,6 +3268,8 @@ def ask_current_step(token: str, chat_id: int, session: dict) -> None:
         send_message(token, chat_id, "Укажите VIN автомобиля.")
     elif stage == "car_make_required":
         send_message(token, chat_id, "Подскажите, пожалуйста, марку и модель автомобиля")
+    elif stage == "car_mileage":
+        send_message(token, chat_id, "Укажите пробег (если есть). Можно написать «не знаю».")
     elif stage == "clarify_problem":
         questions = session.get("clarify_questions", [])
         if not questions:
@@ -3282,8 +3286,9 @@ def ask_current_step(token: str, chat_id: int, session: dict) -> None:
         base_text = "Укажите желаемую дату визита."
         if today.weekday() >= 5:
             base_text = (
-                "Заявка принята. Сейчас выходной день, мастер получит информацию в рабочее время "
-                "и свяжется с вами для подтверждения записи.\n"
+                "Заявка принята.\n"
+                "Мастер получит её в рабочее время и свяжется для подтверждения.\n"
+                "Это не является подтверждённой записью.\n"
                 "Укажите желаемую дату визита."
             )
         send_message(
@@ -3384,6 +3389,8 @@ def compute_next_stage(session: dict) -> str:
         return "car_make_required"
     if data.get("car_plate") and not data.get("car_known") and not data.get("car_make_model"):
         return "car_make_required"
+    if not data.get("car_known") and not data.get("car_mileage") and not data.get("car_mileage_skipped"):
+        return "car_mileage"
     if "pdn_consent" not in data:
         return "pdn"
     if not data.get("was_here_before"):
@@ -3600,6 +3607,8 @@ def handle_ai_message(
     master_usernames: list[str | int],
 ) -> bool:
     ai_logger = logging.getLogger("ai")
+    ai_logger.info("ai_used=%s reason=%s", False, "dialog_ai_disabled")
+    return False
     stage = session.get("stage")
     if not stage:
         return False
@@ -3756,8 +3765,9 @@ def finalize_ticket(
         send_message(
             token,
             chat_id,
-            "Заявка принята. Сейчас выходной день, мастер получит информацию в рабочее время "
-            "и свяжется с вами для подтверждения записи.",
+            "Заявка принята.\n"
+            "Мастер получит её в рабочее время и свяжется для подтверждения.\n"
+            "Это не является подтверждённой записью.",
         )
     else:
         send_message(
@@ -3941,7 +3951,7 @@ def maybe_send_ai_fallback_notice(
         return
     if should_use_ai(storage, timezone, ai_service) and not session.get("ai_fallback"):
         return
-    send_message(token, chat_id, FALLBACK_AI_UNAVAILABLE)
+    logging.getLogger("ai").info("ai_fallback_notice muted for client chat_id=%s", chat_id)
     session["ai_fallback_notice"] = True
     update_session_ttl(session, timezone)
     save_session(storage, chat_id, session)
@@ -4751,28 +4761,20 @@ def handle_admin_callback(
     if data == "admin:diag":
         settings = get_settings(storage)
         ai_service = AIService(logging.getLogger("ai"), settings=settings)
-        mode = "FORCED" if settings.get("force_fallback") else ("AI" if ai_service.is_enabled() else "FALLBACK")
-        deepseek_status = "доступен" if ai_service.ping() else "недоступен"
+        ai_enabled = should_use_ai(storage, timezone, ai_service)
+        ai_status = "available" if ai_enabled else "unavailable (fallback active)"
         ai_health = get_ai_health(storage, timezone)
         master_inbox = get_master_inbox_chat_id(storage)
-        masters_count = 1 if master_inbox else 0
-        log_path = os.path.join(os.path.dirname(__file__), "logs", "client_bot.log")
-        last_error = get_last_error_line(log_path)
         queue_stats = get_queue_stats(storage, timezone)
-        queue_last_error = get_last_queue_error(storage)
         text = "\n".join(
             [
                 "Самодиагностика:",
                 "client_bot: OK",
                 "polling: OK",
-                f"DeepSeek: {deepseek_status}",
-                f"режим: {mode}",
-                f"ai_health: {ai_health.get('state')} ({ai_health.get('reason') or 'ok'})",
+                f"AI: {ai_status}",
                 "storage: OK",
-                f"masters configured: count={masters_count} inbox={master_inbox or '—'}",
-                f"outgoing queue: enabled={int(is_queue_enabled())} pending={queue_stats['pending']} sent={queue_stats['sent']} failed={queue_stats['failed']}",
-                f"queue last error: {queue_last_error}",
-                f"последняя ошибка: {last_error}",
+                f"masters configured: {1 if master_inbox else 0}",
+                f"outgoing queue: {'enabled' if is_queue_enabled() else 'disabled'}",
             ]
         )
         send_message(token, chat_id, text, reply_markup=build_admin_main_keyboard())
@@ -5878,6 +5880,8 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
                 data["car_known"] = True
                 if known_car.get("car_make_model"):
                     data.setdefault("car_make_model", known_car.get("car_make_model"))
+                if known_car.get("car_mileage"):
+                    data.setdefault("car_mileage", known_car.get("car_mileage"))
                 if known_car.get("vin"):
                     data.setdefault("vin", known_car.get("vin"))
                 data.setdefault("was_here_before", "yes")
@@ -5915,6 +5919,24 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
             send_message(token, chat_id, "Подскажите, пожалуйста, марку и модель автомобиля")
             return
         data["car_make_model"] = normalize_text(text)
+        session["stage"] = compute_next_stage(session)
+        update_session_ttl(session, timezone)
+        save_session(storage, chat_id, session)
+        save_storage(storage)
+        ask_current_step(token, chat_id, session)
+        return
+
+    if stage == "car_mileage":
+        if is_mileage_skip_request(text):
+            data["car_mileage_skipped"] = True
+            data.pop("car_mileage", None)
+        else:
+            normalized = normalize_text(text)
+            if not normalized:
+                send_message(token, chat_id, "Укажите пробег или напишите «не знаю».")
+                return
+            data["car_mileage"] = normalized
+            data["car_mileage_skipped"] = False
         session["stage"] = compute_next_stage(session)
         update_session_ttl(session, timezone)
         save_session(storage, chat_id, session)
@@ -5965,7 +5987,7 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
         parsed, error = parse_date_value(
             text,
             timezone,
-            ai_service if should_use_ai(storage, timezone, ai_service) else None,
+            None,
         )
         if error:
             send_message(token, chat_id, error)
@@ -6167,15 +6189,17 @@ def send_post_to_chat(
     reply_markup: dict | None = None,
     parse_mode: str | None = None,
 ) -> tuple[bool, int | None, str | None]:
+    safe_text = html.escape(text or "")
+    parse_mode = parse_mode or "HTML"
     if image_file_id:
-        payload = {"chat_id": target_chat_id, "photo": image_file_id, "caption": text}
+        payload = {"chat_id": target_chat_id, "photo": image_file_id, "caption": safe_text}
         if parse_mode:
             payload["parse_mode"] = parse_mode
         if reply_markup:
             payload["reply_markup"] = reply_markup
         result = tg_request("sendPhoto", payload)
     else:
-        payload = {"chat_id": target_chat_id, "text": text, "disable_web_page_preview": True}
+        payload = {"chat_id": target_chat_id, "text": safe_text, "disable_web_page_preview": True}
         if parse_mode:
             payload["parse_mode"] = parse_mode
         if reply_markup:
