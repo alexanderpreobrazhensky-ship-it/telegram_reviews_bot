@@ -77,6 +77,8 @@ MENU_LAST_VISIT = "🧾 Прошлый визит"
 MENU_OTHER = "❓ Другое"
 MENU_DIRECTIONS = "📍 Проезд"
 MENU_MASTER = "👨‍🔧 Мастер"
+MENU_HELP = "❓ Помощь"
+MENU_CONTACTS = "📍 Контакты / Адрес"
 UNIVERSAL_QUESTION = "Опишите, пожалуйста, коротко, с чем вы обращаетесь."
 FALLBACK_AI_UNAVAILABLE = (
     "Я сейчас работаю в стандартном режиме. "
@@ -106,6 +108,7 @@ ADMIN_STATE_POST_UPDATE_CONFIRM = "await_post_update_confirm"
 ADMIN_STATE_POST_EDIT_TEXT = "await_post_edit_text"
 ADMIN_STATE_POST_EDIT_IMAGE = "await_post_edit_image"
 ADMIN_STATE_POST_EDIT_CONFIRM = "await_post_edit_confirm"
+ADMIN_STATE_POST_RESCHEDULE = "await_post_reschedule"
 ADMIN_STATE_MASTER_INBOX_FORWARD = "await_master_inbox_forward"
 ADMIN_STATE_EXPORT_RANGE = "await_export_range"
 ADMIN_STATE_EXPORT_STATUS = "await_export_status"
@@ -125,7 +128,7 @@ AI_HEALTH_OK = "OK"
 AI_HEALTH_DOWN = "DOWN"
 AI_HEALTH_COOLDOWN = "COOLDOWN"
 AI_HEALTH_COOLDOWN_MINUTES = 30
-AI_TEMP_DISABLE_MINUTES = 30
+AI_TEMP_DISABLE_MINUTES = 60
 
 STATUS_NEW = "new"
 STATUS_IN_PROGRESS = "in_progress"
@@ -171,14 +174,12 @@ WEEKDAY_ALIASES = {
 
 CLIENT_MENU_ACTIONS = {
     MENU_BOOKING: "booking",
-    MENU_WARRANTY: "last_visit",
-    MENU_REPAIR: "repair",
     MENU_PARTS: "parts",
-    MENU_LAST_VISIT: "last_visit",
-    MENU_OTHER: "other",
-    MENU_DIRECTIONS: "directions",
-    MENU_MASTER: "master",
+    MENU_CONTACTS: "directions",
+    MENU_HELP: "help",
 }
+
+BOT_USERNAME = os.getenv("CLIENT_BOT_USERNAME", "Lira_chatclient_bot").lstrip("@")
 
 DICTIONARY_RULES = load_dictionary_rules()
 
@@ -217,20 +218,12 @@ def build_main_menu_keyboard() -> dict:
     return {
         "inline_keyboard": [
             [
-                {"text": MENU_BOOKING, "callback_data": "menu:booking"},
-                {"text": MENU_WARRANTY, "callback_data": "menu:warranty"},
+                {"text": "🛠 Запись на ремонт", "callback_data": "menu:booking"},
+                {"text": "🔧 Запчасти", "callback_data": "menu:parts"},
             ],
             [
-                {"text": MENU_REPAIR, "callback_data": "menu:repair"},
-                {"text": MENU_PARTS, "callback_data": "menu:parts"},
-            ],
-            [
-                {"text": MENU_LAST_VISIT, "callback_data": "menu:last_visit"},
-                {"text": MENU_OTHER, "callback_data": "menu:other"},
-            ],
-            [
-                {"text": MENU_DIRECTIONS, "callback_data": "menu:directions"},
-                {"text": MENU_MASTER, "callback_data": "menu:master"},
+                {"text": MENU_CONTACTS, "callback_data": "menu:directions"},
+                {"text": MENU_HELP, "callback_data": "menu:help"},
             ],
         ],
     }
@@ -371,8 +364,24 @@ def send_safe_message(
     reply_markup: dict | None = None,
     mode: str = "Markdown",
 ) -> bool:
-    _ = mode
-    return send_message(token, chat_id, text, reply_markup=reply_markup)
+    sanitized_markup = sanitize_reply_markup(reply_markup)
+    parse_mode = "HTML" if mode.upper() == "HTML" else None
+    result = send_message_with_result(
+        chat_id,
+        text,
+        reply_markup=sanitized_markup,
+        parse_mode=parse_mode,
+    )
+    if result.ok:
+        return True
+    if parse_mode and result.status_code == 400:
+        fallback = send_message_with_result(
+            chat_id,
+            text,
+            reply_markup=sanitized_markup,
+        )
+        return fallback.ok
+    return False
 
 
 def send_message_with_result(
@@ -380,12 +389,15 @@ def send_message_with_result(
     text: str,
     reply_markup: dict | None = None,
     disable_web_page_preview: bool = True,
+    parse_mode: str | None = None,
 ) -> TgRequestResult:
     payload: dict = {
         "chat_id": chat_id,
         "text": text,
         "disable_web_page_preview": disable_web_page_preview,
     }
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
     if reply_markup:
         payload["reply_markup"] = reply_markup
     return tg_request("sendMessage", payload)
@@ -601,6 +613,9 @@ def ensure_storage_defaults(storage: dict) -> None:
     target_env = os.getenv("CLIENT_POST_TARGET_ID") or os.getenv("CLIENT_POST_CHAT_ID")
     if target_env and "target_chat_id" not in post_settings:
         post_settings["target_chat_id"] = target_env
+    post_settings.setdefault("last_technical_post_id", None)
+    post_settings.setdefault("last_technical_post_chat_id", None)
+    post_settings.setdefault("last_technical_post_ts", None)
     storage.setdefault("start_clicks", {})
     normalize_ticket_statuses(storage)
     normalize_post_statuses(storage)
@@ -655,6 +670,35 @@ def get_ai_health(storage: dict, timezone: str) -> dict:
     health_payload = {"state": state, "last_failed_at": last_failed_at, "reason": reason}
     settings["ai_health"] = health_payload
     return health_payload
+
+
+def build_ai_status_text(storage: dict, timezone: str) -> str:
+    settings = storage.get("settings", {})
+    force_fallback = bool(settings.get("force_fallback"))
+    health = get_ai_health(storage, timezone)
+    state = health.get("state") or AI_HEALTH_OK
+    reason = health.get("reason") or "—"
+    disabled_until = settings.get("ai_temp_disabled_until")
+    status = "OFF" if force_fallback else "ON"
+    if state == AI_HEALTH_COOLDOWN:
+        status = "COOLDOWN"
+    elif state == AI_HEALTH_DOWN:
+        status = "OFF"
+    if disabled_until:
+        try:
+            disabled_dt = datetime.fromisoformat(disabled_until).astimezone(ZoneInfo(timezone))
+            disabled_until = disabled_dt.strftime("%Y-%m-%d %H:%M")
+        except ValueError:
+            disabled_until = disabled_until
+    else:
+        disabled_until = "—"
+    return "\n".join(
+        [
+            f"Статус ИИ: {status}",
+            f"Причина: {reason}",
+            f"Авто-возврат: {disabled_until}",
+        ]
+    )
 
 
 def mark_ai_down(storage: dict, timezone: str, reason: str) -> None:
@@ -1183,7 +1227,7 @@ def build_admin_main_keyboard() -> dict:
                 {"text": "⚙️ Настройки", "callback_data": "admin:settings"},
             ],
             [
-                {"text": "📘 Инструкция", "callback_data": "admin:help"},
+                {"text": "ℹ️ Помощь", "callback_data": "admin:help"},
                 {"text": "❌ Закрыть", "callback_data": "admin:close"},
             ],
         ]
@@ -1202,7 +1246,7 @@ def build_admin_settings_keyboard() -> dict:
                 {"text": "🧾 Отчёт", "callback_data": "admin:report"},
             ],
             [
-                {"text": "🤖 Режим AI", "callback_data": "admin:modes"},
+                {"text": "🤖 ИИ", "callback_data": "admin:modes"},
                 {"text": "⏰ Напоминания", "callback_data": "admin:reminders"},
             ],
             [
@@ -1210,7 +1254,10 @@ def build_admin_settings_keyboard() -> dict:
                 {"text": "🚫 Блок-лист", "callback_data": "admin:blocklist"},
             ],
             [
+                {"text": "👥 Контакты мастеров", "callback_data": "admin:settings:masters"},
                 {"text": "👨‍🔧 Чат мастера", "callback_data": "admin:settings:master_inbox"},
+            ],
+            [
                 {"text": "📄 Логи", "callback_data": "admin:logs"},
             ],
             [
@@ -1227,12 +1274,12 @@ def build_admin_posts_keyboard() -> dict:
     return {
         "inline_keyboard": [
             [
-                {"text": "➕ Пост", "callback_data": "admin:posts:add"},
-                {"text": "🗂 Очередь", "callback_data": "admin:posts:queue"},
+                {"text": "➕ Добавить пост в очередь", "callback_data": "admin:posts:add"},
+                {"text": "🗂 Очередь постов", "callback_data": "admin:posts:queue"},
             ],
             [
-                {"text": "📌 Закреп", "callback_data": "admin:posts:update_pinned"},
-                {"text": "🎯 Канал", "callback_data": "admin:posts:target"},
+                {"text": "📌 Обновить закреп", "callback_data": "admin:posts:update_pinned"},
+                {"text": "🎯 Канал публикации", "callback_data": "admin:posts:target"},
             ],
             [
                 {"text": "⬅️ Назад", "callback_data": "admin:menu"},
@@ -1245,7 +1292,10 @@ def build_admin_posts_keyboard() -> dict:
 def build_post_image_skip_keyboard() -> dict:
     return {
         "inline_keyboard": [
-            [{"text": "➡️ Без фото", "callback_data": "admin:posts:image_skip"}],
+            [
+                {"text": "➕ Да, добавить фото", "callback_data": "admin:posts:image_add"},
+                {"text": "⏭ Пропустить", "callback_data": "admin:posts:image_skip"},
+            ],
         ]
     }
 
@@ -1254,7 +1304,8 @@ def build_post_target_keyboard() -> dict:
     return {
         "inline_keyboard": [
             [{"text": "📩 Переслать сообщение из канала", "callback_data": "admin:posts:target:forward"}],
-            [{"text": "➕ Создать первый пост и привязать канал", "callback_data": "admin:posts:target:first_post"}],
+            [{"text": "🆔 Ввести ID вручную", "callback_data": "admin:posts:target:manual"}],
+            [{"text": "📌 Создать техпост для закрепа", "callback_data": "admin:posts:target:technical"}],
             [
                 {"text": "⬅️ Назад", "callback_data": "admin:posts"},
                 {"text": "🏠 В меню", "callback_data": "admin:menu"},
@@ -1273,6 +1324,23 @@ def build_master_inbox_keyboard() -> dict:
             ],
         ]
     }
+
+
+def build_master_contacts_text(storage: dict) -> str:
+    inbox = get_master_inbox_chat_id(storage)
+    unreachable = storage.get("unreachable_users", {})
+    unreachable_ids = ", ".join(unreachable.keys()) if unreachable else "—"
+    status = "✅ можно писать" if inbox else "⚠️ нет подтверждённого chat_id"
+    return "\n".join(
+        [
+            "👥 Контакты мастеров",
+            f"Чат мастера (chat_id): {inbox or '—'}",
+            f"Статус: {status}",
+            f"Недоступные чаты: {unreachable_ids}",
+            "",
+            "Если бот не может писать пользователю, пусть он отправит /start боту.",
+        ]
+    )
 
 
 def build_post_confirm_keyboard(action: str) -> dict:
@@ -1464,9 +1532,10 @@ def build_admin_modes_keyboard(settings: dict) -> dict:
             [{"text": f"CLIENT_FORCE_FALLBACK = {force_fallback}", "callback_data": "admin:modes"}],
             [{"text": f"CLIENT_AI_TIMEOUT_SECONDS = {timeout}", "callback_data": "admin:modes"}],
             [
-                {"text": "Включить AI", "callback_data": "admin:modes:ai"},
-                {"text": "Принудительный fallback", "callback_data": "admin:modes:fallback"},
+                {"text": "🧠 ИИ: Вкл", "callback_data": "admin:modes:ai"},
+                {"text": "🧠 ИИ: Выкл", "callback_data": "admin:modes:fallback"},
             ],
+            [{"text": "🔄 Сбросить блокировку ИИ", "callback_data": "admin:modes:reset"}],
             [
                 {"text": "Таймаут 5", "callback_data": "admin:modes:timeout:5"},
                 {"text": "10", "callback_data": "admin:modes:timeout:10"},
@@ -1763,34 +1832,23 @@ def build_stats(storage: dict, timezone: str) -> str:
 
 
 def build_helpadmin_text() -> str:
-    return "\n".join(
-        [
-            "📘 Инструкция для администратора",
-            "",
-            "1) 🎯 Канал публикации",
-            "— Нажмите «Канал публикации»",
-            "— Выберите «📩 Переслать сообщение из канала»",
-            "— Перешлите сюда любое сообщение из канала → бот привяжет канал автоматически",
-            "",
-            "2) ➕ Создать первый пост и привязать канал",
-            "— В «Канал публикации» нажмите «Создать первый пост и привязать канал»",
-            "— Бот опубликует первый технический пост и запомнит его для закрепа",
-            "",
-            "3) 📝 Посты → ➕ Добавить пост",
-            "— Введите текст поста",
-            "— При необходимости добавьте фото",
-            "— Укажите дату и время публикации → пост попадёт в очередь",
-            "",
-            "4) 🗂 Очередь постов",
-            "— Просмотр ближайших постов",
-            "— Можно удалить/редактировать/опубликовать сразу",
-            "",
-            "5) 📌 Обновить закреп",
-            "— Закрепляет последний опубликованный пост",
-            "— Если постов ещё не было — сначала создайте первый пост",
-            "",
-            "ℹ️ Если ИИ временно недоступен — бот автоматически продолжит работу без ИИ.",
-        ]
+    return (
+        "<b>📘 Инструкция для администратора</b>\n\n"
+        "<b>1) Как подключить канал</b>\n"
+        "1. Откройте «📝 Посты» → «🎯 Канал публикации»\n"
+        "2. Нажмите «📩 Переслать сообщение из канала»\n"
+        "3. Перешлите любое сообщение из нужного канала\n"
+        "4. Нажмите «📌 Создать техпост для закрепа»\n"
+        "5. Нажмите «📌 Обновить закреп»\n\n"
+        "<b>2) Как добавить пост в очередь</b>\n"
+        "1. «📝 Посты» → «➕ Добавить пост в очередь»\n"
+        "2. Введите текст\n"
+        "3. Прикрепите фото (если нужно)\n"
+        "4. Укажите дату/время\n"
+        "5. Подтвердите «✅ Запланировать»\n\n"
+        "<b>3) Что делать если ИИ не работает</b>\n"
+        "• Бот сам переключится в режим без ИИ.\n"
+        "• В «⚙️ Настройки» видно статус и можно сбросить блокировку.\n"
     )
 
 
@@ -2072,6 +2130,41 @@ def get_post_target_chat_id(storage: dict) -> str | None:
     return str(target).strip() or None
 
 
+def normalize_target_chat_id(raw_value: str) -> str | None:
+    cleaned = raw_value.strip().replace(" ", "")
+    if not cleaned:
+        return None
+    if cleaned.startswith("-100") and cleaned[4:].isdigit():
+        return cleaned
+    if cleaned.startswith("-") and cleaned[1:].isdigit():
+        return cleaned
+    if cleaned.isdigit():
+        return f"-100{cleaned}"
+    return None
+
+
+def build_deeplink(payload: str) -> str:
+    return f"https://t.me/{BOT_USERNAME}?start={payload}"
+
+
+def build_technical_post_payload() -> tuple[str, dict]:
+    text = (
+        "<b>Автоцентр ЛИРА</b> 🛠️\n"
+        "Запись на ремонт и запрос запчастей — в 1 клик:\n\n"
+        "Выберите действие:"
+    )
+    keyboard = {
+        "inline_keyboard": [
+            [
+                {"text": "🛠 Запись на ремонт", "url": build_deeplink("book")},
+                {"text": "🔧 Запчасти", "url": build_deeplink("parts")},
+            ],
+            [{"text": "💬 Написать в бот", "url": build_deeplink("home")}],
+        ]
+    }
+    return text, keyboard
+
+
 def get_posts_queue_file_path() -> str:
     base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     return os.path.join(base_dir, "data", "posts_queue.json")
@@ -2107,10 +2200,42 @@ def sync_posts_queue_file(storage: dict) -> bool:
         with open(tmp_path, "w", encoding="utf-8") as file_handle:
             json.dump(payload, file_handle, ensure_ascii=False, indent=2)
         os.replace(tmp_path, file_path)
+        sync_posts_repo_content(storage)
         return True
     except Exception as exc:  # noqa: BLE001 - do not crash polling
         logging.getLogger("client_bot").error("posts queue sync failed: %s", exc)
         return False
+
+
+def sync_posts_repo_content(storage: dict) -> None:
+    base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    repo_dir = os.path.join(base_dir, "repo_content", "posts")
+    os.makedirs(repo_dir, exist_ok=True)
+    timezone = os.getenv("TIMEZONE", "Europe/Moscow")
+    for post in storage.get("posts", []):
+        post_id = post.get("post_id")
+        if not post_id:
+            continue
+        scheduled_at = post.get("scheduled_at") or post.get("created_at")
+        try:
+            scheduled_dt = (
+                datetime.fromisoformat(scheduled_at)
+                if scheduled_at
+                else datetime.now(ZoneInfo(timezone))
+            )
+        except ValueError:
+            scheduled_dt = datetime.now(ZoneInfo(timezone))
+        folder = scheduled_dt.strftime("%Y-%m")
+        target_dir = os.path.join(repo_dir, folder)
+        os.makedirs(target_dir, exist_ok=True)
+        file_path = os.path.join(target_dir, f"POST-{post_id}.json")
+        tmp_path = f"{file_path}.tmp"
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as file_handle:
+                json.dump(post, file_handle, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, file_path)
+        except OSError:
+            logging.getLogger("client_bot").warning("post repo sync failed for post_id=%s", post_id)
 
 
 def restore_posts_queue_from_file(storage: dict, logger: logging.Logger) -> bool:
@@ -2159,23 +2284,38 @@ def get_last_post_reference(storage: dict) -> tuple[str | None, int | None]:
     return None, None
 
 
-def create_first_post(storage: dict, timezone: str, logger: logging.Logger) -> tuple[bool, str]:
+def get_last_technical_post_reference(storage: dict) -> tuple[str | None, int | None]:
+    post_settings = storage.get("post_settings", {})
+    chat_id = post_settings.get("last_technical_post_chat_id")
+    message_id = post_settings.get("last_technical_post_id")
+    if chat_id and message_id:
+        return str(chat_id), int(message_id)
+    return None, None
+
+
+def create_technical_post(storage: dict, timezone: str, logger: logging.Logger) -> tuple[bool, str]:
     target_chat_id = get_post_target_chat_id(storage)
     if not target_chat_id:
         return False, "Сначала привяжите канал публикации."
-    text = "✨ Канал подключён. Это технический пост для закрепа."
-    ok, message_id, error = send_post_to_chat(target_chat_id, text, None)
+    text, keyboard = build_technical_post_payload()
+    ok, message_id, error = send_post_to_chat(
+        target_chat_id,
+        text,
+        None,
+        reply_markup=keyboard,
+        parse_mode="HTML",
+    )
     if not ok or not message_id:
         logger.error("first post publish failed error=%s", error)
-        return False, "Не удалось опубликовать первый пост."
+        return False, "Не удалось опубликовать техпост для закрепа."
     post_settings = storage.setdefault("post_settings", {})
-    post_settings["last_post_chat_id"] = target_chat_id
-    post_settings["last_post_message_id"] = message_id
-    post_settings["last_post_ts"] = now_iso(timezone)
+    post_settings["last_technical_post_chat_id"] = target_chat_id
+    post_settings["last_technical_post_id"] = message_id
+    post_settings["last_technical_post_ts"] = now_iso(timezone)
     save_storage(storage)
     if not sync_posts_queue_file(storage):
-        return False, "Первый пост опубликован, но не удалось сохранить очередь постов."
-    return True, "Первый пост опубликован и сохранён для закрепа."
+        return False, "Техпост опубликован, но не удалось сохранить очередь постов."
+    return True, "✅ Техпост создан. Теперь нажмите «📌 Обновить закреп»."
 
 
 def next_post_id(storage: dict, timezone: str) -> str:
@@ -2266,6 +2406,7 @@ def build_post_actions_keyboard(post_id: str) -> dict:
                 {"text": "🗑 Удалить", "callback_data": f"admin:posts:delete:{post_id}"},
             ],
             [{"text": "📤 Опубликовать сейчас", "callback_data": f"admin:posts:publish:{post_id}"}],
+            [{"text": "🕒 Перенести дату/время", "callback_data": f"admin:posts:reschedule:{post_id}"}],
         ]
     }
 
@@ -2699,7 +2840,8 @@ def build_updates_from_text(text: str, ticket: dict, timezone: str) -> dict:
         updates["phone"] = phone_candidate
     parsed_date, date_error = parse_date_value(normalized, timezone)
     if parsed_date and not date_error:
-        updates["booking_date"] = parsed_date.strftime("%Y-%m-%d")
+        normalized_date, _ = normalize_booking_date(parsed_date, timezone)
+        updates["booking_date"] = normalized_date.strftime("%Y-%m-%d")
     parsed_time, time_error = parse_time_value(normalized)
     if parsed_time and not time_error:
         updates["booking_time"] = parsed_time
@@ -2752,6 +2894,13 @@ def format_booking_window_text(min_date: date, timezone: str) -> str:
     )
 
 
+def shift_to_next_working_day(value: date) -> date:
+    cursor = value
+    while cursor.weekday() not in {1, 2, 3, 4}:
+        cursor += timedelta(days=1)
+    return cursor
+
+
 def parse_date_value(
     raw_text: str,
     timezone: str,
@@ -2761,7 +2910,8 @@ def parse_date_value(
     today = datetime.now(ZoneInfo(timezone)).date()
     tokens = re.findall(r"[a-zа-яё]+", text, flags=re.IGNORECASE)
     if "сегодня" in tokens:
-        return None, "Запись день-в-день недоступна. Минимальная дата — завтра."
+        min_date = booking_min_date(today)
+        return None, f"Запись день-в-день недоступна. Ближайшая дата — {min_date.strftime('%d.%m')}."
     if "послезавтра" in tokens:
         return today + timedelta(days=2), None
     if "завтра" in tokens:
@@ -2795,16 +2945,26 @@ def parse_date_value(
     return None, "Не понял дату. Напишите дату (например, 12.03) или день недели (вт, среда)."
 
 
-def validate_booking_date(value: date, timezone: str) -> str | None:
+def normalize_booking_date(value: date, timezone: str) -> tuple[date, str | None]:
     today = datetime.now(ZoneInfo(timezone)).date()
     min_date = booking_min_date(today)
-    if value <= today:
-        return "Запись на сегодня недоступна. Выберите другую дату."
-    if value < min_date:
-        return f"Минимальная доступная дата: {min_date.strftime('%d.%m')}."
-    if value.weekday() not in {1, 2, 3, 4}:
-        return format_booking_window_text(min_date, timezone)
-    return None
+    normalized = value
+    notice = None
+    if value <= today or value < min_date:
+        normalized = min_date
+    if normalized.weekday() not in {1, 2, 3, 4}:
+        normalized = shift_to_next_working_day(normalized)
+    if normalized != value:
+        notice = (
+            "Мы принимаем заявку сейчас, мастер подтвердит в рабочее время.\n"
+            f"Предлагаю дату визита: {normalized.strftime('%d.%m')}.\n"
+            f"{format_booking_window_text(min_date, timezone)}"
+        )
+    return normalized, notice
+
+
+def validate_booking_date(value: date, timezone: str) -> tuple[date, str | None]:
+    return normalize_booking_date(value, timezone)
 
 
 def parse_time_value(raw_text: str) -> tuple[str | None, str | None]:
@@ -3213,11 +3373,10 @@ def apply_ai_fields(
                 except ValueError:
                     parsed = None
                 if parsed:
-                    error = validate_booking_date(parsed, timezone)
-                    if not error:
-                        data["booking_date"] = parsed.strftime("%Y-%m-%d")
-                    else:
-                        logger.info("ai_booking_date_invalid reason=%s", error)
+                    normalized, notice = validate_booking_date(parsed, timezone)
+                    data["booking_date"] = normalized.strftime("%Y-%m-%d")
+                    if notice:
+                        logger.info("ai_booking_date_normalized reason=%s", notice)
         elif key == "booking_time" and not data.get("booking_time"):
             value_str = normalize_text(str(value))
             parsed_time, error = parse_time_value(value_str)
@@ -3632,6 +3791,15 @@ def handle_client_menu_action(
     action: str,
     logger: logging.Logger,
 ) -> None:
+    if action == "help":
+        send_message(
+            token,
+            chat_id,
+            "Выберите нужный пункт меню. Если хотите задать вопрос мастеру, "
+            "напишите /master. Для отмены текущего сценария — /cancel.",
+            reply_markup=build_main_menu_keyboard(),
+        )
+        return
     if action == "directions":
         send_directions(token, chat_id, storage, timezone)
         return
@@ -4020,12 +4188,13 @@ def handle_client_menu_callback(
     action_key = data.split(":", 1)[1]
     action_map = {
         "booking": "booking",
+        "parts": "parts",
+        "directions": "directions",
+        "help": "help",
         "warranty": "last_visit",
         "last_visit": "last_visit",
-        "parts": "parts",
         "repair": "repair",
         "other": "other",
-        "directions": "directions",
         "master": "master",
     }
     action = action_map.get(action_key)
@@ -4083,6 +4252,9 @@ def handle_admin_callback(
     if data == "admin:settings":
         send_message(token, chat_id, "Настройки:", reply_markup=build_admin_settings_keyboard())
         return True
+    if data == "admin:settings:masters":
+        send_message(token, chat_id, build_master_contacts_text(storage), reply_markup=build_admin_settings_keyboard())
+        return True
     if data == "admin:settings:master_inbox":
         current_inbox = get_master_inbox_chat_id(storage)
         current_text = f"Текущий чат мастера: {current_inbox}" if current_inbox else "Чат мастера не настроен."
@@ -4109,7 +4281,13 @@ def handle_admin_callback(
         )
         return True
     if data == "admin:help":
-        send_safe_message(token, chat_id, build_helpadmin_text(), reply_markup=build_admin_main_keyboard())
+        send_safe_message(
+            token,
+            chat_id,
+            build_helpadmin_text(),
+            reply_markup=build_admin_main_keyboard(),
+            mode="HTML",
+        )
         return True
     if data == "admin:posts":
         send_message(token, chat_id, "Посты:", reply_markup=build_admin_posts_keyboard())
@@ -4132,7 +4310,14 @@ def handle_admin_callback(
     if data == "admin:posts:target":
         clear_admin_session(storage, chat_id)
         save_storage(storage)
-        send_message(token, chat_id, "Настройка канала публикации:", reply_markup=build_post_target_keyboard())
+        current_target = get_post_target_chat_id(storage)
+        current_text = f"Текущий канал: {current_target}" if current_target else "Канал не подключён."
+        send_message(
+            token,
+            chat_id,
+            "\n".join(["Настройка канала публикации.", current_text]),
+            reply_markup=build_post_target_keyboard(),
+        )
         return True
     if data == "admin:posts:target:forward":
         set_admin_session(storage, chat_id, ADMIN_STATE_POST_TARGET_FORWARD, {})
@@ -4148,9 +4333,9 @@ def handle_admin_callback(
         save_storage(storage)
         send_message(token, chat_id, "Введите chat_id канала или группы для публикаций.")
         return True
-    if data == "admin:posts:target:first_post":
+    if data == "admin:posts:target:technical":
         if not get_post_target_chat_id(storage):
-            set_admin_session(storage, chat_id, ADMIN_STATE_POST_TARGET_FORWARD, {"after_action": "first_post"})
+            set_admin_session(storage, chat_id, ADMIN_STATE_POST_TARGET_FORWARD, {"after_action": "technical"})
             save_storage(storage)
             send_message(
                 token,
@@ -4159,23 +4344,28 @@ def handle_admin_callback(
             )
             return True
         try:
-            ok, message = create_first_post(storage, timezone, logger)
+            ok, message = create_technical_post(storage, timezone, logger)
         except Exception as exc:  # noqa: BLE001 - keep admin flow alive
-            logger.exception("create_first_post failed: %s", exc)
+            logger.exception("create_technical_post failed: %s", exc)
             send_message(token, chat_id, "⚠️ Ошибка, попробуйте ещё раз /admin, смотрите логи")
             return True
         send_message(token, chat_id, message, reply_markup=build_post_target_keyboard())
         return True
     if data == "admin:posts:update_pinned":
-        target_chat_id, message_id = get_last_post_reference(storage)
+        target_chat_id, message_id = get_last_technical_post_reference(storage)
         if not target_chat_id or not message_id:
             send_message(
                 token,
                 chat_id,
-                "Закреп не найден. Сначала создайте первый пост.",
+                "Закреп не найден. Сначала создайте техпост для закрепа.",
                 reply_markup=build_post_target_keyboard(),
             )
             return True
+        pinned = storage.get("pinned_post", {})
+        previous_chat = pinned.get("chat_id")
+        previous_message = pinned.get("message_id")
+        if previous_chat and previous_message and str(previous_message) != str(message_id):
+            unpin_chat_message(previous_chat, int(previous_message))
         pin_result = pin_chat_message(target_chat_id, int(message_id))
         if pin_result.ok:
             matching_post = next(
@@ -4197,6 +4387,9 @@ def handle_admin_callback(
             send_message(token, chat_id, "Закреп обновлён.", reply_markup=build_admin_posts_keyboard())
         else:
             send_message(token, chat_id, "Не удалось обновить закреп.", reply_markup=build_admin_posts_keyboard())
+        return True
+    if data == "admin:posts:image_add":
+        send_message(token, chat_id, "Прикрепите изображение.", reply_markup=build_post_image_skip_keyboard())
         return True
     if data == "admin:posts:image_skip":
         admin_session = get_admin_session(storage, chat_id)
@@ -4339,6 +4532,16 @@ def handle_admin_callback(
             return True
         publish_post(storage, post, timezone, logger)
         send_message(token, chat_id, f"Пост опубликован: {post_id}", reply_markup=build_admin_posts_keyboard())
+        return True
+    if data.startswith("admin:posts:reschedule:"):
+        post_id = data.split(":")[3]
+        post = next((item for item in storage.get("posts", []) if item.get("post_id") == post_id), None)
+        if not post:
+            send_message(token, chat_id, "Пост не найден.", reply_markup=build_admin_posts_keyboard())
+            return True
+        set_admin_session(storage, chat_id, ADMIN_STATE_POST_RESCHEDULE, {"post_id": post_id})
+        save_storage(storage)
+        send_message(token, chat_id, "Укажите новую дату и время публикации (например, завтра 12:00).")
         return True
     if data == "admin:posts:cancel":
         clear_admin_session(storage, chat_id)
@@ -4614,17 +4817,31 @@ def handle_admin_callback(
         return True
     if data == "admin:modes":
         settings = get_settings(storage)
-        send_message(token, chat_id, "Режимы работы:", reply_markup=build_admin_modes_keyboard(settings))
+        status_text = build_ai_status_text(storage, timezone)
+        send_message(
+            token,
+            chat_id,
+            "\n".join(["🤖 Режимы работы", status_text]),
+            reply_markup=build_admin_modes_keyboard(settings),
+        )
         return True
     if data == "admin:modes:ai":
         storage["settings"]["force_fallback"] = 0
+        storage["settings"]["ai_temp_disabled_until"] = None
+        storage["settings"]["ai_health"] = {"state": AI_HEALTH_OK, "last_failed_at": None, "reason": None}
         save_storage(storage)
-        send_message(token, chat_id, "AI включён.", reply_markup=build_admin_modes_keyboard(get_settings(storage)))
+        send_message(token, chat_id, "ИИ включён.", reply_markup=build_admin_modes_keyboard(get_settings(storage)))
         return True
     if data == "admin:modes:fallback":
         storage["settings"]["force_fallback"] = 1
         save_storage(storage)
-        send_message(token, chat_id, "Принудительный fallback включён.", reply_markup=build_admin_modes_keyboard(get_settings(storage)))
+        send_message(token, chat_id, "ИИ выключен (fallback).", reply_markup=build_admin_modes_keyboard(get_settings(storage)))
+        return True
+    if data == "admin:modes:reset":
+        storage["settings"]["ai_temp_disabled_until"] = None
+        storage["settings"]["ai_health"] = {"state": AI_HEALTH_OK, "last_failed_at": None, "reason": None}
+        save_storage(storage)
+        send_message(token, chat_id, "Блокировка ИИ сброшена.", reply_markup=build_admin_modes_keyboard(get_settings(storage)))
         return True
     if data.startswith("admin:modes:timeout:"):
         timeout_value = data.split(":")[3]
@@ -4897,7 +5114,13 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
         if not check_admin_access(chat_id, chat.get("username"), storage, logger):
             send_message(token, chat_id, "Недостаточно прав доступа")
             return
-        send_safe_message(token, chat_id, build_helpadmin_text(), reply_markup=build_admin_main_keyboard())
+        send_safe_message(
+            token,
+            chat_id,
+            build_helpadmin_text(),
+            reply_markup=build_admin_main_keyboard(),
+            mode="HTML",
+        )
         return
 
     if text.startswith("/tgsendtest"):
@@ -4919,7 +5142,7 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
                 payload = {"text": normalize_text(text)}
                 set_admin_session(storage, chat_id, ADMIN_STATE_POST_IMAGE, payload)
                 save_storage(storage)
-                send_message(token, chat_id, "Прикрепите изображение или выберите «Без изображения».", reply_markup=build_post_image_skip_keyboard())
+                send_message(token, chat_id, "🖼 Добавить изображение?", reply_markup=build_post_image_skip_keyboard())
                 return
             if admin_session.get("state") == ADMIN_STATE_POST_IMAGE:
                 if message.get("photo"):
@@ -4931,7 +5154,7 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
                     send_message(token, chat_id, "Укажите дату и время публикации (например, завтра 12:00).")
                     return
                 if text:
-                    send_message(token, chat_id, "Отправьте изображение или выберите «Без изображения».", reply_markup=build_post_image_skip_keyboard())
+                    send_message(token, chat_id, "Отправьте изображение или выберите «Пропустить».", reply_markup=build_post_image_skip_keyboard())
                     return
             if admin_session.get("state") == ADMIN_STATE_POST_SCHEDULE:
                 scheduled_at, error = parse_schedule_datetime(text, timezone)
@@ -4956,6 +5179,27 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
                     send_photo(token, chat_id, image_file_id, caption=payload.get("text", ""))
                 send_message(token, chat_id, preview, reply_markup=build_post_confirm_keyboard("add"))
                 return
+            if admin_session.get("state") == ADMIN_STATE_POST_RESCHEDULE:
+                scheduled_at, error = parse_schedule_datetime(text, timezone)
+                if error:
+                    send_message(token, chat_id, error)
+                    return
+                payload = admin_session.get("data", {})
+                post_id = payload.get("post_id")
+                post = next((item for item in storage.get("posts", []) if item.get("post_id") == post_id), None)
+                if not post:
+                    send_message(token, chat_id, "Пост не найден.", reply_markup=build_admin_posts_keyboard())
+                    clear_admin_session(storage, chat_id)
+                    save_storage(storage)
+                    return
+                post["scheduled_at"] = scheduled_at
+                post["updated_at"] = now_iso(timezone)
+                save_storage(storage)
+                sync_posts_queue_file_with_notice(storage, token, chat_id, logger)
+                clear_admin_session(storage, chat_id)
+                save_storage(storage)
+                send_message(token, chat_id, f"Дата публикации обновлена: {post_id}", reply_markup=build_admin_posts_keyboard())
+                return
             if admin_session.get("state") == ADMIN_STATE_POST_TARGET_FORWARD:
                 forward_chat = message.get("forward_from_chat")
                 if not forward_chat:
@@ -4975,11 +5219,16 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
                 save_storage(storage)
                 title = forward_chat.get("title") or "—"
                 sync_posts_queue_file_with_notice(storage, token, chat_id, logger)
-                if after_action == "first_post":
-                    ok, message = create_first_post(storage, timezone, logger)
+                if after_action == "technical":
+                    ok, message = create_technical_post(storage, timezone, logger)
                     send_message(token, chat_id, message, reply_markup=build_post_target_keyboard())
                     return
-                send_message(token, chat_id, f"✅ Канал привязан: {title} (ID: {target_id}).", reply_markup=build_post_target_keyboard())
+                send_message(
+                    token,
+                    chat_id,
+                    f"✅ Канал подключён: {title} (ID: {target_id}).",
+                    reply_markup=build_post_target_keyboard(),
+                )
                 return
             if admin_session.get("state") == ADMIN_STATE_MASTER_INBOX_FORWARD:
                 forward_chat = message.get("forward_from_chat")
@@ -5009,11 +5258,30 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
                 if not text:
                     send_message(token, chat_id, "Введите chat_id канала или группы.")
                     return
-                storage.setdefault("post_settings", {})["target_chat_id"] = text.strip()
+                normalized = normalize_target_chat_id(text)
+                if not normalized:
+                    send_message(token, chat_id, "Введите числовой chat_id (например, -1001234567890).")
+                    return
+                check = tg_request("getChat", {"chat_id": normalized})
+                if not check.ok:
+                    send_message(token, chat_id, "Бот не имеет доступа к этому чату. Проверьте ID и доступы.")
+                    return
+                chat_type = None
+                if check.response_json:
+                    chat_type = check.response_json.get("result", {}).get("type")
+                if chat_type and chat_type != "channel":
+                    send_message(token, chat_id, "Это не канал. Укажите ID канала или используйте пересылку.")
+                    return
+                storage.setdefault("post_settings", {})["target_chat_id"] = normalized
                 clear_admin_session(storage, chat_id)
                 save_storage(storage)
                 sync_posts_queue_file_with_notice(storage, token, chat_id, logger)
-                send_message(token, chat_id, "Канал публикации сохранён.", reply_markup=build_admin_posts_keyboard())
+                send_message(
+                    token,
+                    chat_id,
+                    "✅ Канал подключён. Теперь создайте техпост для закрепа.",
+                    reply_markup=build_post_target_keyboard(),
+                )
                 return
             if admin_session.get("state") == ADMIN_STATE_POST_UPDATE_TEXT:
                 if not normalize_text(text):
@@ -5146,9 +5414,12 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
 
     if text.startswith("/start"):
         parts = text.split(maxsplit=1)
+        payload = ""
         if len(parts) > 1:
-            record_start_click(storage, parts[1].strip(), chat_id)
+            payload = parts[1].strip().lower()
+            record_start_click(storage, payload, chat_id)
             save_storage(storage)
+        payload = payload or "home"
         if session.get("stage") or active_ticket:
             send_message(
                 token,
@@ -5158,13 +5429,38 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
             if session.get("stage"):
                 ask_current_step(token, chat_id, session)
             return
+        if payload in {"book", "booking"}:
+            ai_service = AIService(logging.getLogger("ai"), settings=get_settings(storage))
+            start_client_scenario(
+                token,
+                chat_id,
+                chat,
+                session,
+                storage,
+                timezone,
+                ai_service,
+                "booking",
+            )
+            return
+        if payload in {"parts"}:
+            ai_service = AIService(logging.getLogger("ai"), settings=get_settings(storage))
+            start_client_scenario(
+                token,
+                chat_id,
+                chat,
+                session,
+                storage,
+                timezone,
+                ai_service,
+                "parts",
+            )
+            return
         send_message(
             token,
             chat_id,
             "Здравствуйте 👋\n"
-            "Я онлайн-помощник автоцентра „Лира“.\n"
-            "Помогу записаться на сервис, передать вопрос мастеру\n"
-            "или уточнить информацию по прошлому визиту.",
+            "Я онлайн-помощник автоцентра «ЛИРА».\n"
+            "Помогу записаться на сервис или запросить запчасти.",
             reply_markup=build_main_menu_keyboard(),
         )
         return
@@ -5467,15 +5763,14 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
         if error:
             send_message(token, chat_id, error)
             return
-        validation_error = validate_booking_date(parsed, timezone)
-        if validation_error:
-            send_message(token, chat_id, validation_error)
-            return
-        data["booking_date"] = parsed.strftime("%Y-%m-%d")
+        normalized_date, notice = validate_booking_date(parsed, timezone)
+        data["booking_date"] = normalized_date.strftime("%Y-%m-%d")
         session["stage"] = "booking_time"
         update_session_ttl(session, timezone)
         save_session(storage, chat_id, session)
         save_storage(storage)
+        if notice:
+            send_message(token, chat_id, notice)
         ask_current_step(token, chat_id, session)
         return
 
@@ -5662,12 +5957,22 @@ def send_post_to_chat(
     target_chat_id: str,
     text: str,
     image_file_id: str | None,
+    reply_markup: dict | None = None,
+    parse_mode: str | None = None,
 ) -> tuple[bool, int | None, str | None]:
     if image_file_id:
         payload = {"chat_id": target_chat_id, "photo": image_file_id, "caption": text}
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
+        if reply_markup:
+            payload["reply_markup"] = reply_markup
         result = tg_request("sendPhoto", payload)
     else:
         payload = {"chat_id": target_chat_id, "text": text, "disable_web_page_preview": True}
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
+        if reply_markup:
+            payload["reply_markup"] = reply_markup
         result = tg_request("sendMessage", payload)
     if result.ok and result.response_json:
         message_id = result.response_json.get("result", {}).get("message_id")
