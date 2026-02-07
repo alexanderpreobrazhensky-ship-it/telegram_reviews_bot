@@ -53,6 +53,14 @@
 - Storage: `bots/client_bot/storage.json`.
 - Логи: `bots/client_bot/logs/client_bot.log` (префиксы `[client_bot]`, `[ai]`, `[polling]`, `[admin]`, `[storage]`).
 
+### WebApp (Mini App)
+
+- `WEBAPP_URL` — публичный URL на `/webapp`, используется для кнопки «✨ Открыть меню (WebApp)`.
+- `LIRA_PHONE` — телефон для кнопки «Позвонить» (опционально).
+- `LIRA_ADDRESS` — адрес, по умолчанию `Удмуртская 10`.
+- `LIRA_MAP_URL` — ссылка на карту (опционально; если не задана, строится по адресу).
+- `CLIENT_WEBAPP_PORT` — порт для локальной раздачи WebApp (опционально, если `PORT` не задан).
+
 ## Локальный запуск
 
 ```bash

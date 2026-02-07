@@ -13,6 +13,7 @@ from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import requests
+from flask import Flask, jsonify, send_from_directory
 
 PIL_AVAILABLE = True
 try:
@@ -209,6 +210,11 @@ CLIENT_MENU_ACTIONS = {
 }
 
 BOT_USERNAME = os.getenv("CLIENT_BOT_USERNAME", "Lira_chatclient_bot").lstrip("@")
+WEBAPP_URL = os.getenv("WEBAPP_URL", "").strip()
+LIRA_PHONE = os.getenv("LIRA_PHONE", "").strip()
+LIRA_ADDRESS = (os.getenv("LIRA_ADDRESS") or "Удмуртская 10").strip()
+LIRA_MAP_URL = os.getenv("LIRA_MAP_URL", "").strip()
+WEBAPP_DIR = os.path.join(os.path.dirname(__file__), "webapp")
 
 DICTIONARY_RULES = load_dictionary_rules()
 
@@ -243,18 +249,54 @@ def build_logger(timezone: str) -> logging.Logger:
     return logging.getLogger("client_bot")
 
 
+def get_webapp_url() -> str | None:
+    url = (os.getenv("WEBAPP_URL") or WEBAPP_URL).strip()
+    return url or None
+
+
+def get_lira_phone() -> str | None:
+    raw = (os.getenv("LIRA_PHONE") or LIRA_PHONE).strip()
+    return raw or None
+
+
+def format_tel_link(phone: str | None) -> str | None:
+    if not phone:
+        return None
+    cleaned = re.sub(r"[^\d+]", "", phone)
+    return cleaned or None
+
+
+def get_lira_address() -> str:
+    return (os.getenv("LIRA_ADDRESS") or LIRA_ADDRESS).strip() or "Удмуртская 10"
+
+
+def get_map_urls(address: str) -> tuple[str | None, str, str]:
+    map_url = (os.getenv("LIRA_MAP_URL") or LIRA_MAP_URL).strip() or None
+    encoded = requests.utils.quote(address)
+    yandex_url = f"https://yandex.ru/maps/?text={encoded}"
+    google_url = f"https://www.google.com/maps/search/?api=1&query={encoded}"
+    return map_url, yandex_url, google_url
+
+
 def build_main_menu_keyboard() -> dict:
+    webapp_url = get_webapp_url()
+    if webapp_url:
+        return {
+            "inline_keyboard": [
+                [{"text": "✨ Открыть меню (WebApp)", "web_app": {"url": webapp_url}}],
+            ],
+        }
+    phone = get_lira_phone()
+    rows = [
+        [{"text": "🛠 Записаться на обслуживание", "callback_data": "menu:booking"}],
+        [{"text": "⚙️ Подбор запчастей", "callback_data": "menu:parts"}],
+        [{"text": "💬 Вопрос мастеру", "callback_data": "menu:question"}],
+        [{"text": "📍 Как доехать", "callback_data": "menu:directions"}],
+    ]
+    if phone:
+        rows.append([{"text": "📞 Позвонить", "callback_data": "menu:call"}])
     return {
-        "inline_keyboard": [
-            [
-                {"text": "🛠 Запись на ремонт", "callback_data": "menu:booking"},
-                {"text": "🔧 Запчасти", "callback_data": "menu:parts"},
-            ],
-            [
-                {"text": MENU_CONTACTS, "callback_data": "menu:directions"},
-                {"text": MENU_HELP, "callback_data": "menu:help"},
-            ],
-        ],
+        "inline_keyboard": rows,
     }
 
 
@@ -276,17 +318,15 @@ def build_master_keyboard(master_username: str) -> dict:
 
 
 def build_directions_keyboard() -> dict:
-    address = "Удмуртская, 10"
-    yandex_url = f"https://yandex.ru/maps/?text={requests.utils.quote(address)}"
-    google_url = (
-        "https://www.google.com/maps/search/?api=1&query="
-        f"{requests.utils.quote(address)}"
-    )
+    address = get_lira_address()
+    map_url, yandex_url, google_url = get_map_urls(address)
+    rows: list[list[dict]] = []
+    if map_url:
+        rows.append([{"text": "🗺 Открыть карту", "url": map_url}])
+    rows.append([{"text": "🗺 Открыть в Яндекс Картах", "url": yandex_url}])
+    rows.append([{"text": "🗺 Открыть в Google Maps", "url": google_url}])
     return {
-        "inline_keyboard": [
-            [{"text": "🗺 Открыть в Яндекс Картах", "url": yandex_url}],
-            [{"text": "🗺 Открыть в Google Maps", "url": google_url}],
-        ]
+        "inline_keyboard": rows
     }
 
 
@@ -2134,21 +2174,155 @@ def send_directions(
     storage: dict,
     timezone: str,
 ) -> None:
-    address = "Удмуртская, 10"
+    address = get_lira_address()
+    map_url, yandex_url, google_url = get_map_urls(address)
     logging.getLogger("client_bot").info("directions: send text-only (image disabled)")
+    lines = [f"Адрес: {address}", "Навигатор:"]
+    if map_url:
+        lines.append(map_url)
+    lines.extend([yandex_url, google_url])
     send_message(
         token,
         chat_id,
-        "\n".join(
-            [
-                f"Адрес: {address}",
-                "Навигатор:",
-                "https://yandex.ru/maps/?text=Удмуртская%2C%2010",
-                "https://2gis.ru/search/Удмуртская%2010",
-            ]
-        ),
+        "\n".join(lines),
         reply_markup=build_directions_keyboard(),
     )
+
+
+def send_call_details(token: str, chat_id: int) -> None:
+    phone = get_lira_phone()
+    if not phone:
+        send_message(token, chat_id, "Телефон сейчас недоступен. Напишите, пожалуйста, что вам нужно.")
+        return
+    tel_link = format_tel_link(phone)
+    text = f"Телефон: {phone}"
+    if tel_link:
+        text = f"{text}\n{tel_link}"
+    send_message(token, chat_id, text)
+
+
+def build_webapp_config() -> dict:
+    address = get_lira_address()
+    map_url, yandex_url, google_url = get_map_urls(address)
+    return {
+        "address": address,
+        "phone": get_lira_phone(),
+        "mapUrl": map_url or "",
+        "yandexUrl": yandex_url,
+        "googleUrl": google_url,
+    }
+
+
+def create_webapp_app() -> Flask:
+    app = Flask(__name__)
+
+    @app.get("/webapp")
+    @app.get("/webapp/")
+    def webapp_index() -> object:
+        return send_from_directory(WEBAPP_DIR, "index.html")
+
+    @app.get("/webapp/config.json")
+    def webapp_config() -> object:
+        return jsonify(build_webapp_config())
+
+    @app.get("/webapp/<path:filename>")
+    def webapp_static(filename: str) -> object:
+        return send_from_directory(WEBAPP_DIR, filename)
+
+    return app
+
+
+def run_webapp_server(port: int, logger: logging.Logger) -> None:
+    try:
+        app = create_webapp_app()
+        logger.info("webapp server starting port=%s", port)
+        app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+    except Exception as exc:  # noqa: BLE001 - keep polling alive
+        logger.exception("webapp server error: %s", exc)
+
+
+def start_webapp_server(logger: logging.Logger) -> None:
+    raw_port = os.getenv("CLIENT_WEBAPP_PORT") or os.getenv("PORT")
+    port = int(raw_port) if raw_port and raw_port.isdigit() else 8001
+    thread = threading.Thread(
+        target=run_webapp_server,
+        args=(port, logger),
+        daemon=True,
+    )
+    thread.start()
+
+
+def handle_webapp_data(
+    token: str,
+    message: dict,
+    storage: dict,
+    timezone: str,
+    logger: logging.Logger,
+) -> bool:
+    data_raw = message.get("web_app_data", {}).get("data")
+    if not data_raw:
+        return False
+    chat = message.get("chat", {})
+    chat_id = chat.get("id")
+    user_id = message.get("from", {}).get("id")
+    if not chat_id:
+        return True
+    try:
+        payload = json.loads(data_raw)
+        if not isinstance(payload, dict) or payload.get("v") != 1:
+            raise ValueError("invalid payload")
+        action = payload.get("action")
+        if action not in {"booking", "parts", "question", "route", "call"}:
+            raise ValueError(f"unsupported action: {action}")
+        logger.info(
+            "webapp action received action=%s user_id=%s chat_id=%s",
+            action,
+            user_id,
+            chat_id,
+        )
+        session = ensure_session(storage, chat_id, timezone)
+        active_ticket = find_active_ticket(storage, chat_id, timezone)
+        if active_ticket:
+            if session.get("active_ticket_id") != active_ticket.get("ticket_id"):
+                session["active_ticket_id"] = active_ticket.get("ticket_id")
+                save_session(storage, chat_id, session)
+                save_storage(storage)
+        ai_service = AIService(logging.getLogger("ai"), settings=get_settings(storage))
+        if action in {"booking", "parts"}:
+            handle_client_menu_action(
+                token,
+                chat_id,
+                chat,
+                session,
+                storage,
+                timezone,
+                ai_service,
+                active_ticket,
+                action,
+                logger,
+            )
+        elif action == "question":
+            handle_client_menu_action(
+                token,
+                chat_id,
+                chat,
+                session,
+                storage,
+                timezone,
+                ai_service,
+                active_ticket,
+                "master",
+                logger,
+            )
+        elif action == "route":
+            send_directions(token, chat_id, storage, timezone)
+        elif action == "call":
+            send_call_details(token, chat_id)
+        return True
+    except Exception as exc:  # noqa: BLE001 - should not crash handler
+        logger.warning("webapp data handling failed: %s", exc)
+        send_message(token, chat_id, "Не удалось обработать действие, попробуйте ещё раз.")
+        return True
 
 
 def get_post_target_chat_id(storage: dict) -> str | None:
@@ -3824,6 +3998,9 @@ def handle_client_menu_action(
     if action == "directions":
         send_directions(token, chat_id, storage, timezone)
         return
+    if action == "call":
+        send_call_details(token, chat_id)
+        return
     if action == "master":
         process_master_request(
             token,
@@ -4212,6 +4389,8 @@ def handle_client_menu_callback(
         "parts": "parts",
         "directions": "directions",
         "help": "help",
+        "call": "call",
+        "question": "master",
         "warranty": "last_visit",
         "last_visit": "last_visit",
         "repair": "repair",
@@ -5114,6 +5293,9 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
 
     update_session_client_context(session, chat)
 
+    if handle_webapp_data(token, message, storage, timezone, logger):
+        return
+
     if text.startswith("/whoami"):
         username = chat.get("username")
         username_display = f"@{username}" if username else "—"
@@ -5441,6 +5623,11 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
             record_start_click(storage, payload, chat_id)
             save_storage(storage)
         payload = payload or "home"
+        logger.info(
+            "start command menu_mode=%s chat_id=%s",
+            "webapp" if get_webapp_url() else "fallback",
+            chat_id,
+        )
         if session.get("stage") or active_ticket:
             send_message(
                 token,
@@ -6217,6 +6404,7 @@ def main() -> None:
         ai_service.base_url,
         ai_config_source,
     )
+    start_webapp_server(logger)
     logger.info("client_bot starting (polling mode)")
     delete_webhook(token, logger, drop_pending_updates=False)
     poll_updates(token, logger)

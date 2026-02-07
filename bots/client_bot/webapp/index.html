@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <title>Автоцентр ЛИРА</title>
+    <link rel="stylesheet" href="/webapp/app.css" />
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  </head>
+  <body>
+    <main class="app">
+      <section class="card">
+        <header class="header">
+          <p class="eyebrow">Автоцентр ЛИРА</p>
+          <h1>Премиум-меню</h1>
+          <p class="subtitle">
+            спокойно, точно, по регламентам производителя
+          </p>
+        </header>
+
+        <p class="lead">
+          Ремонт и обслуживание — спокойно, точно, по регламентам производителя.
+        </p>
+
+        <div class="cta">
+          <button class="btn primary" data-action="booking">
+            🛠️ Записаться на обслуживание
+          </button>
+          <button class="btn primary" data-action="parts">
+            ⚙️ Подбор запчастей
+          </button>
+          <button class="btn primary" data-action="question">
+            💬 Вопрос мастеру
+          </button>
+        </div>
+
+        <div class="divider"></div>
+
+        <div class="secondary">
+          <button class="btn secondary" data-action="route" id="routeButton">
+            📍 Как доехать
+          </button>
+          <button class="btn secondary" data-action="call" id="callButton">
+            📞 Позвонить
+          </button>
+        </div>
+
+        <p class="address" id="addressText"></p>
+
+        <footer class="footer">
+          Без спешки. Без лишних слов. Как и должно быть.
+        </footer>
+      </section>
+    </main>
+
+    <script src="/webapp/app.js"></script>
+  </body>
+</html>
