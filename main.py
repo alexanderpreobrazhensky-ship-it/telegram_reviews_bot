@@ -241,6 +241,10 @@ SERVICE_NAME = "Автоцентр Лира"
 SERVICE_ADDRESS = "Нижний Новгород, ул. Удмуртская, д. 10"
 SERVICE_HOURS = "Пн–Пт 09:00–19:00; Сб–Вс выходной"
 SERVICE_PHONES = ["+7 (831) 214-00-50", "+7 (967) 711-50-50"]
+YANDEX_MAP_URL = "https://yandex.ru/maps/org/lira/1014791361"
+YANDEX_REVIEW_URL = "https://yandex.ru/maps/org/lira/1014791361/reviews"
+GIS_MAP_URL = "https://2gis.ru/n_novgorod/geo/2674540559836449"
+GIS_REVIEW_URL = "https://2gis.ru/n_novgorod/geo/2674540559836449/reviews"
 DEFAULT_BUSINESS_CONTEXT = (
     "Автоцентр Лира (автосервис/СТО, Нижний Новгород, ул. Удмуртская, д. 10). "
     "Контакты: +7 (831) 214-00-50, +7 (967) 711-50-50. "
@@ -642,6 +646,7 @@ def can_manage_access(chat_id: Optional[int], user_id: Optional[int]) -> bool:
 FORBIDDEN_PHRASE = "вы записаны"
 CHANNEL_POST_SETTING_KEY = "channel_post_state"
 CHANNEL_SCHEDULE_SETTING_KEY = "channel_post_schedule"
+CHANNEL_PIN_SETTING_KEY = "channel_pin_state"
 CHANNEL_SCHEDULE_TZ = ZoneInfo("Europe/Moscow")
 CHANNEL_SCHEDULE_WEEKDAY = 4  # Friday
 CHANNEL_SCHEDULE_HOUR = 14
@@ -703,6 +708,18 @@ def _save_channel_post_state(state: Dict[str, Any]) -> None:
     else:
         _channel_post_cache.update(state)
 
+def _load_channel_pin_state() -> Dict[str, Any]:
+    if DB_OK:
+        state = db_get_setting(CHANNEL_PIN_SETTING_KEY) or {}
+        return state if isinstance(state, dict) else {}
+    return dict(_channel_post_cache.get(CHANNEL_PIN_SETTING_KEY, {}))
+
+def _save_channel_pin_state(state: Dict[str, Any]) -> None:
+    if DB_OK:
+        db_set_setting(CHANNEL_PIN_SETTING_KEY, state)
+    else:
+        _channel_post_cache[CHANNEL_PIN_SETTING_KEY] = dict(state)
+
 def _helpadmin_text() -> str:
     return (
         "🧠 Что делает бот:\n"
@@ -735,6 +752,117 @@ def _validate_text(text: str, context: str) -> bool:
         logger.error("Forbidden phrase detected in %s", context)
         return False
     return True
+
+def _deep_link_url(payload: str) -> str:
+    return f"https://t.me/Lira_chatclient_bot?start={payload}"
+
+def _channel_pin_text() -> str:
+    return (
+        "<b>Автоцентр ЛИРА</b>\n\n"
+        "Сервис и вопросы по автомобилю — онлайн.\n\n"
+        "Здесь можно оставить заявку,\n"
+        "уточнить стоимость или задать вопрос мастеру.\n\n"
+        "Мы всё соберём и свяжемся с вами\n"
+        "в рабочее время.\n\n"
+        "Выберите нужный раздел:"
+    )
+
+def _channel_pin_keyboard() -> dict:
+    return {
+        "inline_keyboard": [
+            [{"text": "🛠 Запись на сервис", "url": _deep_link_url("service_booking")}],
+            [{"text": "🧩 Запчасти / стоимость", "url": _deep_link_url("parts_request")}],
+            [{"text": "💬 Вопрос мастеру", "url": _deep_link_url("ask_master")}],
+            [{"text": "📍 Как нас найти", "url": _deep_link_url("how_to_find")}],
+            [{"text": "⭐️ Оставить отзыв", "url": _deep_link_url("leave_review")}],
+        ]
+    }
+
+def _channel_pin_payload() -> Tuple[str, dict]:
+    text = _channel_pin_text()
+    reply_markup = _channel_pin_keyboard()
+    return text, reply_markup
+
+def _log_channel_pin_error(status: int, body: str) -> None:
+    if status in (400, 403):
+        logger.error(
+            "Channel pin failed status=%s body=%s. "
+            "Добавьте бота админом канала с правом публикации и закрепления",
+            status,
+            _redact(body[:800]),
+        )
+    else:
+        logger.error("Channel pin failed status=%s body=%s", status, _redact(body[:800]))
+
+def _send_channel_pin_message(channel_id: int, text: str, reply_markup: dict) -> Optional[int]:
+    payload = {
+        "chat_id": channel_id,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+        "reply_markup": reply_markup,
+    }
+    try:
+        r = requests.post(tg_api("sendMessage"), json=payload, timeout=TG_TIMEOUT)
+        if r.status_code != 200:
+            _log_channel_pin_error(r.status_code, r.text)
+            return None
+        data = r.json()
+        return (data.get("result") or {}).get("message_id")
+    except Exception:
+        logger.exception("sendMessage exception channel_id=%s", channel_id)
+        return None
+
+def _edit_channel_pin_message(channel_id: int, message_id: int, text: str, reply_markup: dict) -> bool:
+    payload = {
+        "chat_id": channel_id,
+        "message_id": message_id,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+        "reply_markup": reply_markup,
+    }
+    try:
+        r = requests.post(tg_api("editMessageText"), json=payload, timeout=TG_TIMEOUT)
+        if r.status_code != 200:
+            _log_channel_pin_error(r.status_code, r.text)
+            return False
+        return True
+    except Exception:
+        logger.exception("editMessageText exception channel_id=%s message_id=%s", channel_id, message_id)
+        return False
+
+def ensure_channel_pin() -> None:
+    if CHANNEL_CHAT_ID is None:
+        logger.info("channel not configured, skip pin")
+        return
+    channel_id = CHANNEL_CHAT_ID
+    text, reply_markup = _channel_pin_payload()
+    state = _load_channel_pin_state()
+    pinned_id = state.get("pinned_message_id")
+    logger.info("ensure_channel_pin channel_id=%s pinned_message_id=%s", channel_id, pinned_id)
+    if pinned_id:
+        if _edit_channel_pin_message(channel_id, int(pinned_id), text, reply_markup):
+            pin_message(channel_id, int(pinned_id), silent=True)
+            _save_channel_pin_state({
+                "pinned_message_id": int(pinned_id),
+                "chat_id": channel_id,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            })
+            logger.info("ensure_channel_pin action=edit result=ok message_id=%s", pinned_id)
+            return
+        logger.warning("ensure_channel_pin action=edit result=failed message_id=%s", pinned_id)
+    message_id = _send_channel_pin_message(channel_id, text, reply_markup)
+    if not message_id:
+        logger.error("ensure_channel_pin action=send result=failed channel_id=%s", channel_id)
+        return
+    pin_message(channel_id, message_id, silent=True)
+    _save_channel_pin_state({
+        "pinned_message_id": message_id,
+        "chat_id": channel_id,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    })
+    logger.info("ensure_channel_pin action=send result=ok message_id=%s", message_id)
 
 def _channel_post_payload(require_photo: bool = False) -> Tuple[Optional[str], Optional[str], Optional[dict], Optional[str]]:
     photo = CHANNEL_POST_IMAGE or None
@@ -2791,6 +2919,22 @@ def analysis_keyboard(analysis_id: int, include_reanalyze: bool = False, review_
         rows.append([{"text": "🔄 Пересчитать", "callback_data": f"reanalyze_review:{review_id}"}])
     return {"inline_keyboard": rows}
 
+def navigation_keyboard() -> dict:
+    return {
+        "inline_keyboard": [
+            [{"text": "🗺 Яндекс Карты", "url": YANDEX_MAP_URL}],
+            [{"text": "🗺 2ГИС", "url": GIS_MAP_URL}],
+        ]
+    }
+
+def leave_review_keyboard() -> dict:
+    return {
+        "inline_keyboard": [
+            [{"text": "🟡 Яндекс Карты", "url": YANDEX_REVIEW_URL}],
+            [{"text": "🟢 2ГИС", "url": GIS_REVIEW_URL}],
+        ]
+    }
+
 # -----------------------------
 # UI texts
 # -----------------------------
@@ -3049,6 +3193,9 @@ STATE_ACCESS_ADD = "ACCESS_ADD"
 STATE_ACCESS_ADD_ROLE = "ACCESS_ADD_ROLE"
 STATE_ACCESS_ADD_NOTE = "ACCESS_ADD_NOTE"
 STATE_ACCESS_REMOVE = "ACCESS_REMOVE"
+STATE_WAIT_SERVICE_BOOKING = "WAIT_SERVICE_BOOKING"
+STATE_WAIT_PARTS_REQUEST = "WAIT_PARTS_REQUEST"
+STATE_WAIT_ASK_MASTER = "WAIT_ASK_MASTER"
 
 def _reset_state(chat_id: int) -> None:
     db_clear_session(chat_id)
@@ -3067,6 +3214,68 @@ def parse_kv_args(text: str) -> Tuple[Dict[str, str], str]:
         break
     rest = " ".join(parts[rest_start:])
     return kv, rest
+
+def _start_lead_flow(chat_id: int, state: str, title: str, prompt: str) -> None:
+    db_set_session(chat_id, state, {"source": "start_payload"})
+    send_message(chat_id, f"{title}\n\n{prompt}")
+
+def _handle_lead_payload(chat_id: int, user_id: int, payload: str) -> bool:
+    if payload == "service_booking":
+        _log_route("start_payload:service_booking", chat_id, user_id)
+        _start_lead_flow(
+            chat_id,
+            STATE_WAIT_SERVICE_BOOKING,
+            "🛠 Запись на сервис",
+            "Напишите, пожалуйста, марку/модель авто, желаемую дату и ваш контакт.",
+        )
+        return True
+    if payload == "parts_request":
+        _log_route("start_payload:parts_request", chat_id, user_id)
+        _start_lead_flow(
+            chat_id,
+            STATE_WAIT_PARTS_REQUEST,
+            "🧩 Запчасти / стоимость",
+            "Опишите нужные запчасти или услугу, укажите марку/модель и год авто.",
+        )
+        return True
+    if payload == "ask_master":
+        _log_route("start_payload:ask_master", chat_id, user_id)
+        _start_lead_flow(
+            chat_id,
+            STATE_WAIT_ASK_MASTER,
+            "💬 Вопрос мастеру",
+            "Напишите ваш вопрос. Мы передадим мастеру и вернёмся с ответом.",
+        )
+        return True
+    if payload == "how_to_find":
+        _log_route("start_payload:how_to_find", chat_id, user_id)
+        send_message(chat_id, "Адрес: Удмуртская, 10. Схему обновим.", reply_markup=navigation_keyboard())
+        return True
+    if payload == "leave_review":
+        _log_route("start_payload:leave_review", chat_id, user_id)
+        send_message(
+            chat_id,
+            "Спасибо за обратную связь! Выберите площадку, чтобы оставить отзыв.",
+            reply_markup=leave_review_keyboard(),
+        )
+        return True
+    return False
+
+def _handle_lead_message(chat_id: int, user: dict, state: str, text_clean: str) -> None:
+    kind_map = {
+        STATE_WAIT_SERVICE_BOOKING: "Запись на сервис",
+        STATE_WAIT_PARTS_REQUEST: "Запчасти / стоимость",
+        STATE_WAIT_ASK_MASTER: "Вопрос мастеру",
+    }
+    kind = kind_map.get(state, "Запрос")
+    name = _display_name(user)
+    notify_admins(
+        f"📩 Новый запрос: {kind}\n"
+        f"- Клиент: {name} (id={user.get('id')})\n"
+        f"- Текст: {text_clean}"
+    )
+    _reset_state(chat_id)
+    send_message(chat_id, "Спасибо! Мы получили сообщение и свяжемся с вами в рабочее время.")
 
 # -----------------------------
 # Background analysis
@@ -4368,6 +4577,9 @@ def telegram_webhook():
             _log_route("start", chat_id, user_id)
             logger.info("Dispatch: matched=/start")
             _reset_state(chat_id)
+            payload = cmd_args.split()[0] if cmd_args else ""
+            if payload and _handle_lead_payload(chat_id, user_id, payload):
+                return "ok"
             name = _display_name(user)
             send_message(
                 chat_id,
@@ -4381,6 +4593,17 @@ def telegram_webhook():
                 ),
                 reply_markup=main_menu_keyboard(),
             )
+            return "ok"
+
+        if sess and sess.get("state") in (
+            STATE_WAIT_SERVICE_BOOKING,
+            STATE_WAIT_PARTS_REQUEST,
+            STATE_WAIT_ASK_MASTER,
+        ):
+            if not text_clean:
+                send_message(chat_id, "Сообщение пустое. Напишите детали, пожалуйста.")
+                return "ok"
+            _handle_lead_message(chat_id, user, sess.get("state"), text_clean)
             return "ok"
 
         if _matches_label("instruction", text_clean, text_norm):
@@ -4972,6 +5195,7 @@ def telegram_webhook():
 # -----------------------------
 db_init()
 set_webhook_once()
+ensure_channel_pin()
 start_schedule_worker()
 
 if __name__ == "__main__":
