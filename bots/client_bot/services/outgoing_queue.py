@@ -1,3 +1,4 @@
+import html
 import json
 import logging
 import os
@@ -83,6 +84,8 @@ def enqueue_message(
     text: str,
     reply_markup: dict | None = None,
     disable_web_page_preview: bool = True,
+    parse_mode: str | None = "HTML",
+    allow_html: bool = False,
     message_key: str | None = None,
     ticket_id: str | None = None,
     timezone: str = "Europe/Moscow",
@@ -99,6 +102,8 @@ def enqueue_message(
         "text": text,
         "reply_markup": reply_markup,
         "disable_web_page_preview": disable_web_page_preview,
+        "parse_mode": parse_mode,
+        "allow_html": allow_html,
     }
     message_id = _next_outgoing_id(storage)
     storage["outgoing_messages"].append(
@@ -135,6 +140,8 @@ def enqueue_document(
     kind: str,
     file_path: str,
     caption: str | None,
+    parse_mode: str | None = "HTML",
+    allow_html: bool = False,
     message_key: str | None = None,
     ticket_id: str | None = None,
     timezone: str = "Europe/Moscow",
@@ -150,6 +157,8 @@ def enqueue_document(
         "method": "sendDocument",
         "file_path": file_path,
         "caption": caption,
+        "parse_mode": parse_mode,
+        "allow_html": allow_html,
     }
     message_id = _next_outgoing_id(storage)
     storage["outgoing_messages"].append(
@@ -173,12 +182,15 @@ def enqueue_document(
 def _attempt_send_message(target_chat_id: str, payload: dict[str, Any]) -> TgRequestResult:
     message_payload = {
         "chat_id": target_chat_id,
-        "text": payload.get("text", ""),
+        "text": html.escape(payload.get("text", "")) if not payload.get("allow_html") else payload.get("text", ""),
         "disable_web_page_preview": payload.get("disable_web_page_preview", True),
     }
     reply_markup = payload.get("reply_markup")
     if reply_markup:
         message_payload["reply_markup"] = reply_markup
+    parse_mode = payload.get("parse_mode") or "HTML"
+    if parse_mode:
+        message_payload["parse_mode"] = parse_mode
     return tg_request("sendMessage", message_payload)
 
 
@@ -189,7 +201,10 @@ def _attempt_send_document(target_chat_id: str, payload: dict[str, Any]) -> TgRe
     data: dict[str, Any] = {"chat_id": target_chat_id}
     caption = payload.get("caption")
     if caption:
-        data["caption"] = caption
+        data["caption"] = html.escape(caption) if not payload.get("allow_html") else caption
+        parse_mode = payload.get("parse_mode") or "HTML"
+        if parse_mode:
+            data["parse_mode"] = parse_mode
     with open(file_path, "rb") as file_handle:
         return tg_request("sendDocument", None, files={"document": file_handle}, data=data)
 
