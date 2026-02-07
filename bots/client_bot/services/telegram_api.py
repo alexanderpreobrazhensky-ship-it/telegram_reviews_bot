@@ -189,6 +189,69 @@ def send_document(
     return result.ok
 
 
+def send_photo(
+    chat_id: int | str,
+    photo: str,
+    caption: str | None = None,
+) -> TgRequestResult:
+    data: dict[str, Any] = {"chat_id": chat_id}
+    if caption:
+        data["caption"] = caption
+    if os.path.exists(photo):
+        try:
+            with open(photo, "rb") as file_handle:
+                return tg_request("sendPhoto", None, files={"photo": file_handle}, data=data)
+        except OSError as exc:
+            logger = logging.getLogger("client_bot")
+            logger.error("telegram sendPhoto file error chat_id=%s error=%s", chat_id, exc)
+            return TgRequestResult(False, False, None, str(exc))
+    payload: dict[str, Any] = {"chat_id": chat_id, "photo": photo}
+    if caption:
+        payload["caption"] = caption
+    return tg_request("sendPhoto", payload)
+
+
+def edit_message_text(
+    chat_id: int | str,
+    message_id: int,
+    text: str,
+) -> TgRequestResult:
+    payload: dict[str, Any] = {"chat_id": chat_id, "message_id": message_id, "text": text}
+    return tg_request("editMessageText", payload)
+
+
+def edit_message_caption(
+    chat_id: int | str,
+    message_id: int,
+    caption: str,
+) -> TgRequestResult:
+    payload: dict[str, Any] = {"chat_id": chat_id, "message_id": message_id, "caption": caption}
+    return tg_request("editMessageCaption", payload)
+
+
+def edit_message_media(
+    chat_id: int | str,
+    message_id: int,
+    photo_file_id: str,
+    caption: str | None = None,
+) -> TgRequestResult:
+    media: dict[str, Any] = {"type": "photo", "media": photo_file_id}
+    if caption:
+        media["caption"] = caption
+    payload: dict[str, Any] = {"chat_id": chat_id, "message_id": message_id, "media": media}
+    return tg_request("editMessageMedia", payload)
+
+
+def pin_chat_message(chat_id: int | str, message_id: int) -> TgRequestResult:
+    payload: dict[str, Any] = {"chat_id": chat_id, "message_id": message_id}
+    return tg_request("pinChatMessage", payload)
+
+
+def unpin_chat_message(chat_id: int | str, message_id: int) -> TgRequestResult:
+    payload: dict[str, Any] = {"chat_id": chat_id, "message_id": message_id}
+    return tg_request("unpinChatMessage", payload)
+
+
 def answer_callback_query(callback_query_id: str, text: str | None = None) -> bool:
     payload: dict[str, Any] = {"callback_query_id": callback_query_id}
     if text:
