@@ -92,10 +92,9 @@ const validateStep = (step) => {
   }
   if (step === 3) {
     const description = document.getElementById("description").value;
-    const name = document.getElementById("name").value;
     const phone = document.getElementById("phone").value;
-    if (isEmpty(description) || isEmpty(name) || isEmpty(phone)) {
-      setStatus("Заполните описание, имя и телефон.", true);
+    if (isEmpty(description) || isEmpty(phone)) {
+      setStatus("Заполните описание и телефон.", true);
       return false;
     }
     return true;
