@@ -827,13 +827,16 @@ def _prune_debounce_cache(now_value: float) -> None:
         CALLBACK_DEBOUNCE_CACHE.pop(key, None)
 
 
-def is_callback_debounced(callback: dict, logger: logging.Logger) -> bool:
+def is_callback_debounced(callback: dict, storage: dict, logger: logging.Logger) -> bool:
     from_user = callback.get("from", {})
     user_id = from_user.get("id")
     data = callback.get("data") or ""
     if data:
-        record_button_click(storage, data, callback.get("from", {}).get("id"))
-        save_storage(storage)
+        try:
+            record_button_click(storage, data, callback.get("from", {}).get("id"))
+            save_storage(storage)
+        except Exception as exc:
+            logger.exception("[client_bot] button click stats failed: %s", exc)
     if not user_id or not data:
         return False
     now_value = time.time()
@@ -3978,7 +3981,7 @@ def process_callback(
     callback = update.get("callback_query")
     if not callback:
         return False
-    if is_callback_debounced(callback, logger):
+    if is_callback_debounced(callback, storage, logger):
         callback_id = callback.get("id")
         if callback_id:
             answer_callback_query(token, callback_id)
