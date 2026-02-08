@@ -2833,9 +2833,23 @@ def register_webapp_routes(app: Flask, token: str, logger: logging.Logger) -> Fl
                 "form": request.form.to_dict(),
                 "initData": request.form.get("initData", ""),
             }
-        init_data = payload.get("initData") or ""
+        init_data = (request.headers.get("X-Telegram-Init-Data", "") or "").strip()
+        init_data = init_data or (payload.get("initData") or "").strip()
+        init_data = init_data or (request.form.get("initData") or "").strip()
         ok, parsed = verify_webapp_init_data(init_data, token)
         if not ok:
+            user_id = None
+            if isinstance(parsed.get("user"), str):
+                try:
+                    user_id = json.loads(parsed["user"]).get("id")
+                except (json.JSONDecodeError, TypeError):
+                    user_id = None
+            logger.info(
+                "webapp_submit invalid_init_data: present=%s len=%s user_id=%s",
+                bool(init_data),
+                len(init_data),
+                user_id,
+            )
             return jsonify({"ok": False, "error": "invalid_init_data"}), 403
         return handle_webapp_submission(parsed, payload.get("form") or {}, token, logger)
 

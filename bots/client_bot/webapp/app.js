@@ -211,13 +211,22 @@ const submitForm = async (event) => {
   if (!validateStep(3)) {
     return;
   }
+  const initData = (tg?.initData || "").trim();
+  if (!initData) {
+    setStatus("Откройте форму через кнопку бота (WebApp). В браузере отправка недоступна.", true);
+    tg?.showAlert?.("Откройте форму через кнопку бота (WebApp).");
+    return;
+  }
   setStatus("Отправляем заявку...");
   try {
     const response = await fetch("/api/webapp/submit", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "X-Telegram-Init-Data": initData,
+      },
       body: JSON.stringify({
-        initData: tg?.initData || "",
+        initData,
         form: buildPayload(),
       }),
     });
@@ -225,6 +234,10 @@ const submitForm = async (event) => {
     if (payload.ok) {
       setStatus("Заявка принята. Мы свяжемся с вами.");
       tg?.showAlert?.("Заявка принята. Мы свяжемся с вами.");
+      return;
+    }
+    if (response.status === 403 || payload.error === "invalid_init_data") {
+      setStatus("Сессия Telegram недействительна. Откройте WebApp заново из бота.", true);
       return;
     }
     setStatus("Не удалось отправить. Попробуйте позже.", true);
