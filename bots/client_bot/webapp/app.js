@@ -217,8 +217,8 @@ const submitForm = async (event) => {
   }
   const initData = (tg?.initData || "").trim();
   const sessionToken = sessionStorage.getItem(sessionTokenKey) || "";
-  if (!initData && !sessionToken) {
-    const message = "WebApp открыт вне Telegram. Откройте WebApp из бота.";
+  if (!initData || initData.length < 10) {
+    const message = "Сессия Telegram недействительна. Откройте WebApp заново из бота.";
     setStatus(message, true);
     tg?.showAlert?.(message);
     return;
@@ -237,24 +237,16 @@ const submitForm = async (event) => {
         form: buildPayload(),
       }),
     });
-    const payload = await response.json();
-    if (payload.ok) {
-      setStatus("Заявка принята. Мы свяжемся с вами.");
-      tg?.showAlert?.("Заявка принята. Мы свяжемся с вами.");
+    const payload = await response.json().catch(() => ({}));
+    if (response.status === 401 && payload.error === "SESSION_EXPIRED") {
+      const message = "Сессия Telegram недействительна. Откройте WebApp заново из бота.";
+      setStatus(message, true);
+      tg?.showAlert?.("Сессия истекла. Пожалуйста, откройте мини-приложение заново.");
       return;
     }
-    if (payload.error === "SESSION_INVALID") {
-      const reason = payload.reason;
-      let message = "Сессия Telegram недействительна. Откройте WebApp заново из бота.";
-      if (reason === "missing") {
-        message = "WebApp открыт вне Telegram. Откройте WebApp из бота.";
-      } else if (reason === "expired") {
-        message = "Сессия Telegram устарела. Откройте WebApp заново из бота.";
-      } else if (reason === "bad_hash") {
-        message = "Сессия Telegram недействительна. Откройте WebApp из этого бота заново.";
-      }
-      setStatus(message, true);
-      tg?.showAlert?.(message);
+    if (payload.ok === true) {
+      setStatus("Заявка принята. Мы свяжемся с вами.");
+      tg?.showAlert?.("Заявка принята.");
       return;
     }
     setStatus("Не удалось отправить. Попробуйте позже.", true);
@@ -278,8 +270,8 @@ const init = async () => {
   if (config.address && elements.addressText) {
     elements.addressText.textContent = `Адрес: ${config.address}`;
   }
-  if (!tg || !tg.initData) {
-    setStatus("WebApp открыт вне Telegram. Откройте WebApp из бота.", true);
+  if (!tg || !tg.initData || tg.initData.length < 10) {
+    setStatus("Сессия Telegram недействительна. Откройте WebApp заново из бота.", true);
     elements.submitButton.disabled = true;
   } else if (tg.initDataUnsafe?.auth_date) {
     const authDate = Number(tg.initDataUnsafe.auth_date);

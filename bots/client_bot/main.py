@@ -12,7 +12,7 @@ import re
 import threading
 import time
 import uuid
-from urllib.parse import parse_qsl
+from urllib.parse import parse_qsl, urlparse
 from collections import deque
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -281,6 +281,7 @@ SETTINGS_KEY_ROUTE_URL = "route_url"
 DB_OK = False
 DB_LAST_ERROR: str | None = None
 WEBAPP_INITDATA_CLOCK_SKEW_SECONDS = 120
+WEBAPP_SUBMIT_INITDATA_MAX_AGE_SECONDS = 300
 
 
 def resolve_database_url() -> str | None:
@@ -456,13 +457,7 @@ def ensure_core_settings_defaults() -> None:
     pin_version = (os.getenv("PIN_TEMPLATE_VERSION") or "v1").strip()
     if get_core_setting(CORE_SETTING_PIN_TEMPLATE_VERSION) is None:
         set_core_setting(CORE_SETTING_PIN_TEMPLATE_VERSION, pin_version)
-    webapp_url = (os.getenv("CLIENT_WEBAPP_URL") or os.getenv("WEBAPP_URL") or "").strip()
-    if not webapp_url:
-        base = PUBLIC_BASE_URL
-        if base:
-            if not base.startswith(("http://", "https://")):
-                base = f"https://{base}"
-            webapp_url = f"{base.rstrip('/')}{WEBAPP_PATH}"
+    webapp_url = normalize_webapp_url(os.getenv("CLIENT_WEBAPP_URL"))
     if webapp_url and get_core_setting(CORE_SETTING_WEBAPP_URL) is None:
         set_core_setting(CORE_SETTING_WEBAPP_URL, webapp_url)
 
@@ -525,34 +520,33 @@ def parse_int_maybe(value: object) -> int | None:
 
 def get_pinned_message_id() -> int | None:
     value = get_core_setting(CORE_SETTING_PINNED_MESSAGE_ID)
-    return parse_int_maybe(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return None
 
 
 def set_pinned_message_id(message_id: int) -> None:
     set_core_setting(CORE_SETTING_PINNED_MESSAGE_ID, str(message_id))
 
 
+def normalize_webapp_url(value: str | None) -> str | None:
+    raw = (value or "").strip()
+    if not raw:
+        return None
+    lowered = raw.lower()
+    if lowered.startswith("https://https://"):
+        raw = raw[len("https://") :]
+    if raw.startswith("http://"):
+        raw = f"https://{raw[len('http://'):]}"
+    if not raw.startswith("https://"):
+        raw = f"https://{raw}"
+    return raw.rstrip("/")
+
+
 def get_webapp_public_url() -> str | None:
-    value = (os.getenv("CLIENT_WEBAPP_URL") or os.getenv("WEBAPP_PUBLIC_URL") or os.getenv("WEBAPP_URL") or "").strip()
-    if value:
-        if value.startswith(("http://", "https://")):
-            return value.rstrip("/")
-        return f"https://{value.rstrip('/')}"
-    stored = get_persistent_setting(SETTINGS_KEY_WEBAPP_PUBLIC_URL)
-    if stored:
-        return stored
-    if PUBLIC_BASE_URL:
-        base = PUBLIC_BASE_URL
-        if not base.startswith(("http://", "https://")):
-            base = f"https://{base}"
-        return f"{base.rstrip('/')}{WEBAPP_PATH}"
-    if DOMAIN and WEBAPP_PATH:
-        if DOMAIN.startswith(("http://", "https://")):
-            base = DOMAIN.rstrip("/")
-        else:
-            base = f"https://{DOMAIN}"
-        return f"{base}{WEBAPP_PATH}"
-    return None
+    return normalize_webapp_url(os.getenv("CLIENT_WEBAPP_URL"))
 
 
 def get_route_url(storage: dict | None = None) -> str | None:
@@ -624,13 +618,10 @@ def build_logger(timezone: str) -> logging.Logger:
 def get_webapp_url() -> str | None:
     if not WEBAPP_ENABLED:
         return None
-    stored = get_core_setting(CORE_SETTING_WEBAPP_URL)
-    if stored:
-        return stored
-    url = (os.getenv("CLIENT_WEBAPP_URL") or os.getenv("WEBAPP_URL") or WEBAPP_URL).strip()
+    url = normalize_webapp_url(os.getenv("CLIENT_WEBAPP_URL"))
     if url:
         return url
-    return get_webapp_public_url()
+    return None
 
 
 def get_lira_phone() -> str | None:
@@ -2739,7 +2730,7 @@ def build_webapp_config() -> dict:
         "mapUrl": map_url or "",
         "yandexUrl": yandex_url,
         "googleUrl": google_url,
-        "sessionMaxAgeSeconds": CLIENT_WEBAPP_INITDATA_MAX_AGE_SECONDS,
+        "sessionMaxAgeSeconds": WEBAPP_SUBMIT_INITDATA_MAX_AGE_SECONDS,
     }
 
 
@@ -2926,6 +2917,19 @@ def register_webapp_routes(app: Flask, token: str, logger: logging.Logger) -> Fl
             return webapp_disabled_response()
         return send_from_directory(WEBAPP_DIR, filename)
 
+    @app.get("/api/webapp/health")
+    def webapp_health() -> object:
+        static_files = ["index.html", "app.css", "app.js"]
+        static_ok = WEBAPP_ENABLED and all(os.path.exists(os.path.join(WEBAPP_DIR, item)) for item in static_files)
+        config_ok = False
+        if WEBAPP_ENABLED:
+            try:
+                config_ok = isinstance(build_webapp_config(), dict)
+            except Exception:  # noqa: BLE001
+                config_ok = False
+        ok = static_ok and config_ok
+        return jsonify({"ok": ok, "static": static_ok, "config": config_ok})
+
     @app.get("/api/webapp/lookup")
     def webapp_lookup() -> object:
         if not WEBAPP_ENABLED:
@@ -2980,10 +2984,12 @@ def register_webapp_routes(app: Flask, token: str, logger: logging.Logger) -> Fl
             ok, parsed_token, reason = verify_webapp_session_token(session_token, secret)
             logger.info("webapp submit session token check: ok=%s reason=%s", ok, reason)
             if not ok:
-                return jsonify({"ok": False, "error": "SESSION_INVALID", "reason": reason}), 401
+                logger.info("webapp submit status=session_expired reason=%s", reason)
+                return jsonify({"ok": False, "error": "SESSION_EXPIRED"}), 401
             user_id = parse_int_maybe((parsed_token or {}).get("user_id"))
             if not user_id:
-                return jsonify({"ok": False, "error": "SESSION_INVALID", "reason": "user_missing"}), 401
+                logger.info("webapp submit status=session_expired reason=user_missing")
+                return jsonify({"ok": False, "error": "SESSION_EXPIRED"}), 401
             init_data = {"user": json.dumps({"id": user_id})}
             return handle_webapp_submission(init_data, payload.get("form") or {}, token, logger)
         init_data = (request.headers.get("X-Telegram-Init-Data", "") or "").strip()
@@ -2992,7 +2998,15 @@ def register_webapp_routes(app: Flask, token: str, logger: logging.Logger) -> Fl
         ok, parsed, reason, age_seconds = verify_webapp_init_data(init_data, token)
         logger.info("webapp submit initdata check: ok=%s reason=%s age=%s", ok, reason, age_seconds)
         if not ok:
-            return jsonify({"ok": False, "error": "SESSION_INVALID", "reason": reason}), 401
+            logger.info("webapp submit status=session_expired reason=%s", reason)
+            return jsonify({"ok": False, "error": "SESSION_EXPIRED"}), 401
+        if age_seconds is not None and age_seconds > WEBAPP_SUBMIT_INITDATA_MAX_AGE_SECONDS:
+            logger.info(
+                "webapp submit status=session_expired reason=age_exceeded age=%s limit=%s",
+                age_seconds,
+                WEBAPP_SUBMIT_INITDATA_MAX_AGE_SECONDS,
+            )
+            return jsonify({"ok": False, "error": "SESSION_EXPIRED"}), 401
         return handle_webapp_submission(parsed or {}, payload.get("form") or {}, token, logger)
 
     return app
@@ -3144,7 +3158,8 @@ def handle_webapp_submission(
     logger: logging.Logger,
 ) -> object:
     if not WEBAPP_ENABLED:
-        return jsonify({"ok": False, "error": "webapp_disabled"}), 403
+        logger.info("webapp submit status=error reason=webapp_disabled")
+        return jsonify({"ok": False, "error": "INTERNAL_ERROR"}), 500
     timezone = os.getenv("TIMEZONE", "Europe/Moscow")
     user_raw = init_data.get("user")
     try:
@@ -3152,18 +3167,22 @@ def handle_webapp_submission(
     except json.JSONDecodeError:
         user = {}
     if not user or not user.get("id"):
-        return jsonify({"ok": False, "error": "user_missing"}), 400
+        logger.info("webapp submit status=error reason=user_missing")
+        return jsonify({"ok": False, "error": "INTERNAL_ERROR"}), 500
     if not isinstance(form, dict):
-        return jsonify({"ok": False, "error": "invalid_form"}), 400
+        logger.info("webapp submit status=error reason=invalid_form")
+        return jsonify({"ok": False, "error": "INTERNAL_ERROR"}), 500
     required_fields = ["carPlate", "description", "phone"]
     if any(not str(form.get(field) or "").strip() for field in required_fields):
-        return jsonify({"ok": False, "error": "missing_required"}), 400
+        logger.info("webapp submit status=error reason=missing_required")
+        return jsonify({"ok": False, "error": "INTERNAL_ERROR"}), 500
     car_known = str(form.get("car_known") or "").strip().lower() in {"1", "true", "yes", "y"}
     form["car_known"] = car_known
     if not car_known:
         extra_fields = ["carMakeModel", "carYear"]
         if any(not str(form.get(field) or "").strip() for field in extra_fields):
-            return jsonify({"ok": False, "error": "missing_vehicle_details"}), 400
+            logger.info("webapp submit status=error reason=missing_vehicle_details")
+            return jsonify({"ok": False, "error": "INTERNAL_ERROR"}), 500
     storage = load_storage()
     ensure_storage_defaults(storage)
     ticket = build_ticket_from_webapp(form, user, timezone, storage)
@@ -3182,6 +3201,11 @@ def handle_webapp_submission(
         ticket_id=ticket.get("ticket_id"),
         message_key=f"ticket:{ticket['ticket_id']}:webapp",
     )
+    unreachable = storage.get("unreachable_users", {})
+    if unreachable:
+        unreachable_ids = ", ".join(sorted(unreachable.keys()))
+        logger.info("webapp submit unreachable recipients: %s", unreachable_ids)
+    logger.info("webapp submit status=success ticket_id=%s", ticket.get("ticket_id"))
     return jsonify({"ok": True, "ticket_id": ticket.get("ticket_id")})
 
 
@@ -5537,44 +5561,52 @@ def handle_admin_callback(
         )
         return True
     if data == "admin:webapp_smoke":
-        base_candidate = PUBLIC_BASE_URL or DOMAIN
-        if not base_candidate:
+        webapp_url = get_webapp_url()
+        if not webapp_url:
             send_message(
                 token,
                 chat_id,
-                "PUBLIC_BASE_URL/DOMAIN не задан. Укажите базовый URL для проверки статики.",
+                "CLIENT_WEBAPP_URL не задан. Укажите URL WebApp для проверки.",
                 reply_markup=build_admin_webapp_keyboard(),
             )
             return True
-        base = base_candidate
-        if not base.startswith(("http://", "https://")):
-            base = f"https://{base}"
-        endpoints = ["/WEBAPP", "/app.css", "/app.js", "/WEBAPP/config.json"]
-        results = []
+        parsed = urlparse(webapp_url)
+        if not parsed.scheme or not parsed.netloc:
+            send_message(
+                token,
+                chat_id,
+                "CLIENT_WEBAPP_URL некорректен. Проверьте значение (ожидается https://...).",
+                reply_markup=build_admin_webapp_keyboard(),
+            )
+            return True
+        base = f"{parsed.scheme}://{parsed.netloc}"
+        url = f"{base.rstrip('/')}/api/webapp/health"
         retry_schedule = [1, 2, 4]
-        for endpoint in endpoints:
-            url = f"{base.rstrip('/')}{endpoint}"
-            last_error = None
-            response = None
-            for attempt, delay in enumerate(retry_schedule, start=1):
-                try:
-                    response = requests.get(url, timeout=5)
-                    last_error = None
-                    break
-                except requests.ConnectionError:
-                    last_error = "ConnectionError"
-                except requests.RequestException as exc:
-                    last_error = exc.__class__.__name__
-                time.sleep(delay)
-            if response is not None:
-                results.append(f"{endpoint}: ok ({response.status_code})")
-            elif last_error == "ConnectionError":
-                results.append(
-                    f"{endpoint}: error (ConnectionError) after {len(retry_schedule)} retries → "
-                    "проверьте доступность URL извне, DNS, Railway domain, SSL"
-                )
-            else:
-                results.append(f"{endpoint}: error ({last_error}) after {len(retry_schedule)} retries")
+        response = None
+        last_error = None
+        for delay in retry_schedule:
+            try:
+                response = requests.get(url, timeout=5)
+                last_error = None
+                break
+            except requests.ConnectionError:
+                last_error = "ConnectionError"
+            except requests.RequestException as exc:
+                last_error = exc.__class__.__name__
+            time.sleep(delay)
+        if response is not None:
+            try:
+                payload = response.json()
+            except ValueError:
+                payload = None
+            results = [f"/api/webapp/health: ok ({response.status_code}) payload={payload}"]
+        elif last_error == "ConnectionError":
+            results = [
+                f"/api/webapp/health: error (ConnectionError) after {len(retry_schedule)} retries → "
+                "проверьте доступность URL извне, DNS, Railway domain, SSL"
+            ]
+        else:
+            results = [f"/api/webapp/health: error ({last_error}) after {len(retry_schedule)} retries"]
         send_message(
             token,
             chat_id,
