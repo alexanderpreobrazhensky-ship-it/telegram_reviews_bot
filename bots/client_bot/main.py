@@ -244,9 +244,9 @@ WEBAPP_ENABLED = (
 # ENV (client WebApp):
 # - CLIENT_TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN_CLIENT: client_bot token (required).
 # - CLIENT_WEBAPP_ENABLED=1: enable WebApp routes.
-# - CLIENT_WEBAPP_INITDATA_MAX_AGE_SECONDS (default 86400): initData TTL (seconds).
+# - CLIENT_WEBAPP_INITDATA_MAX_AGE_SECONDS (default 900): initData TTL (seconds).
 # - PUBLIC_BASE_URL / DOMAIN: used for public WebApp links.
-CLIENT_WEBAPP_INITDATA_MAX_AGE_SECONDS = int(os.getenv("CLIENT_WEBAPP_INITDATA_MAX_AGE_SECONDS") or "86400")
+CLIENT_WEBAPP_INITDATA_MAX_AGE_SECONDS = int(os.getenv("CLIENT_WEBAPP_INITDATA_MAX_AGE_SECONDS") or "900")
 WEBAPP_URL = (os.getenv("CLIENT_WEBAPP_URL") or os.getenv("WEBAPP_URL") or "").strip()
 MASTER_CHAT_MODE = (os.getenv("CLIENT_MASTER_CHAT_MODE") or os.getenv("MASTER_CHAT_MODE") or "OFF").strip().upper()
 MASTER_CHAT_ID_ENV = (os.getenv("CLIENT_MASTER_CHAT_ID") or os.getenv("MASTER_CHAT_ID") or "").strip()
@@ -509,13 +509,21 @@ def get_master_inbox_title() -> str | None:
     return get_persistent_setting(SETTINGS_KEY_MASTER_CHAT_TITLE)
 
 
+def parse_int_maybe(value: object) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.lstrip("-").isdigit():
+            return int(stripped)
+    return None
+
+
 def get_pinned_message_id() -> int | None:
     value = get_core_setting(CORE_SETTING_PINNED_MESSAGE_ID)
-    if value and value.isdigit():
-        return int(value)
-    if value and value.lstrip("-").isdigit():
-        return int(value)
-    return None
+    return parse_int_maybe(value)
 
 
 def set_pinned_message_id(message_id: int) -> None:
@@ -1367,6 +1375,19 @@ def mark_unreachable_user(storage: dict, chat_id: int, timezone: str, reason: st
     save_storage(storage)
 
 
+def build_unreachable_users_text(storage: dict) -> str:
+    unreachable = storage.get("unreachable_users", {})
+    if not unreachable:
+        return "Недоступные получатели: пусто."
+    lines = ["Недоступные получатели:"]
+    for chat_id in sorted(unreachable.keys(), key=lambda value: int(value) if str(value).isdigit() else value):
+        entry = unreachable.get(chat_id, {})
+        reason = entry.get("reason") or "—"
+        marked_at = entry.get("marked_at") or "—"
+        lines.append(f"- {chat_id}: {reason} (marked_at: {marked_at})")
+    return "\n".join(lines)
+
+
 def get_admin_session(storage: dict, chat_id: int) -> dict:
     ensure_storage_defaults(storage)
     return storage.setdefault("admin_sessions", {}).get(str(chat_id), {"state": ADMIN_STATE_NONE})
@@ -1786,6 +1807,9 @@ def build_admin_settings_keyboard() -> dict:
             ],
             [
                 {"text": "📄 Логи", "callback_data": "admin:logs"},
+            ],
+            [
+                {"text": "🚫 Недоступные получатели", "callback_data": "admin:unreachable"},
             ],
             [
                 {"text": "⬅️ Назад", "callback_data": "admin:menu"},
@@ -2713,6 +2737,7 @@ def build_webapp_config() -> dict:
         "mapUrl": map_url or "",
         "yandexUrl": yandex_url,
         "googleUrl": google_url,
+        "sessionMaxAgeSeconds": CLIENT_WEBAPP_INITDATA_MAX_AGE_SECONDS,
     }
 
 
@@ -2745,34 +2770,34 @@ def set_webhook(token: str, logger: logging.Logger) -> None:
         logger.warning("webhook set failed: %s", result.error or result.response_json)
 
 
-def verify_webapp_init_data(init_data: str, token: str) -> tuple[bool, str, dict]:
+def verify_webapp_init_data(init_data: str, token: str) -> tuple[bool, dict | None, str, int | None]:
     if not init_data:
-        return False, "missing_init_data", {}
+        return False, None, "missing", None
     try:
         parsed_pairs = parse_qsl(init_data, keep_blank_values=True)
     except ValueError:
-        return False, "bad_signature", {}
+        return False, None, "parse_error", None
     parsed = dict(parsed_pairs)
     received_hash = parsed.pop("hash", None)
     if not received_hash:
-        return False, "missing_hash", parsed
+        return False, parsed, "parse_error", None
     auth_date_raw = parsed.get("auth_date")
     if auth_date_raw is None:
-        return False, "missing_auth_date", parsed
+        return False, parsed, "parse_error", None
     try:
         auth_date = int(auth_date_raw)
     except (TypeError, ValueError):
-        return False, "bad_auth_date", parsed
+        return False, parsed, "parse_error", None
     data_check = "\n".join(f"{key}={value}" for key, value in sorted(parsed.items()))
     secret_key = hmac.new(b"WebAppData", token.encode("utf-8"), hashlib.sha256).digest()
     expected_hash = hmac.new(secret_key, data_check.encode("utf-8"), hashlib.sha256).hexdigest()
     if not hmac.compare_digest(expected_hash, received_hash):
-        return False, "bad_signature", parsed
+        return False, parsed, "bad_hash", None
     now = int(time.time())
     age = now - auth_date
     if age < -WEBAPP_INITDATA_CLOCK_SKEW_SECONDS or age > CLIENT_WEBAPP_INITDATA_MAX_AGE_SECONDS:
-        return False, "expired", parsed
-    return True, "ok", parsed
+        return False, parsed, "expired", age
+    return True, parsed, "ok", age
 
 
 def register_webapp_routes(app: Flask, token: str, logger: logging.Logger) -> Flask:
@@ -2859,18 +2884,11 @@ def register_webapp_routes(app: Flask, token: str, logger: logging.Logger) -> Fl
         init_data = (request.headers.get("X-Telegram-Init-Data", "") or "").strip()
         init_data = init_data or (payload.get("initData") or "").strip()
         init_data = init_data or (request.form.get("initData") or "").strip()
-        ok, reason, parsed = verify_webapp_init_data(init_data, token)
-        auth_date_raw = parsed.get("auth_date")
-        try:
-            auth_date = int(auth_date_raw) if auth_date_raw is not None else None
-        except (TypeError, ValueError):
-            auth_date = None
-        age = int(time.time()) - auth_date if auth_date is not None else None
-        logger.info("webapp submit initdata check: ok=%s reason=%s age=%s", ok, reason, age)
+        ok, parsed, reason, age_seconds = verify_webapp_init_data(init_data, token)
+        logger.info("webapp submit initdata check: ok=%s reason=%s age=%s", ok, reason, age_seconds)
         if not ok:
-            error_code = "init_data_expired" if reason == "expired" else "invalid_init_data"
-            return jsonify({"ok": False, "error": error_code}), 403
-        return handle_webapp_submission(parsed, payload.get("form") or {}, token, logger)
+            return jsonify({"ok": False, "error": "invalid_init_data", "reason": reason}), 403
+        return handle_webapp_submission(parsed or {}, payload.get("form") or {}, token, logger)
 
     return app
 
@@ -5413,30 +5431,48 @@ def handle_admin_callback(
         )
         return True
     if data == "admin:webapp_smoke":
-        if not PUBLIC_BASE_URL:
+        base_candidate = PUBLIC_BASE_URL or DOMAIN
+        if not base_candidate:
             send_message(
                 token,
                 chat_id,
-                "PUBLIC_BASE_URL не задан. Укажите базовый URL для проверки статики.",
+                "PUBLIC_BASE_URL/DOMAIN не задан. Укажите базовый URL для проверки статики.",
                 reply_markup=build_admin_webapp_keyboard(),
             )
             return True
-        base = PUBLIC_BASE_URL
+        base = base_candidate
         if not base.startswith(("http://", "https://")):
             base = f"https://{base}"
-        endpoints = ["/WEBAPP", "/app.css", "/app.js"]
+        endpoints = ["/WEBAPP", "/app.css", "/app.js", "/WEBAPP/config.json"]
         results = []
+        retry_schedule = [1, 2, 4]
         for endpoint in endpoints:
             url = f"{base.rstrip('/')}{endpoint}"
-            try:
-                response = requests.get(url, timeout=5)
-                results.append(f"{endpoint}: {response.status_code}")
-            except requests.RequestException as exc:
-                results.append(f"{endpoint}: error ({exc.__class__.__name__})")
+            last_error = None
+            response = None
+            for attempt, delay in enumerate(retry_schedule, start=1):
+                try:
+                    response = requests.get(url, timeout=5)
+                    last_error = None
+                    break
+                except requests.ConnectionError:
+                    last_error = "ConnectionError"
+                except requests.RequestException as exc:
+                    last_error = exc.__class__.__name__
+                time.sleep(delay)
+            if response is not None:
+                results.append(f"{endpoint}: ok ({response.status_code})")
+            elif last_error == "ConnectionError":
+                results.append(
+                    f"{endpoint}: error (ConnectionError) after {len(retry_schedule)} retries → "
+                    "проверьте доступность URL извне, DNS, Railway domain, SSL"
+                )
+            else:
+                results.append(f"{endpoint}: error ({last_error}) after {len(retry_schedule)} retries")
         send_message(
             token,
             chat_id,
-            "WebApp smoke:\n" + "\n".join(results),
+            f"WebApp smoke (base={base}):\n" + "\n".join(results),
             reply_markup=build_admin_webapp_keyboard(),
         )
         return True
@@ -6126,6 +6162,9 @@ def handle_admin_callback(
     if data == "admin:logs:download":
         log_path = os.path.join(os.path.dirname(__file__), "logs", "client_bot.log")
         send_document(token, chat_id, log_path, caption="client_bot.log")
+        return True
+    if data == "admin:unreachable":
+        send_message(token, chat_id, build_unreachable_users_text(storage), reply_markup=build_admin_settings_keyboard())
         return True
     if data == "admin:blocklist":
         blocklist = [int(item) for item in storage.get("blocklist", []) if str(item).isdigit()]

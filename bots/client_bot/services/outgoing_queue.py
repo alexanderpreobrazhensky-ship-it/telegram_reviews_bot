@@ -55,6 +55,17 @@ def _maybe_notify_admins_unreachable(storage: dict, timezone: str, chat_id: str)
     save_storage(storage)
 
 
+def _extract_unreachable_reason(result: TgRequestResult) -> str | None:
+    if result.status_code not in {400, 403}:
+        return None
+    error_text = (result.error or "").lower()
+    if "bot can't initiate conversation with a user" in error_text:
+        return "bot can't initiate conversation with a user"
+    if "chat not found" in error_text:
+        return "chat not found"
+    return None
+
+
 def is_queue_enabled() -> bool:
     return os.getenv("CLIENT_TG_QUEUE_ENABLED", "1") != "0"
 
@@ -266,9 +277,23 @@ def process_outgoing_queue(
         else:
             error_message = result.error or "unknown_error"
             message["last_error"] = error_message
-            if result.status_code == 403:
-                _mark_unreachable_user(storage, target_chat_id, timezone, error_message)
+            unreachable_reason = _extract_unreachable_reason(result)
+            if unreachable_reason:
+                _mark_unreachable_user(storage, target_chat_id, timezone, unreachable_reason)
                 _maybe_notify_admins_unreachable(storage, timezone, target_chat_id)
+                message["status"] = "failed"
+                message["next_retry_at"] = None
+                failed += 1
+                logger.warning(
+                    "outgoing message failed id=%s chat_id=%s kind=%s attempt=%s error=%s",
+                    message.get("id"),
+                    target_chat_id,
+                    message.get("kind"),
+                    attempts,
+                    error_message,
+                )
+                updated = True
+                continue
             if result.retryable and attempts < retry_max:
                 message["status"] = "pending"
                 retry_after = result.retry_after_seconds
