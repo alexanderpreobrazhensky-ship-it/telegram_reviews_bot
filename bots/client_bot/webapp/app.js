@@ -28,22 +28,53 @@ const elements = {
   addressText: document.getElementById("addressText"),
 };
 
-const updateTheme = () => {
-  if (!tg?.themeParams) {
-    return;
+const defaultThemes = {
+  light: {
+    bg: "#f3f4f6",
+    text: "#151922",
+    hint: "#667085",
+    card: "#ffffff",
+    stroke: "rgba(16, 24, 40, 0.12)",
+    primary: "#2c58ff",
+    primaryText: "#ffffff",
+    bgAccent: "#e6ebf2",
+  },
+  dark: {
+    bg: "#0b0f13",
+    text: "#f3f6fb",
+    hint: "#a7b0bd",
+    card: "rgba(19, 26, 36, 0.92)",
+    stroke: "rgba(255, 255, 255, 0.1)",
+    primary: "#7aa6ff",
+    primaryText: "#0b0f13",
+    bgAccent: "#111823",
+  },
+};
+
+const applyTheme = () => {
+  const scheme = tg?.colorScheme === "dark" ? "dark" : "light";
+  const defaults = defaultThemes[scheme];
+  const params = tg?.themeParams || {};
+  const root = document.documentElement;
+  root.style.setProperty("--bg", params.bg_color || defaults.bg);
+  root.style.setProperty("--text", params.text_color || defaults.text);
+  root.style.setProperty("--hint", params.hint_color || defaults.hint);
+  root.style.setProperty("--card", params.secondary_bg_color || defaults.card);
+  root.style.setProperty("--stroke", params.section_separator_color || defaults.stroke);
+  root.style.setProperty("--primary", params.button_color || defaults.primary);
+  root.style.setProperty("--primaryText", params.button_text_color || defaults.primaryText);
+  root.style.setProperty("--bg-accent", params.bg_color || defaults.bgAccent);
+  if (tg?.setBackgroundColor) {
+    tg.setBackgroundColor(params.bg_color || defaults.bg);
   }
-  const params = tg.themeParams;
-  if (params.bg_color) {
-    document.documentElement.style.setProperty("--bg", params.bg_color);
-  }
-  if (params.text_color) {
-    document.documentElement.style.setProperty("--text", params.text_color);
+  if (tg?.setHeaderColor) {
+    tg.setHeaderColor(params.bg_color || defaults.bg);
   }
 };
 
 const fetchConfig = async () => {
   try {
-    const response = await fetch("./config.json", { cache: "no-store" });
+    const response = await fetch("/WEBAPP/config.json", { cache: "no-store" });
     if (!response.ok) {
       return baseConfig;
     }
@@ -206,7 +237,8 @@ const submitForm = async (event) => {
 const init = async () => {
   tg?.ready();
   tg?.expand();
-  updateTheme();
+  applyTheme();
+  tg?.onEvent?.("themeChanged", applyTheme);
   showStep(1);
 
   const config = await fetchConfig();

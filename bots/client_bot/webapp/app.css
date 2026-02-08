@@ -1,14 +1,14 @@
 :root {
-  color-scheme: dark;
-  --bg: #0b0f13;
-  --bg-accent: #111823;
-  --card: rgba(19, 26, 36, 0.92);
-  --card-border: rgba(255, 255, 255, 0.08);
-  --text: #f3f6fb;
-  --muted: #a7b0bd;
-  --accent: #7aa6ff;
-  --accent-strong: #99baff;
-  --shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+  color-scheme: light dark;
+  --bg: #f3f4f6;
+  --text: #151922;
+  --hint: #667085;
+  --card: #ffffff;
+  --stroke: rgba(16, 24, 40, 0.12);
+  --primary: #2c58ff;
+  --primaryText: #ffffff;
+  --bg-accent: #e6ebf2;
+  --shadow: 0 24px 60px rgba(15, 23, 42, 0.12);
   --radius: 20px;
 }
 
@@ -19,8 +19,8 @@
 body {
   margin: 0;
   font-family: "Inter", "SF Pro Display", system-ui, -apple-system, sans-serif;
-  background: radial-gradient(1200px 900px at 10% 10%, rgba(60, 90, 140, 0.3), transparent 60%),
-    radial-gradient(1000px 700px at 90% 20%, rgba(40, 60, 100, 0.32), transparent 55%),
+  background: radial-gradient(1200px 900px at 10% 10%, color-mix(in srgb, var(--primary) 30%, transparent), transparent 60%),
+    radial-gradient(1000px 700px at 90% 20%, color-mix(in srgb, var(--primary) 18%, transparent), transparent 55%),
     linear-gradient(160deg, var(--bg) 0%, var(--bg-accent) 100%);
   color: var(--text);
   min-height: 100vh;
@@ -36,7 +36,7 @@ body {
 .card {
   backdrop-filter: blur(18px);
   background: var(--card);
-  border: 1px solid var(--card-border);
+  border: 1px solid var(--stroke);
   border-radius: var(--radius);
   padding: 28px 24px 24px;
   box-shadow: var(--shadow);
@@ -51,7 +51,7 @@ body {
   font-size: 12px;
   text-transform: uppercase;
   letter-spacing: 0.22em;
-  color: var(--muted);
+  color: var(--hint);
 }
 
 h1 {
@@ -64,7 +64,7 @@ h1 {
 .subtitle {
   margin: 0;
   font-size: 14px;
-  color: var(--muted);
+  color: var(--hint);
 }
 
 .form {
@@ -102,15 +102,15 @@ h2 {
 
 .field label {
   font-size: 13px;
-  color: var(--muted);
+  color: var(--hint);
 }
 
 .field input,
 .field textarea {
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  border: 1px solid var(--stroke);
   border-radius: 14px;
   padding: 14px 16px;
-  background: rgba(9, 13, 18, 0.7);
+  background: color-mix(in srgb, var(--card) 88%, var(--bg));
   color: var(--text);
   font-size: 15px;
 }
@@ -128,7 +128,7 @@ h2 {
 .hint {
   margin: 0;
   font-size: 12px;
-  color: var(--muted);
+  color: var(--hint);
 }
 
 .grid {
@@ -144,31 +144,31 @@ h2 {
 }
 
 .option {
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  border: 1px solid var(--stroke);
   border-radius: 16px;
   padding: 14px 16px;
   display: flex;
   gap: 10px;
   align-items: center;
-  background: rgba(10, 14, 20, 0.6);
+  background: color-mix(in srgb, var(--card) 90%, var(--bg));
   cursor: pointer;
 }
 
 .option input {
-  accent-color: var(--accent);
+  accent-color: var(--primary);
 }
 
 .known-car {
-  border: 1px solid rgba(122, 166, 255, 0.35);
+  border: 1px solid color-mix(in srgb, var(--primary) 45%, var(--stroke));
   border-radius: 16px;
   padding: 14px 16px;
-  background: rgba(20, 28, 42, 0.7);
+  background: color-mix(in srgb, var(--primary) 10%, var(--card));
 }
 
 .known-title {
   margin: 0 0 6px;
   font-size: 13px;
-  color: var(--muted);
+  color: var(--hint);
 }
 
 .known-data {
@@ -189,19 +189,20 @@ button {
   font-size: 15px;
   font-weight: 600;
   color: var(--text);
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.02));
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12), 0 12px 20px rgba(0, 0, 0, 0.35);
+  background: linear-gradient(180deg, color-mix(in srgb, var(--card) 94%, var(--bg)), color-mix(in srgb, var(--card) 70%, var(--bg)));
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--text) 8%, transparent), 0 12px 20px rgba(15, 23, 42, 0.18);
   transition: transform 0.15s ease, box-shadow 0.15s ease;
 }
 
 button.primary {
-  background: linear-gradient(180deg, rgba(122, 166, 255, 0.3), rgba(20, 30, 46, 0.9));
-  border: 1px solid rgba(122, 166, 255, 0.35);
+  background: linear-gradient(180deg, color-mix(in srgb, var(--primary) 85%, #ffffff), var(--primary));
+  border: 1px solid color-mix(in srgb, var(--primary) 70%, var(--stroke));
+  color: var(--primaryText);
 }
 
 button.ghost {
-  background: rgba(12, 16, 24, 0.6);
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: color-mix(in srgb, var(--card) 92%, var(--bg));
+  border: 1px solid var(--stroke);
 }
 
 button:active {
@@ -212,13 +213,13 @@ button:active {
 .status {
   min-height: 18px;
   font-size: 13px;
-  color: var(--muted);
+  color: var(--hint);
 }
 
 .footer {
   margin-top: 20px;
   font-size: 13px;
-  color: var(--muted);
+  color: var(--hint);
 }
 
 @media (max-width: 480px) {
