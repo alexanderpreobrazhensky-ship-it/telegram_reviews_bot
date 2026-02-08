@@ -18,6 +18,7 @@ class WebAppSubmitValidationTestCase(unittest.TestCase):
         payload = response.get_json()
         self.assertIsNotNone(payload)
         self.assertEqual(payload.get("error"), "invalid_init_data")
+        self.assertEqual(payload.get("reason"), "missing")
 
 
 if __name__ == "__main__":

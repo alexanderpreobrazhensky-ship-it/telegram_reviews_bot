@@ -6,11 +6,13 @@ const baseConfig = {
   mapUrl: "",
   yandexUrl: "",
   googleUrl: "",
+  sessionMaxAgeSeconds: 900,
 };
 
 const state = {
   step: 1,
   carKnown: false,
+  sessionMaxAgeSeconds: 900,
 };
 
 const elements = {
@@ -213,8 +215,9 @@ const submitForm = async (event) => {
   }
   const initData = (tg?.initData || "").trim();
   if (!initData) {
-    setStatus("Откройте форму через кнопку бота (WebApp). В браузере отправка недоступна.", true);
-    tg?.showAlert?.("Откройте форму через кнопку бота (WebApp).");
+    const message = "WebApp открыт вне Telegram. Откройте WebApp из бота.";
+    setStatus(message, true);
+    tg?.showAlert?.(message);
     return;
   }
   setStatus("Отправляем заявку...");
@@ -237,10 +240,15 @@ const submitForm = async (event) => {
       return;
     }
     if (response.status === 403) {
-      const message =
-        payload.error === "init_data_expired"
-          ? "Сессия устарела. Откройте WebApp заново из бота."
-          : "Сессия Telegram недействительна. Откройте WebApp заново из бота.";
+      const reason = payload.reason;
+      let message = "Сессия Telegram недействительна. Откройте WebApp заново из бота.";
+      if (reason === "missing") {
+        message = "WebApp открыт вне Telegram. Откройте WebApp из бота.";
+      } else if (reason === "expired") {
+        message = "Сессия Telegram устарела. Откройте WebApp заново из бота.";
+      } else if (reason === "bad_hash") {
+        message = "Сессия Telegram недействительна. Откройте WebApp из этого бота заново.";
+      }
       setStatus(message, true);
       tg?.showAlert?.(message);
       return;
@@ -260,8 +268,24 @@ const init = async () => {
   showStep(1);
 
   const config = await fetchConfig();
+  if (Number.isFinite(config.sessionMaxAgeSeconds)) {
+    state.sessionMaxAgeSeconds = Number(config.sessionMaxAgeSeconds);
+  }
   if (config.address && elements.addressText) {
     elements.addressText.textContent = `Адрес: ${config.address}`;
+  }
+  if (!tg || !tg.initData) {
+    setStatus("WebApp открыт вне Telegram. Откройте WebApp из бота.", true);
+    elements.submitButton.disabled = true;
+  } else if (tg.initDataUnsafe?.auth_date) {
+    const authDate = Number(tg.initDataUnsafe.auth_date);
+    if (Number.isFinite(authDate)) {
+      const ageSeconds = Math.floor(Date.now() / 1000) - authDate;
+      if (ageSeconds > state.sessionMaxAgeSeconds) {
+        setStatus("Сессия Telegram устарела. Откройте WebApp заново из бота.", true);
+        elements.submitButton.disabled = true;
+      }
+    }
   }
 
   elements.backButton.addEventListener("click", () => {
