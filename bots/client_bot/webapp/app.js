@@ -236,8 +236,13 @@ const submitForm = async (event) => {
       tg?.showAlert?.("Заявка принята. Мы свяжемся с вами.");
       return;
     }
-    if (response.status === 403 || payload.error === "invalid_init_data") {
-      setStatus("Сессия Telegram недействительна. Откройте WebApp заново из бота.", true);
+    if (response.status === 403) {
+      const message =
+        payload.error === "init_data_expired"
+          ? "Сессия устарела. Откройте WebApp заново из бота."
+          : "Сессия Telegram недействительна. Откройте WebApp заново из бота.";
+      setStatus(message, true);
+      tg?.showAlert?.(message);
       return;
     }
     setStatus("Не удалось отправить. Попробуйте позже.", true);
