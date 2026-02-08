@@ -844,6 +844,11 @@ def _log_channel_pin_error(status: int, body: str) -> None:
     else:
         logger.error("Channel pin failed status=%s body=%s", status, _redact(body[:800]))
 
+
+def _is_reply_markup_error(body: str) -> bool:
+    lowered = body.lower()
+    return "button_type_invalid" in lowered or "reply_markup" in lowered or "reply markup" in lowered
+
 def _send_channel_pin_message(channel_id: int, text: str, reply_markup: dict) -> Optional[int]:
     payload = {
         "chat_id": channel_id,
@@ -855,6 +860,14 @@ def _send_channel_pin_message(channel_id: int, text: str, reply_markup: dict) ->
     try:
         r = requests.post(tg_api("sendMessage"), json=payload, timeout=TG_TIMEOUT)
         if r.status_code != 200:
+            if r.status_code == 400 and _is_reply_markup_error(r.text):
+                logger.warning("Channel pin invalid markup; retrying without keyboard")
+                fallback_payload = {**payload}
+                fallback_payload.pop("reply_markup", None)
+                fallback = requests.post(tg_api("sendMessage"), json=fallback_payload, timeout=TG_TIMEOUT)
+                if fallback.status_code == 200:
+                    data = fallback.json()
+                    return (data.get("result") or {}).get("message_id")
             _log_channel_pin_error(r.status_code, r.text)
             return None
         data = r.json()
@@ -875,6 +888,13 @@ def _edit_channel_pin_message(channel_id: int, message_id: int, text: str, reply
     try:
         r = requests.post(tg_api("editMessageText"), json=payload, timeout=TG_TIMEOUT)
         if r.status_code != 200:
+            if r.status_code == 400 and _is_reply_markup_error(r.text):
+                logger.warning("Channel pin invalid markup on edit; retrying without keyboard")
+                fallback_payload = {**payload}
+                fallback_payload.pop("reply_markup", None)
+                fallback = requests.post(tg_api("editMessageText"), json=fallback_payload, timeout=TG_TIMEOUT)
+                if fallback.status_code == 200:
+                    return True
             _log_channel_pin_error(r.status_code, r.text)
             return False
         return True
@@ -5260,11 +5280,13 @@ def setup_client_bot() -> None:
     client_logger = logging.getLogger("client_bot")
     client_bot_main.register_webapp_routes(app, token, client_logger)
     if mode == "webhook":
+        client_logger.info("client_bot mode=webhook")
         client_bot_main.register_webhook_route(app, token, client_logger)
         client_bot_main.set_webhook(token, client_logger)
     else:
         if mode != "polling":
             client_logger.warning("client_bot unknown mode=%s, defaulting to polling", mode)
+        client_logger.info("client_bot mode=polling")
         client_bot_main.start_polling_background()
 
 

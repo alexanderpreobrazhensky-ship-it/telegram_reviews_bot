@@ -113,11 +113,12 @@ PIN_POST_BUTTONS = [
     {"text": "⚙️ Подбор запчастей", "action": "start_parts"},
     {"text": "💬 Вопрос мастеру", "action": "start_question"},
 ]
-AUTO_PIN_ON_DEPLOY = (
-    os.getenv("CLIENT_AUTO_PIN_ON_DEPLOY")
+AUTO_PIN_ON_START = (
+    os.getenv("CLIENT_AUTO_PIN_ON_START")
+    or os.getenv("CLIENT_AUTO_PIN_ON_DEPLOY")
     or os.getenv("AUTO_PIN_ON_DEPLOY")
     or os.getenv("AUTO_PIN_ON_START")
-    or "1"
+    or "0"
 ).strip().lower() not in {"0", "false", "no", "off", "disabled"}
 SHOW_ROUTE_IMAGE = (os.getenv("SHOW_ROUTE_IMAGE") or "0").strip().lower() in {"1", "true", "yes"}
 
@@ -151,6 +152,8 @@ ADMIN_STATE_POST_EDIT_CONFIRM = "await_post_edit_confirm"
 ADMIN_STATE_POST_RESCHEDULE = "await_post_reschedule"
 ADMIN_STATE_MASTER_INBOX_FORWARD = "await_master_inbox_forward"
 ADMIN_STATE_MASTER_INBOX_MANUAL = "await_master_inbox_manual"
+ADMIN_STATE_CHANNEL_BIND_FORWARD = "await_channel_bind_forward"
+ADMIN_STATE_ROUTE_URL = "await_route_url"
 ADMIN_STATE_EXPORT_RANGE = "await_export_range"
 ADMIN_STATE_EXPORT_STATUS = "await_export_status"
 ADMIN_STATE_EXPORT_FORMAT = "await_export_format"
@@ -226,7 +229,7 @@ RUN_MODE = (
     os.getenv("CLIENT_BOT_MODE")
     or os.getenv("CLIENT_RUN_MODE")
     or os.getenv("RUN_MODE")
-    or "webhook"
+    or "polling"
 ).strip().lower()
 PORT = int(os.getenv("PORT", "8000"))
 DOMAIN = (os.getenv("DOMAIN") or "").strip().rstrip("/")
@@ -265,6 +268,7 @@ SETTINGS_KEY_BRAND_TONE = "brand_tone"
 SETTINGS_KEY_PIN_TEMPLATE_VERSION = "pin_template_version"
 SETTINGS_KEY_SHOW_REGLAMENT_PHRASE = "show_reglament_phrase_enabled"
 SETTINGS_KEY_SHOW_ROUTE_IMAGE = "show_route_image_enabled"
+SETTINGS_KEY_ROUTE_URL = "route_url"
 
 DB_OK = False
 DB_LAST_ERROR: str | None = None
@@ -532,6 +536,28 @@ def get_webapp_public_url() -> str | None:
             base = f"https://{DOMAIN}"
         return f"{base}{WEBAPP_PATH}"
     return None
+
+
+def get_route_url(storage: dict | None = None) -> str | None:
+    value = (os.getenv("ROUTE_URL") or "").strip()
+    if value:
+        return value
+    stored = get_persistent_setting(SETTINGS_KEY_ROUTE_URL)
+    if stored and stored.strip():
+        return stored.strip()
+    if storage:
+        route_url = storage.get("settings", {}).get("route_url")
+        if isinstance(route_url, str) and route_url.strip():
+            return route_url.strip()
+    return None
+
+
+def set_route_url(value: str | None, storage: dict) -> None:
+    normalized = (value or "").strip()
+    if DB_OK:
+        set_persistent_setting(SETTINGS_KEY_ROUTE_URL, normalized or None)
+    storage.setdefault("settings", {})["route_url"] = normalized
+    save_storage(storage)
 
 
 def migrate_storage_settings_to_db(storage: dict) -> None:
@@ -1683,6 +1709,10 @@ def build_admin_main_keyboard() -> dict:
     return {
         "inline_keyboard": [
             [
+                {"text": "📌 Канал и закреп", "callback_data": "admin:channel"},
+                {"text": "🌐 WebApp", "callback_data": "admin:webapp"},
+            ],
+            [
                 {"text": "🧾 Очередь заявок", "callback_data": "admin:queue"},
                 {"text": "📊 Статистика кнопок", "callback_data": "admin:stats"},
             ],
@@ -1694,6 +1724,29 @@ def build_admin_main_keyboard() -> dict:
                 {"text": "⚙️ Настройки", "callback_data": "admin:settings"},
                 {"text": "❌ Закрыть", "callback_data": "admin:close"},
             ],
+        ]
+    }
+
+
+def build_admin_channel_keyboard() -> dict:
+    return {
+        "inline_keyboard": [
+            [{"text": "📩 Перешлите сообщение из канала", "callback_data": "admin:bind_forward"}],
+            [{"text": "🔗 Привязать через команду /bind", "callback_data": "admin:bind_in_channel_help"}],
+            [{"text": "📌 Создать/обновить закреп сейчас", "callback_data": "admin:pin_now"}],
+            [{"text": "📍 Поменять ROUTE_URL", "callback_data": "admin:route_url"}],
+            [{"text": "📎 Unpin (снять закреп)", "callback_data": "admin:unpin"}],
+            [{"text": "⬅️ Назад", "callback_data": "admin:menu"}],
+        ]
+    }
+
+
+def build_admin_webapp_keyboard() -> dict:
+    return {
+        "inline_keyboard": [
+            [{"text": "🌐 Открыть WebApp", "callback_data": "admin:webapp_open"}],
+            [{"text": "🧪 Проверка WebApp статики", "callback_data": "admin:webapp_smoke"}],
+            [{"text": "⬅️ Назад", "callback_data": "admin:menu"}],
         ]
     }
 
@@ -2705,6 +2758,29 @@ def register_webapp_routes(app: Flask, token: str, logger: logging.Logger) -> Fl
     def webapp_disabled_response() -> tuple[str, int]:
         return "WebApp disabled", 404
 
+    @app.get("/WEBAPP")
+    @app.get("/WEBAPP/")
+    def webapp_alias() -> object:
+        if not WEBAPP_ENABLED:
+            return webapp_disabled_response()
+        return send_from_directory(WEBAPP_DIR, "index.html")
+
+    @app.get("/app.css")
+    def webapp_css() -> object:
+        if not WEBAPP_ENABLED:
+            return webapp_disabled_response()
+        return send_from_directory(WEBAPP_DIR, "app.css")
+
+    @app.get("/app.js")
+    def webapp_js() -> object:
+        if not WEBAPP_ENABLED:
+            return webapp_disabled_response()
+        return send_from_directory(WEBAPP_DIR, "app.js")
+
+    @app.get("/favicon.ico")
+    def webapp_favicon() -> object:
+        return "", 204
+
     @app.get("/webapp")
     @app.get("/webapp/")
     def legacy_webapp_redirect() -> object:
@@ -2977,20 +3053,35 @@ def normalize_target_chat_id(raw_value: str) -> str | None:
     return None
 
 
-def build_pin_keyboard() -> dict:
-    webapp_url = get_webapp_url()
-    rows: list[list[dict]] = []
-    if webapp_url:
-        rows.append([{"text": PIN_POST_BUTTONS[0]["text"], "web_app": {"url": webapp_url}}])
-    else:
-        rows.append([{"text": PIN_POST_BUTTONS[0]["text"], "callback_data": PIN_POST_BUTTONS[0]["action"]}])
-    rows.append([{"text": PIN_POST_BUTTONS[1]["text"], "callback_data": PIN_POST_BUTTONS[1]["action"]}])
-    rows.append([{"text": PIN_POST_BUTTONS[2]["text"], "callback_data": PIN_POST_BUTTONS[2]["action"]}])
+def get_client_bot_username() -> str:
+    value = (
+        os.getenv("CLIENT_BOT_USERNAME")
+        or os.getenv("TELEGRAM_BOT_USERNAME")
+        or os.getenv("BOT_USERNAME")
+        or "Lira_chatclient_bot"
+    )
+    return value.lstrip("@")
+
+
+def build_deeplink_url(payload: str) -> str:
+    username = get_client_bot_username()
+    return f"https://t.me/{username}?start={payload}"
+
+
+def build_pin_keyboard(storage: dict) -> dict:
+    rows: list[list[dict]] = [
+        [{"text": "🛠 Записаться на обслуживание", "url": build_deeplink_url("booking")}],
+        [{"text": "⚙️ Подбор запчастей", "url": build_deeplink_url("parts")}],
+        [{"text": "💬 Вопрос мастеру", "url": build_deeplink_url("question")}],
+    ]
+    route_url = get_route_url(storage)
+    if route_url:
+        rows.append([{"text": "📍 Как доехать", "url": route_url}])
     return {"inline_keyboard": rows}
 
 
-def build_technical_post_payload() -> tuple[str, dict]:
-    return build_pin_text(), build_pin_keyboard()
+def build_technical_post_payload(storage: dict) -> tuple[str, dict]:
+    return build_pin_text(), build_pin_keyboard(storage)
 
 
 def get_posts_queue_file_path() -> str:
@@ -3125,7 +3216,7 @@ def create_technical_post(storage: dict, timezone: str, logger: logging.Logger) 
     target_chat_id = get_publication_channel_id(storage)
     if not target_chat_id:
         return False, "Сначала привяжите канал публикации."
-    text, keyboard = build_technical_post_payload()
+    text, keyboard = build_technical_post_payload(storage)
     ok, message_id, error = send_post_to_chat(
         target_chat_id,
         text,
@@ -3156,16 +3247,31 @@ def ensure_channel_pin(
     if not channel_id:
         logger.info("channel not configured, skip pin")
         return False, "⚠️ Канал не настроен."
-    text, keyboard = build_technical_post_payload()
-    message_id = None
-    if not force_new:
-        message_id = get_pinned_message_id()
+    text, keyboard = build_technical_post_payload(storage)
     payload = {
         "chat_id": channel_id,
         "text": text,
         "disable_web_page_preview": True,
         "reply_markup": keyboard,
     }
+    content_hash = hashlib.sha256(
+        json.dumps({"text": text, "keyboard": keyboard}, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    pinned_state = storage.setdefault("pinned_post", {})
+    last_hash = pinned_state.get("content_hash")
+    message_id = None
+    if not force_new:
+        message_id = get_pinned_message_id()
+    if message_id and last_hash == content_hash:
+        logger.info("pin skip: up-to-date channel_id=%s message_id=%s", channel_id, message_id)
+        return True, "✅ Закреп актуален."
+
+    def is_markup_error(result: TgRequestResult) -> bool:
+        if result.status_code != 400 or not result.error:
+            return False
+        lowered = result.error.lower()
+        return "button_type_invalid" in lowered or "reply_markup" in lowered or "reply markup" in lowered
+
     if message_id:
         logger.info("pin update start channel_id=%s message_id=%s", channel_id, message_id)
         edit_text_result = tg_request("editMessageText", {**payload, "message_id": message_id})
@@ -3178,17 +3284,33 @@ def ensure_channel_pin(
                     "reply_markup": keyboard,
                 },
             )
-            if not edit_markup_result.ok:
-                logger.info("pin update markup failed channel_id=%s message_id=%s", channel_id, message_id)
+            if not edit_markup_result.ok and is_markup_error(edit_markup_result):
+                logger.info("pin update markup failed, retry without keyboard channel_id=%s", channel_id)
+                tg_request(
+                    "editMessageReplyMarkup",
+                    {
+                        "chat_id": channel_id,
+                        "message_id": message_id,
+                        "reply_markup": {"inline_keyboard": []},
+                    },
+                )
             pin_result = pin_chat_message(channel_id, int(message_id))
             if pin_result.ok:
                 set_pinned_message_id(int(message_id))
+                pinned_state["content_hash"] = content_hash
+                save_storage(storage)
                 logger.info("pin update done channel_id=%s message_id=%s", channel_id, message_id)
                 return True, f"✅ Закреп обновлён (message_id: {message_id})."
             logger.info("pin update pin failed channel_id=%s message_id=%s", channel_id, message_id)
             return False, "⚠️ Не удалось закрепить сообщение."
-        logger.info("pin update edit failed channel_id=%s message_id=%s", channel_id, message_id)
+        if is_markup_error(edit_text_result):
+            logger.info("pin update edit failed on markup channel_id=%s message_id=%s", channel_id, message_id)
+        else:
+            logger.info("pin update edit failed channel_id=%s message_id=%s", channel_id, message_id)
     result = tg_request("sendMessage", payload)
+    if not result.ok and is_markup_error(result):
+        logger.info("pin send failed on markup, retry without keyboard channel_id=%s", channel_id)
+        result = tg_request("sendMessage", {**payload, "reply_markup": None})
     if not result.ok or not result.response_json:
         return False, "⚠️ Не удалось отправить закреп."
     message_id = result.response_json.get("result", {}).get("message_id")
@@ -3198,6 +3320,8 @@ def ensure_channel_pin(
     if not pin_result.ok:
         return False, "⚠️ Не удалось закрепить сообщение."
     set_pinned_message_id(int(message_id))
+    pinned_state["content_hash"] = content_hash
+    save_storage(storage)
     logger.info("pin created channel_id=%s message_id=%s", channel_id, message_id)
     return True, f"✅ Закреп создан (message_id: {message_id})."
 
@@ -5182,6 +5306,107 @@ def handle_admin_callback(
     if data == "admin:settings":
         send_message(token, chat_id, "Настройки:", reply_markup=build_admin_settings_keyboard())
         return True
+    if data == "admin:channel":
+        channel_id = get_publication_channel_id(storage)
+        channel_title = get_publication_channel_title() or "—"
+        route_url = get_route_url(storage) or "—"
+        text = "\n".join(
+            [
+                "Канал и закреп:",
+                f"channel_id: {channel_id or '—'}",
+                f"title: {channel_title}",
+                f"ROUTE_URL: {route_url}",
+            ]
+        )
+        send_message(token, chat_id, text, reply_markup=build_admin_channel_keyboard())
+        return True
+    if data == "admin:bind_forward":
+        set_admin_session(storage, chat_id, ADMIN_STATE_CHANNEL_BIND_FORWARD, {})
+        save_storage(storage)
+        send_message(token, chat_id, "Перешлите сообщение из канала. Бот сохранит channel_id.")
+        return True
+    if data == "admin:bind_in_channel_help":
+        send_message(
+            token,
+            chat_id,
+            "Добавьте бота админом канала и отправьте в канале команду /bind. "
+            "Бот сохранит канал автоматически.",
+            reply_markup=build_admin_channel_keyboard(),
+        )
+        return True
+    if data == "admin:pin_now":
+        ok, message = ensure_channel_pin(storage, timezone, logger, force_new=True)
+        send_message(token, chat_id, message, reply_markup=build_admin_channel_keyboard())
+        return True
+    if data == "admin:unpin":
+        channel_id = get_publication_channel_id(storage)
+        message_id = get_pinned_message_id()
+        if not channel_id or not message_id:
+            send_message(token, chat_id, "Закреп не найден.", reply_markup=build_admin_channel_keyboard())
+            return True
+        result = unpin_chat_message(channel_id, int(message_id))
+        text = "✅ Закреп снят." if result.ok else "⚠️ Не удалось снять закреп."
+        send_message(token, chat_id, text, reply_markup=build_admin_channel_keyboard())
+        return True
+    if data == "admin:route_url":
+        current = get_route_url(storage) or "—"
+        set_admin_session(storage, chat_id, ADMIN_STATE_ROUTE_URL, {})
+        save_storage(storage)
+        send_message(
+            token,
+            chat_id,
+            f"Текущий ROUTE_URL: {current}\nВведите новый URL или отправьте '-' для очистки.",
+        )
+        return True
+    if data == "admin:webapp":
+        webapp_url = get_webapp_url() or "—"
+        send_message(
+            token,
+            chat_id,
+            f"WebApp URL: {webapp_url}",
+            reply_markup=build_admin_webapp_keyboard(),
+        )
+        return True
+    if data == "admin:webapp_open":
+        webapp_url = get_webapp_url()
+        if not webapp_url:
+            send_message(token, chat_id, "WEBAPP_URL не настроен.", reply_markup=build_admin_webapp_keyboard())
+            return True
+        send_message(
+            token,
+            chat_id,
+            "Открыть WebApp:",
+            reply_markup={"inline_keyboard": [[{"text": "🌐 Открыть", "web_app": {"url": webapp_url}}]]},
+        )
+        return True
+    if data == "admin:webapp_smoke":
+        if not PUBLIC_BASE_URL:
+            send_message(
+                token,
+                chat_id,
+                "PUBLIC_BASE_URL не задан. Укажите базовый URL для проверки статики.",
+                reply_markup=build_admin_webapp_keyboard(),
+            )
+            return True
+        base = PUBLIC_BASE_URL
+        if not base.startswith(("http://", "https://")):
+            base = f"https://{base}"
+        endpoints = ["/WEBAPP", "/app.css", "/app.js"]
+        results = []
+        for endpoint in endpoints:
+            url = f"{base.rstrip('/')}{endpoint}"
+            try:
+                response = requests.get(url, timeout=5)
+                results.append(f"{endpoint}: {response.status_code}")
+            except requests.RequestException as exc:
+                results.append(f"{endpoint}: error ({exc.__class__.__name__})")
+        send_message(
+            token,
+            chat_id,
+            "WebApp smoke:\n" + "\n".join(results),
+            reply_markup=build_admin_webapp_keyboard(),
+        )
+        return True
     if data == "admin:settings:masters":
         send_message(token, chat_id, build_master_contacts_text(storage), reply_markup=build_admin_settings_keyboard())
         return True
@@ -5522,15 +5747,19 @@ def handle_admin_callback(
         ai_health = get_ai_health(storage, timezone)
         master_inbox = get_master_inbox_chat_id(storage)
         queue_stats = get_queue_stats(storage, timezone)
+        queue_error = get_last_queue_error(storage)
+        channel_id = get_publication_channel_id(storage)
         text = "\n".join(
             [
                 "Самодиагностика:",
-                "client_bot: OK",
-                "polling: OK",
+                f"client_bot mode: {RUN_MODE}",
                 f"AI: {ai_status}",
-                "storage: OK",
+                f"AI health: {ai_health}",
+                f"storage: OK",
                 f"masters configured: {1 if master_inbox else 0}",
-                f"outgoing queue: {'enabled' if is_queue_enabled() else 'disabled'}",
+                f"outgoing queue: {'enabled' if is_queue_enabled() else 'disabled'} pending={queue_stats.get('pending')}",
+                f"queue last error: {queue_error or '—'}",
+                f"channel_id: {channel_id or '—'}",
             ]
         )
         send_message(token, chat_id, text, reply_markup=build_admin_main_keyboard())
@@ -5999,24 +6228,64 @@ def check_reminders(
         logger.info("reminder sent %s", ticket.get("ticket_id"))
 
 
+def summarize_update(update: dict) -> str:
+    update_id = update.get("update_id")
+    if "callback_query" in update:
+        callback = update.get("callback_query") or {}
+        msg = callback.get("message") or {}
+        chat = msg.get("chat") or {}
+        data = (callback.get("data") or "").strip()
+        data_label = data.split(":")[0] if data else ""
+        return f"update_id={update_id} type=callback chat_id={chat.get('id')} data={data_label}"
+    if "channel_post" in update:
+        channel_post = update.get("channel_post") or {}
+        chat = channel_post.get("chat") or {}
+        text = (channel_post.get("text") or "").strip()
+        command = text.split()[0] if text.startswith("/") else ""
+        return f"update_id={update_id} type=channel_post chat_id={chat.get('id')} command={command}"
+    message = update.get("message") or {}
+    chat = message.get("chat") or {}
+    text = (message.get("text") or "").strip()
+    command = text.split()[0] if text.startswith("/") else ""
+    text_len = len(text) if text else 0
+    return f"update_id={update_id} type=message chat_id={chat.get('id')} command={command} text_len={text_len}"
+
+
 def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
+    channel_post = update.get("channel_post") or {}
     message = update.get("message") or {}
     callback = update.get("callback_query")
     chat = message.get("chat") or {}
     text = (message.get("text") or "").strip()
     chat_id = chat.get("id")
 
-    logger.info(
-        "update_id=%s chat_id=%s message_id=%s text=%s",
-        update.get("update_id"),
-        chat_id,
-        message.get("message_id"),
-        text,
-    )
+    logger.info("update_summary=%s", summarize_update(update))
 
     timezone = os.getenv("TIMEZONE", "Europe/Moscow")
     storage = load_storage()
     ensure_storage_defaults(storage)
+    if channel_post:
+        channel_chat = channel_post.get("chat") or {}
+        channel_id = channel_chat.get("id")
+        channel_text = (channel_post.get("text") or "").strip()
+        command = channel_text.split()[0].split("@")[0].lower() if channel_text.startswith("/") else ""
+        if command == "/bind" and channel_id:
+            from_user = channel_post.get("from") or {}
+            user_id = from_user.get("id")
+            if not is_admin(user_id, storage):
+                logger.warning("bind denied: user_id=%s channel_id=%s", user_id, channel_id)
+                return
+            title = channel_chat.get("title") or "—"
+            set_publication_channel(str(channel_id), title, storage)
+            save_storage(storage)
+            if user_id:
+                send_message(
+                    token,
+                    user_id,
+                    f"✅ Канал привязан: {title} (ID: {channel_id}).",
+                    reply_markup=build_admin_channel_keyboard(),
+                )
+            return
     session = ensure_session(storage, chat_id, timezone)
     master_usernames = get_master_recipients(storage)
     settings = get_settings(storage)
@@ -6064,7 +6333,7 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
         )
         return
 
-    if text.startswith("/admin"):
+    if text.lower().startswith("/admin"):
         if not check_admin_access(chat_id, chat.get("username"), storage, logger):
             send_message(token, chat_id, "Недостаточно прав доступа")
             return
@@ -6095,6 +6364,51 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
         try:
             admin_session = get_admin_session(storage, chat_id)
             if handle_ask_more_free_text(token, chat_id, text, storage, timezone):
+                return
+            if admin_session.get("state") == ADMIN_STATE_CHANNEL_BIND_FORWARD:
+                forward_chat = message.get("forward_from_chat")
+                if not forward_chat:
+                    forward_origin = message.get("forward_origin", {})
+                    if isinstance(forward_origin, dict):
+                        forward_chat = forward_origin.get("chat")
+                if not forward_chat or not forward_chat.get("id"):
+                    send_message(token, chat_id, "Не удалось определить канал. Перешлите сообщение из канала.")
+                    return
+                if forward_chat.get("type") != "channel":
+                    send_message(token, chat_id, "Это не канал. Перешлите сообщение именно из канала.")
+                    return
+                target_id = forward_chat.get("id")
+                title = forward_chat.get("title") or "—"
+                set_publication_channel(str(target_id), title, storage)
+                clear_admin_session(storage, chat_id)
+                save_storage(storage)
+                send_message(
+                    token,
+                    chat_id,
+                    f"✅ Канал подключён: {title} (ID: {target_id}).",
+                    reply_markup=build_admin_channel_keyboard(),
+                )
+                return
+            if admin_session.get("state") == ADMIN_STATE_ROUTE_URL:
+                if not text:
+                    send_message(token, chat_id, "Введите URL или '-' для очистки.")
+                    return
+                if text.strip() == "-":
+                    set_route_url(None, storage)
+                    clear_admin_session(storage, chat_id)
+                    send_message(token, chat_id, "ROUTE_URL очищен.", reply_markup=build_admin_channel_keyboard())
+                    return
+                normalized = text.strip()
+                if not normalized.startswith(("http://", "https://")):
+                    normalized = f"https://{normalized}"
+                set_route_url(normalized, storage)
+                clear_admin_session(storage, chat_id)
+                send_message(
+                    token,
+                    chat_id,
+                    f"ROUTE_URL обновлён: {normalized}",
+                    reply_markup=build_admin_channel_keyboard(),
+                )
                 return
             if admin_session.get("state") == ADMIN_STATE_POST_TEXT:
                 if not normalize_text(text):
@@ -7240,15 +7554,16 @@ def main() -> None:
         ai_service.base_url,
         ai_config_source,
     )
-    if AUTO_PIN_ON_DEPLOY:
+    if AUTO_PIN_ON_START:
         ok, message = ensure_channel_pin(storage, timezone, logger, force_new=False)
         logger.info("auto pin on start: %s", message)
     if RUN_MODE == "polling":
-        logger.info("client_bot starting (polling mode)")
+        logger.info("client_bot mode=polling")
         delete_webhook(token, logger, drop_pending_updates=False)
         poll_updates(token, logger)
         return
-    logger.info("client_bot starting (webhook mode) port=%s", PORT)
+    webhook_url = build_webhook_url(token) or "not_configured"
+    logger.info("client_bot mode=webhook endpoint=%s port=%s", webhook_url, PORT)
     set_webhook(token, logger)
     app = create_flask_app(token, logger)
     app.run(host="0.0.0.0", port=PORT, debug=False, use_reloader=False)
