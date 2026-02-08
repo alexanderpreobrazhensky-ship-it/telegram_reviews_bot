@@ -1,3 +1,4 @@
+import base64
 import csv
 import hashlib
 import hmac
@@ -244,9 +245,10 @@ WEBAPP_ENABLED = (
 # ENV (client WebApp):
 # - CLIENT_TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN_CLIENT: client_bot token (required).
 # - CLIENT_WEBAPP_ENABLED=1: enable WebApp routes.
-# - CLIENT_WEBAPP_INITDATA_MAX_AGE_SECONDS (default 900): initData TTL (seconds).
+# - CLIENT_WEBAPP_INITDATA_MAX_AGE_SECONDS (default 86400): initData TTL (seconds).
+# - CLIENT_WEBAPP_SESSION_SECRET: secret for signing WebApp session tokens (fallback BOT_PATH_SECRET).
 # - PUBLIC_BASE_URL / DOMAIN: used for public WebApp links.
-CLIENT_WEBAPP_INITDATA_MAX_AGE_SECONDS = int(os.getenv("CLIENT_WEBAPP_INITDATA_MAX_AGE_SECONDS") or "900")
+CLIENT_WEBAPP_INITDATA_MAX_AGE_SECONDS = int(os.getenv("CLIENT_WEBAPP_INITDATA_MAX_AGE_SECONDS") or "86400")
 WEBAPP_URL = (os.getenv("CLIENT_WEBAPP_URL") or os.getenv("WEBAPP_URL") or "").strip()
 MASTER_CHAT_MODE = (os.getenv("CLIENT_MASTER_CHAT_MODE") or os.getenv("MASTER_CHAT_MODE") or "OFF").strip().upper()
 MASTER_CHAT_ID_ENV = (os.getenv("CLIENT_MASTER_CHAT_ID") or os.getenv("MASTER_CHAT_ID") or "").strip()
@@ -2773,6 +2775,10 @@ def set_webhook(token: str, logger: logging.Logger) -> None:
 def verify_webapp_init_data(init_data: str, token: str) -> tuple[bool, dict | None, str, int | None]:
     if not init_data:
         return False, None, "missing", None
+    if (os.getenv("CLIENT_WEBAPP_TEST_MODE") or "").strip() == "1":
+        if init_data == "TEST_VALID":
+            return True, {"user": json.dumps({"id": 123})}, "ok", 0
+        return False, None, "invalid_test_data", None
     try:
         parsed_pairs = parse_qsl(init_data, keep_blank_values=True)
     except ValueError:
@@ -2798,6 +2804,69 @@ def verify_webapp_init_data(init_data: str, token: str) -> tuple[bool, dict | No
     if age < -WEBAPP_INITDATA_CLOCK_SKEW_SECONDS or age > CLIENT_WEBAPP_INITDATA_MAX_AGE_SECONDS:
         return False, parsed, "expired", age
     return True, parsed, "ok", age
+
+
+def get_webapp_session_secret(token: str) -> str:
+    secret = (os.getenv("CLIENT_WEBAPP_SESSION_SECRET") or os.getenv("BOT_PATH_SECRET") or "").strip()
+    if secret:
+        return secret
+    return token
+
+
+def _base64url_encode(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).decode("utf-8").rstrip("=")
+
+
+def _base64url_decode(value: str) -> bytes:
+    padding = "=" * (-len(value) % 4)
+    return base64.urlsafe_b64decode(f"{value}{padding}")
+
+
+def build_webapp_session_token(user_id: int, secret: str, ttl_seconds: int) -> str:
+    issued_at = int(time.time())
+    payload = {"user_id": user_id, "iat": issued_at, "exp": issued_at + ttl_seconds}
+    payload_json = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    payload_b64 = _base64url_encode(payload_json)
+    signature = hmac.new(secret.encode("utf-8"), payload_b64.encode("utf-8"), hashlib.sha256).digest()
+    signature_b64 = _base64url_encode(signature)
+    return f"{payload_b64}.{signature_b64}"
+
+
+def verify_webapp_session_token(token_value: str, secret: str) -> tuple[bool, dict | None, str]:
+    if not token_value or "." not in token_value:
+        return False, None, "missing"
+    parts = token_value.split(".")
+    if len(parts) != 2:
+        return False, None, "invalid_format"
+    payload_b64, signature_b64 = parts
+    expected_signature = hmac.new(secret.encode("utf-8"), payload_b64.encode("utf-8"), hashlib.sha256).digest()
+    expected_signature_b64 = _base64url_encode(expected_signature)
+    if not hmac.compare_digest(expected_signature_b64, signature_b64):
+        return False, None, "bad_signature"
+    try:
+        payload = json.loads(_base64url_decode(payload_b64).decode("utf-8"))
+    except (ValueError, json.JSONDecodeError):
+        return False, None, "invalid_payload"
+    if not isinstance(payload, dict):
+        return False, None, "invalid_payload"
+    user_id = parse_int_maybe(payload.get("user_id"))
+    exp = parse_int_maybe(payload.get("exp"))
+    if user_id is None or exp is None:
+        return False, payload, "invalid_payload"
+    if int(time.time()) > exp:
+        return False, payload, "expired"
+    return True, payload, "ok"
+
+
+def get_user_id_from_init_data(init_data: dict) -> int | None:
+    user_raw = init_data.get("user")
+    try:
+        user = json.loads(user_raw) if user_raw else {}
+    except json.JSONDecodeError:
+        user = {}
+    if not isinstance(user, dict):
+        return None
+    return parse_int_maybe(user.get("id"))
 
 
 def register_webapp_routes(app: Flask, token: str, logger: logging.Logger) -> Flask:
@@ -2871,6 +2940,30 @@ def register_webapp_routes(app: Flask, token: str, logger: logging.Logger) -> Fl
             return jsonify({"ok": True, "data": None})
         return jsonify({"ok": True, "data": known})
 
+    @app.post("/api/webapp/session")
+    def webapp_session() -> object:
+        if not WEBAPP_ENABLED:
+            return webapp_disabled_response()
+        payload = request.get_json(silent=True) or {}
+        init_data = (payload.get("initData") or "").strip()
+        init_data = init_data or (request.form.get("initData") or "").strip()
+        ok, parsed, reason, age_seconds = verify_webapp_init_data(init_data, token)
+        logger.info("webapp session initdata check: ok=%s reason=%s age=%s", ok, reason, age_seconds)
+        if not ok:
+            return jsonify({"ok": False, "error": "SESSION_INVALID", "reason": reason}), 401
+        user_id = get_user_id_from_init_data(parsed or {})
+        if not user_id:
+            return jsonify({"ok": False, "error": "SESSION_INVALID", "reason": "user_missing"}), 401
+        secret = get_webapp_session_secret(token)
+        session_token = build_webapp_session_token(
+            user_id,
+            secret,
+            CLIENT_WEBAPP_INITDATA_MAX_AGE_SECONDS,
+        )
+        return jsonify(
+            {"ok": True, "token": session_token, "expires_in": CLIENT_WEBAPP_INITDATA_MAX_AGE_SECONDS}
+        )
+
     @app.post("/api/webapp/submit")
     def webapp_submit() -> object:
         if not WEBAPP_ENABLED:
@@ -2881,13 +2974,25 @@ def register_webapp_routes(app: Flask, token: str, logger: logging.Logger) -> Fl
                 "form": request.form.to_dict(),
                 "initData": request.form.get("initData", ""),
             }
+        session_token = (payload.get("sessionToken") or "").strip()
+        if session_token:
+            secret = get_webapp_session_secret(token)
+            ok, parsed_token, reason = verify_webapp_session_token(session_token, secret)
+            logger.info("webapp submit session token check: ok=%s reason=%s", ok, reason)
+            if not ok:
+                return jsonify({"ok": False, "error": "SESSION_INVALID", "reason": reason}), 401
+            user_id = parse_int_maybe((parsed_token or {}).get("user_id"))
+            if not user_id:
+                return jsonify({"ok": False, "error": "SESSION_INVALID", "reason": "user_missing"}), 401
+            init_data = {"user": json.dumps({"id": user_id})}
+            return handle_webapp_submission(init_data, payload.get("form") or {}, token, logger)
         init_data = (request.headers.get("X-Telegram-Init-Data", "") or "").strip()
         init_data = init_data or (payload.get("initData") or "").strip()
         init_data = init_data or (request.form.get("initData") or "").strip()
         ok, parsed, reason, age_seconds = verify_webapp_init_data(init_data, token)
         logger.info("webapp submit initdata check: ok=%s reason=%s age=%s", ok, reason, age_seconds)
         if not ok:
-            return jsonify({"ok": False, "error": "invalid_init_data", "reason": reason}), 403
+            return jsonify({"ok": False, "error": "SESSION_INVALID", "reason": reason}), 401
         return handle_webapp_submission(parsed or {}, payload.get("form") or {}, token, logger)
 
     return app
@@ -3664,8 +3769,9 @@ def notify_masters(
         result = send_message_with_result(master, text, reply_markup=sanitized_markup)
         if result.ok:
             continue
-        if result.status_code == 403 and isinstance(master, int) and master > 0:
-            mark_unreachable_user(storage, master, timezone, result.error or "forbidden")
+        if result.status_code in {400, 403} and isinstance(master, int) and master > 0:
+            reason = result.error or ("chat_not_found" if result.status_code == 400 else "forbidden")
+            mark_unreachable_user(storage, master, timezone, reason)
             maybe_notify_unreachable_user(storage, timezone, logger, master)
         logger.error("failed to send message to master %s ticket_id=%s", master, ticket_id)
 

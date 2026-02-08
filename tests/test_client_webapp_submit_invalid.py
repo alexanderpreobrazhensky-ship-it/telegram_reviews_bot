@@ -14,10 +14,10 @@ class ClientWebAppSubmitInvalidTestCase(unittest.TestCase):
 
     def test_submit_without_init_data(self) -> None:
         response = self.client.post("/api/webapp/submit", json={"form": {}})
-        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.status_code, 401)
         payload = response.get_json()
         self.assertIsNotNone(payload)
-        self.assertEqual(payload.get("error"), "invalid_init_data")
+        self.assertEqual(payload.get("error"), "SESSION_INVALID")
         self.assertEqual(payload.get("reason"), "missing")
 
 
