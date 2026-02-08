@@ -241,6 +241,12 @@ WEBAPP_ENABLED = (
     .lower()
     not in {"0", "false", "no", "off", "disabled"}
 )
+# ENV (client WebApp):
+# - CLIENT_TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN_CLIENT: client_bot token (required).
+# - CLIENT_WEBAPP_ENABLED=1: enable WebApp routes.
+# - CLIENT_WEBAPP_INITDATA_MAX_AGE_SECONDS (default 86400): initData TTL (seconds).
+# - PUBLIC_BASE_URL / DOMAIN: used for public WebApp links.
+CLIENT_WEBAPP_INITDATA_MAX_AGE_SECONDS = int(os.getenv("CLIENT_WEBAPP_INITDATA_MAX_AGE_SECONDS") or "86400")
 WEBAPP_URL = (os.getenv("CLIENT_WEBAPP_URL") or os.getenv("WEBAPP_URL") or "").strip()
 MASTER_CHAT_MODE = (os.getenv("CLIENT_MASTER_CHAT_MODE") or os.getenv("MASTER_CHAT_MODE") or "OFF").strip().upper()
 MASTER_CHAT_ID_ENV = (os.getenv("CLIENT_MASTER_CHAT_ID") or os.getenv("MASTER_CHAT_ID") or "").strip()
@@ -272,6 +278,7 @@ SETTINGS_KEY_ROUTE_URL = "route_url"
 
 DB_OK = False
 DB_LAST_ERROR: str | None = None
+WEBAPP_INITDATA_CLOCK_SKEW_SECONDS = 120
 
 
 def resolve_database_url() -> str | None:
@@ -2738,18 +2745,34 @@ def set_webhook(token: str, logger: logging.Logger) -> None:
         logger.warning("webhook set failed: %s", result.error or result.response_json)
 
 
-def verify_webapp_init_data(init_data: str, token: str) -> tuple[bool, dict]:
+def verify_webapp_init_data(init_data: str, token: str) -> tuple[bool, str, dict]:
+    if not init_data:
+        return False, "missing_init_data", {}
     try:
-        parsed = dict(parse_qsl(init_data, keep_blank_values=True))
+        parsed_pairs = parse_qsl(init_data, keep_blank_values=True)
     except ValueError:
-        return False, {}
+        return False, "bad_signature", {}
+    parsed = dict(parsed_pairs)
     received_hash = parsed.pop("hash", None)
     if not received_hash:
-        return False, parsed
-    data_check = "\n".join(f"{key}={parsed[key]}" for key in sorted(parsed.keys()))
-    secret = hashlib.sha256(token.encode("utf-8")).digest()
-    computed = hmac.new(secret, data_check.encode("utf-8"), hashlib.sha256).hexdigest()
-    return computed == received_hash, parsed
+        return False, "missing_hash", parsed
+    auth_date_raw = parsed.get("auth_date")
+    if auth_date_raw is None:
+        return False, "missing_auth_date", parsed
+    try:
+        auth_date = int(auth_date_raw)
+    except (TypeError, ValueError):
+        return False, "bad_auth_date", parsed
+    data_check = "\n".join(f"{key}={value}" for key, value in sorted(parsed.items()))
+    secret_key = hmac.new(b"WebAppData", token.encode("utf-8"), hashlib.sha256).digest()
+    expected_hash = hmac.new(secret_key, data_check.encode("utf-8"), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected_hash, received_hash):
+        return False, "bad_signature", parsed
+    now = int(time.time())
+    age = now - auth_date
+    if age < -WEBAPP_INITDATA_CLOCK_SKEW_SECONDS or age > CLIENT_WEBAPP_INITDATA_MAX_AGE_SECONDS:
+        return False, "expired", parsed
+    return True, "ok", parsed
 
 
 def register_webapp_routes(app: Flask, token: str, logger: logging.Logger) -> Flask:
@@ -2836,21 +2859,17 @@ def register_webapp_routes(app: Flask, token: str, logger: logging.Logger) -> Fl
         init_data = (request.headers.get("X-Telegram-Init-Data", "") or "").strip()
         init_data = init_data or (payload.get("initData") or "").strip()
         init_data = init_data or (request.form.get("initData") or "").strip()
-        ok, parsed = verify_webapp_init_data(init_data, token)
+        ok, reason, parsed = verify_webapp_init_data(init_data, token)
+        auth_date_raw = parsed.get("auth_date")
+        try:
+            auth_date = int(auth_date_raw) if auth_date_raw is not None else None
+        except (TypeError, ValueError):
+            auth_date = None
+        age = int(time.time()) - auth_date if auth_date is not None else None
+        logger.info("webapp submit initdata check: ok=%s reason=%s age=%s", ok, reason, age)
         if not ok:
-            user_id = None
-            if isinstance(parsed.get("user"), str):
-                try:
-                    user_id = json.loads(parsed["user"]).get("id")
-                except (json.JSONDecodeError, TypeError):
-                    user_id = None
-            logger.info(
-                "webapp_submit invalid_init_data: present=%s len=%s user_id=%s",
-                bool(init_data),
-                len(init_data),
-                user_id,
-            )
-            return jsonify({"ok": False, "error": "invalid_init_data"}), 403
+            error_code = "init_data_expired" if reason == "expired" else "invalid_init_data"
+            return jsonify({"ok": False, "error": error_code}), 403
         return handle_webapp_submission(parsed, payload.get("form") or {}, token, logger)
 
     return app
