@@ -110,6 +110,7 @@ CHANNEL_POST_TEXT = os.getenv("CHANNEL_POST_TEXT", "").strip()
 CHANNEL_POST_BUTTONS = os.getenv("CHANNEL_POST_BUTTONS", "").strip()
 CHANNEL_POST_PARSE_MODE = (os.getenv("CHANNEL_POST_PARSE_MODE") or "").strip()
 OWNER_USERNAME = os.getenv("OWNER_USERNAME", "").strip().lstrip("@")
+ROUTE_URL = (os.getenv("ROUTE_URL") or "").strip()
 
 def _env_flag(name: str, default: str = "1") -> bool:
     raw = os.getenv(name)
@@ -357,6 +358,52 @@ def extract_chat_user(update: dict) -> Tuple[Optional[int], Optional[int]]:
         return chat_id, user_id
     return None, None
 
+def _sanitize_preview(text: str, limit: int = 160) -> str:
+    if not text:
+        return ""
+    text = re.sub(r"@\w+", "@***", text)
+    text = text.replace("\n", " ").replace("\r", " ")
+    text = re.sub(r"\s+", " ", text).strip()
+    text = _redact(text)
+    return text[:limit]
+
+def summarize_update(update: dict) -> dict:
+    update_id = update.get("update_id")
+    update_type = "unknown"
+    preview = ""
+    command = ""
+
+    if "message" in update:
+        update_type = "message"
+        message = update.get("message") or {}
+        text = message.get("text") or message.get("caption") or ""
+        preview = _sanitize_preview(text)
+        if text.strip().startswith("/"):
+            command = text.strip().split()[0]
+    elif "callback_query" in update:
+        update_type = "callback_query"
+        message = (update.get("callback_query") or {}).get("message") or {}
+        text = message.get("text") or message.get("caption") or ""
+        preview = _sanitize_preview(text)
+    elif "my_chat_member" in update:
+        update_type = "my_chat_member"
+    elif "chat_member" in update:
+        update_type = "chat_member"
+    elif "channel_post" in update:
+        update_type = "channel_post"
+        post = update.get("channel_post") or {}
+        text = post.get("text") or post.get("caption") or ""
+        preview = _sanitize_preview(text)
+
+    chat_id, _ = extract_chat_user(update)
+    return {
+        "update_id": update_id,
+        "type": update_type,
+        "chat_id": chat_id,
+        "command": command,
+        "preview": preview,
+    }
+
 def _strip_html_tags(text: str) -> str:
     return re.sub(r"</?[^>]+>", "", text)
 
@@ -451,6 +498,8 @@ def send_safe_formatted_message(
         _redact(text[:200]),
         _redact(response.text[:900]),
     )
+
+safe_send_message = send_safe_formatted_message
 
 def send_message(chat_id: int, text: str, reply_markup: Optional[dict] = None, parse_mode: Optional[str] = None) -> None:
     preferred_parse_mode = parse_mode or "HTML"
@@ -759,16 +808,19 @@ def _channel_pin_text() -> str:
     )
 
 def _channel_pin_keyboard() -> dict:
+    buttons_row = [
+        {"text": "🛠 Записаться на сервис", "url": _deep_link_url("booking")},
+        {"text": "📦 Запчасти и работы", "url": _deep_link_url("parts")},
+    ]
+    second_row = [
+        {"text": "💬 Задать вопрос", "url": _deep_link_url("question")},
+    ]
+    if ROUTE_URL:
+        second_row.append({"text": "📍 Как доехать", "url": ROUTE_URL})
     return {
         "inline_keyboard": [
-            [
-                {"text": "🛠 Записаться на сервис", "url": _deep_link_url("booking")},
-                {"text": "📦 Запчасти и работы", "url": _deep_link_url("parts")},
-            ],
-            [
-                {"text": "💬 Задать вопрос", "url": _deep_link_url("question")},
-                {"text": "📍 Как доехать", "callback_data": "menu:route"},
-            ],
+            buttons_row,
+            second_row,
         ]
     }
 
@@ -3866,21 +3918,15 @@ def health():
     return jsonify({
         "ok": True,
         "status": "running",
-        "webhook_path": WEBHOOK_PATH,
-        "ai_engine": _current_engine(),
-        "prompt_mode": (os.getenv("CX_PROMPT_MODE") or CX_PROMPT_MODE).strip().lower(),
-        "admin_mode": ADMIN_MODE,
-        "db": "postgres" if DB_OK else "disabled",
-        "deepseek_url": DEEPSEEK_URL,
-        "openai_sdk": OPENAI_SDK_AVAILABLE,
     })
 
 @app.get("/diag/ai")
 def diag_ai():
-    if DIAG_TOKEN:
-        token = request.args.get("token", "").strip()
-        if token != DIAG_TOKEN:
-            return jsonify({"ok": False, "error": "forbidden"}), 403
+    if not DIAG_TOKEN:
+        return jsonify({"ok": False, "error": "not_found"}), 404
+    token = request.args.get("token", "").strip()
+    if token != DIAG_TOKEN:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
 
     engine = _current_engine()
     prompt_mode = (os.getenv("CX_PROMPT_MODE") or CX_PROMPT_MODE).strip().lower()
@@ -3934,7 +3980,7 @@ def telegram_webhook():
     user_id = None
 
     try:
-        logger.info("Update: %s", _redact(json.dumps(update, ensure_ascii=False)[:1200]))
+        logger.info("Update: %s", summarize_update(update))
 
         # callback
         if "callback_query" in update:
@@ -5210,9 +5256,16 @@ def setup_client_bot() -> None:
     if not token:
         logger.warning("client_bot token missing; skipping WebApp routes and polling start")
         return
+    mode = (os.getenv("CLIENT_BOT_MODE") or "polling").strip().lower()
     client_logger = logging.getLogger("client_bot")
     client_bot_main.register_webapp_routes(app, token, client_logger)
-    client_bot_main.start_polling_background()
+    if mode == "webhook":
+        client_bot_main.register_webhook_route(app, token, client_logger)
+        client_bot_main.set_webhook(token, client_logger)
+    else:
+        if mode != "polling":
+            client_logger.warning("client_bot unknown mode=%s, defaulting to polling", mode)
+        client_bot_main.start_polling_background()
 
 
 db_init()

@@ -8,8 +8,8 @@ from datetime import datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from services.telegram_api import TgRequestResult, get_retry_base_sleep_seconds, get_retry_max, tg_request
-from storage import now_iso, save_storage
+from .telegram_api import TgRequestResult, get_retry_base_sleep_seconds, get_retry_max, tg_request
+from ..storage import now_iso, save_storage
 
 OUTGOING_FILES_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "outgoing_files")
 UNREACHABLE_NOTICE_TTL_MINUTES = 30
