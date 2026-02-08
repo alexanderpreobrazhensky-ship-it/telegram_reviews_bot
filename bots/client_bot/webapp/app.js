@@ -6,14 +6,16 @@ const baseConfig = {
   mapUrl: "",
   yandexUrl: "",
   googleUrl: "",
-  sessionMaxAgeSeconds: 900,
+  sessionMaxAgeSeconds: 86400,
 };
 
 const state = {
   step: 1,
   carKnown: false,
-  sessionMaxAgeSeconds: 900,
+  sessionMaxAgeSeconds: 86400,
 };
+
+const sessionTokenKey = "lira_webapp_session_token";
 
 const elements = {
   form: document.getElementById("requestForm"),
@@ -214,7 +216,8 @@ const submitForm = async (event) => {
     return;
   }
   const initData = (tg?.initData || "").trim();
-  if (!initData) {
+  const sessionToken = sessionStorage.getItem(sessionTokenKey) || "";
+  if (!initData && !sessionToken) {
     const message = "WebApp открыт вне Telegram. Откройте WebApp из бота.";
     setStatus(message, true);
     tg?.showAlert?.(message);
@@ -229,6 +232,7 @@ const submitForm = async (event) => {
         "X-Telegram-Init-Data": initData,
       },
       body: JSON.stringify({
+        sessionToken,
         initData,
         form: buildPayload(),
       }),
@@ -239,7 +243,7 @@ const submitForm = async (event) => {
       tg?.showAlert?.("Заявка принята. Мы свяжемся с вами.");
       return;
     }
-    if (response.status === 403) {
+    if (payload.error === "SESSION_INVALID") {
       const reason = payload.reason;
       let message = "Сессия Telegram недействительна. Откройте WebApp заново из бота.";
       if (reason === "missing") {
@@ -285,6 +289,29 @@ const init = async () => {
         setStatus("Сессия Telegram устарела. Откройте WebApp заново из бота.", true);
         elements.submitButton.disabled = true;
       }
+    }
+  }
+
+  if (tg?.initData) {
+    try {
+      const response = await fetch("/api/webapp/session", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ initData: tg.initData }),
+      });
+      const payload = await response.json();
+      if (payload.ok && payload.token) {
+        sessionStorage.setItem(sessionTokenKey, payload.token);
+      } else if (payload.error === "SESSION_INVALID") {
+        const message = "Сессия Telegram недействительна. Откройте WebApp заново из бота.";
+        setStatus(message, true);
+        elements.submitButton.disabled = true;
+        tg?.showAlert?.(message);
+      }
+    } catch (error) {
+      console.warn("webapp session init failed", error);
     }
   }
 
