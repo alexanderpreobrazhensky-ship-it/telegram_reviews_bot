@@ -595,7 +595,7 @@ def get_ai_health(storage: dict, timezone: str) -> dict:
     state = str(health.get("state") or AI_HEALTH_OK)
     last_failed_at = health.get("last_failed_at")
     reason = health.get("reason")
-    if state == AI_HEALTH_DOWN and last_failed_at:
+    if state in {AI_HEALTH_DOWN, AI_HEALTH_COOLDOWN} and last_failed_at:
         try:
             last_dt = datetime.fromisoformat(last_failed_at).astimezone(ZoneInfo(timezone))
         except ValueError:
