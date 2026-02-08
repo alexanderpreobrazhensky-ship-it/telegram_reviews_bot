@@ -32,9 +32,9 @@ try:
 except Exception:
     PIL_AVAILABLE = False
 
-from services.ai_service import AIService, normalize_date_string
-from services.dictionary_rules import analyze_text_with_rules, load_dictionary_rules
-from services.outgoing_queue import (
+from .services.ai_service import AIService, normalize_date_string
+from .services.dictionary_rules import analyze_text_with_rules, load_dictionary_rules
+from .services.outgoing_queue import (
     clear_failed_messages,
     enqueue_document,
     enqueue_message,
@@ -47,7 +47,7 @@ from services.outgoing_queue import (
     retry_failed_messages,
     store_outgoing_file,
 )
-from services.telegram_api import (
+from .services.telegram_api import (
     answer_callback_query as safe_answer_callback_query,
     configure_telegram,
     edit_message_caption,
@@ -62,7 +62,7 @@ from services.telegram_api import (
     set_chat_menu_button_webapp,
     tg_request,
 )
-from storage import (
+from .storage import (
     clear_session,
     get_session,
     load_storage,
@@ -222,7 +222,12 @@ CLIENT_MENU_ACTIONS = {
     MENU_HELP: "help",
 }
 
-RUN_MODE = (os.getenv("CLIENT_RUN_MODE") or os.getenv("RUN_MODE") or "webhook").strip().lower()
+RUN_MODE = (
+    os.getenv("CLIENT_BOT_MODE")
+    or os.getenv("CLIENT_RUN_MODE")
+    or os.getenv("RUN_MODE")
+    or "webhook"
+).strip().lower()
 PORT = int(os.getenv("PORT", "8000"))
 DOMAIN = (os.getenv("DOMAIN") or "").strip().rstrip("/")
 PUBLIC_BASE_URL = (os.getenv("PUBLIC_BASE_URL") or "").strip().rstrip("/")
@@ -2761,13 +2766,8 @@ def register_webapp_routes(app: Flask, token: str, logger: logging.Logger) -> Fl
     return app
 
 
-def create_flask_app(token: str, logger: logging.Logger) -> Flask:
-    app = Flask(__name__)
+def register_webhook_route(app: Flask, token: str, logger: logging.Logger) -> Flask:
     webhook_path = build_webhook_path(token)
-
-    @app.get("/")
-    def root() -> object:
-        return "OK"
 
     @app.post(webhook_path)
     def telegram_webhook() -> object:
@@ -2775,6 +2775,16 @@ def create_flask_app(token: str, logger: logging.Logger) -> Flask:
         handle_update(token, update, logger)
         return "ok"
 
+    return app
+
+
+def create_flask_app(token: str, logger: logging.Logger) -> Flask:
+    app = Flask(__name__)
+
+    @app.get("/")
+    def root() -> object:
+        return "OK"
+    register_webhook_route(app, token, logger)
     return register_webapp_routes(app, token, logger)
 
 
@@ -7134,16 +7144,14 @@ def poll_updates(token: str, logger: logging.Logger) -> None:
             time.sleep(POLLING_SLEEP_SECONDS)
 
 
-def get_client_token() -> tuple[str, str]:
+def get_client_token() -> tuple[str, str] | None:
     token = os.getenv("CLIENT_TELEGRAM_BOT_TOKEN")
     if token:
         return token.strip(), "CLIENT_TELEGRAM_BOT_TOKEN"
     token = os.getenv("TELEGRAM_BOT_TOKEN_CLIENT")
     if token:
         return token.strip(), "TELEGRAM_BOT_TOKEN_CLIENT"
-    raise RuntimeError(
-        "CLIENT_TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN_CLIENT is required"
-    )
+    return None
 
 
 def delete_webhook(
@@ -7166,7 +7174,11 @@ def main() -> None:
     timezone = os.getenv("TIMEZONE", "Europe/Moscow")
     logger = build_logger(timezone)
     logger.info("[client_bot] openpyxl available: %s", is_openpyxl_available())
-    token, token_source = get_client_token()
+    token_info = get_client_token()
+    if not token_info:
+        logger.warning("client_bot token missing; bot disabled")
+        return
+    token, token_source = token_info
     configure_telegram(token)
     logger.info("client_bot token source: %s", token_source)
     db_init_settings()
