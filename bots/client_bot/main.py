@@ -106,6 +106,19 @@ FALLBACK_OUT_OF_SCOPE = "Я передам ваш вопрос мастеру, �
 YES_OPTIONS = {"да", "yes", "ага"}
 NO_OPTIONS = {"нет", "no"}
 
+MASTER_PANEL_NEW = "📥 Новые"
+MASTER_PANEL_QUEUE = "📋 Очередь"
+MASTER_PANEL_MY = "👤 Мои"
+MASTER_PANEL_FIND = "🔎 Найти"
+MASTER_PANEL_HELP = "❓ Помощь"
+MASTER_PANEL_COMMANDS = {
+    MASTER_PANEL_NEW: "/new",
+    MASTER_PANEL_QUEUE: "/queue",
+    MASTER_PANEL_MY: "/my",
+    MASTER_PANEL_FIND: "/ticket",
+    MASTER_PANEL_HELP: "/help",
+}
+
 PIN_REGULATIONS_LINE_ENABLED = (
     (os.getenv("CLIENT_SHOW_REGLAMENT_PHRASE") or os.getenv("SHOW_REGLAMENT_PHRASE") or "0").strip() == "1"
 )
@@ -256,7 +269,11 @@ CLIENT_WEBAPP_INITDATA_MAX_AGE_SECONDS = int(os.getenv("CLIENT_WEBAPP_INITDATA_M
 WEBAPP_URL = (os.getenv("CLIENT_WEBAPP_URL") or os.getenv("WEBAPP_URL") or "").strip()
 MASTER_CHAT_MODE = (os.getenv("CLIENT_MASTER_CHAT_MODE") or os.getenv("MASTER_CHAT_MODE") or "OFF").strip().upper()
 MASTER_CHAT_ID_ENV = (os.getenv("CLIENT_MASTER_CHAT_ID") or os.getenv("MASTER_CHAT_ID") or "").strip()
-CLIENT_CHAT_ID = -5252742869
+CLIENT_CHAT_ID_ENV = (os.getenv("CLIENT_CHAT_ID") or "").strip()
+CLIENT_CHAT_ID = None
+if CLIENT_CHAT_ID_ENV:
+    if CLIENT_CHAT_ID_ENV.lstrip("-").isdigit():
+        CLIENT_CHAT_ID = int(CLIENT_CHAT_ID_ENV)
 if not WEBAPP_PATH.startswith("/"):
     WEBAPP_PATH = f"/{WEBAPP_PATH}"
 WEBAPP_PATH = WEBAPP_PATH.rstrip("/") or "/WEBAPP"
@@ -745,6 +762,10 @@ def resolve_menu_action(text: str) -> str | None:
     return CLIENT_MENU_ACTIONS.get(text)
 
 
+def resolve_master_panel_command(text: str) -> str | None:
+    return MASTER_PANEL_COMMANDS.get(text)
+
+
 def build_master_keyboard(master_username: str) -> dict | None:
     return None
 
@@ -1158,6 +1179,11 @@ def ensure_storage_defaults(storage: dict) -> None:
     settings.setdefault("clients_pending_sync", 0)
     settings.setdefault("clients_last_sync_at", None)
     settings.setdefault("clients_last_sync_error", None)
+    settings.setdefault("clients_last_sync_attempt_at", None)
+    settings.setdefault("tickets_pending_sync", 0)
+    settings.setdefault("tickets_last_sync_at", None)
+    settings.setdefault("tickets_last_sync_error", None)
+    settings.setdefault("tickets_last_sync_attempt_at", None)
     post_settings = storage.setdefault("post_settings", {})
     target_env = os.getenv("CLIENT_POST_TARGET_ID") or os.getenv("CLIENT_POST_CHAT_ID")
     if target_env and "target_chat_id" not in post_settings:
@@ -2270,6 +2296,18 @@ def build_master_menu_keyboard() -> dict:
     }
 
 
+def build_masters_panel_keyboard() -> dict:
+    return {
+        "keyboard": [
+            [MASTER_PANEL_NEW, MASTER_PANEL_QUEUE],
+            [MASTER_PANEL_MY, MASTER_PANEL_FIND],
+            [MASTER_PANEL_HELP],
+        ],
+        "resize_keyboard": True,
+        "one_time_keyboard": False,
+    }
+
+
 def build_master_ticket_list_keyboard(tickets: list[dict], status: str, page: int, total_pages: int) -> dict:
     rows: list[list[dict]] = []
     for ticket in tickets:
@@ -2284,6 +2322,38 @@ def build_master_ticket_list_keyboard(tickets: list[dict], status: str, page: in
         rows.append(nav_row)
     rows.append([{"text": "⬅️ Назад", "callback_data": "master:menu"}])
     return {"inline_keyboard": rows}
+
+
+def format_master_ticket_brief(ticket: dict, timezone: str) -> str:
+    return " | ".join(
+        [
+            ticket.get("ticket_id", "—"),
+            format_dt(ticket.get("created_at"), timezone),
+            format_ticket_status(ticket.get("status")),
+            ticket.get("fio") or "—",
+            ticket.get("phone") or "—",
+        ]
+    )
+
+
+def filter_tickets_by_statuses(tickets: list[dict], statuses: set[str]) -> list[dict]:
+    return [ticket for ticket in tickets if normalize_ticket_status(ticket.get("status")) in statuses]
+
+
+def build_master_ticket_list_text(
+    tickets: list[dict],
+    timezone: str,
+    header: str,
+    limit: int | None = None,
+) -> str:
+    if limit is not None:
+        tickets = tickets[:limit]
+    if not tickets:
+        return f"{header}\nЗаявок нет."
+    lines = [header]
+    for ticket in tickets:
+        lines.append(format_master_ticket_brief(ticket, timezone))
+    return "\n".join(lines)
 
 
 def build_admin_queue_keyboard(failed_messages: list[dict]) -> dict:
@@ -3082,7 +3152,11 @@ def set_bot_commands(token: str, storage: dict, logger: logging.Logger) -> None:
     ]
     master_commands = default_commands + [
         {"command": "master", "description": "Меню мастера"},
+        {"command": "panel", "description": "Панель мастера"},
+        {"command": "new", "description": "Новые заявки"},
         {"command": "queue", "description": "Очередь заявок"},
+        {"command": "my", "description": "Мои заявки"},
+        {"command": "ticket", "description": "Найти заявку по номеру"},
         {"command": "admin", "description": "Админ-меню"},
         {"command": "bind_masters_chat", "description": "Привязать чат мастеров"},
         {"command": "status", "description": "Статус системы"},
@@ -3520,7 +3594,7 @@ def build_ticket_from_webapp(
         "source": "webapp",
         "reminded_at": None,
         "last_master_notify_at": None,
-        "needs_phone": not bool(phone),
+        "needs_phone": False,
         "ttl_expires_at": ttl_iso(timezone, TTL_HOURS),
     }
 
@@ -3545,6 +3619,9 @@ def handle_webapp_submission(
     if any(not str(form.get(field) or "").strip() for field in required_fields):
         logger.info("webapp submit status=error reason=missing_required")
         return jsonify({"ok": False, "error": "INTERNAL_ERROR"}), 500
+    if not normalize_phone_input(form.get("phone")):
+        logger.info("webapp submit status=error reason=invalid_phone")
+        return jsonify({"ok": False, "error": "phone_required"}), 400
     car_known = str(form.get("car_known") or "").strip().lower() in {"1", "true", "yes", "y"}
     form["car_known"] = car_known
     if not car_known:
@@ -3568,7 +3645,7 @@ def handle_webapp_submission(
         timezone,
         logger,
     )
-    append_ticket_jsonl(ticket)
+    append_ticket_jsonl(ticket, storage, logger)
     deliver_ticket(
         token,
         storage,
@@ -4220,6 +4297,14 @@ def deliver_ticket(
         )
         if result.ok:
             delivered += 1
+            if result.response_json:
+                message_id = result.response_json.get("result", {}).get("message_id")
+                if message_id:
+                    ticket["masters_chat_message_id"] = message_id
+                    ticket["masters_chat_id"] = masters_chat_id
+                    ticket["updated_at"] = now_iso(timezone)
+                    save_storage(storage)
+                    append_ticket_jsonl(ticket, storage, logger)
         else:
             logger.warning(
                 "failed to send ticket to masters chat chat_id=%s status=%s error=%s",
@@ -4477,7 +4562,7 @@ def commit_clients_csv_to_github(storage: dict, logger: logging.Logger) -> bool:
     repo = (os.getenv("CLIENT_GITHUB_REPO") or os.getenv("GITHUB_REPO") or "").strip()
     branch = (os.getenv("CLIENT_GITHUB_BRANCH") or os.getenv("GITHUB_BRANCH") or "main").strip()
     if not token or not repo:
-        logger.info("clients sync skipped: GitHub token/repo missing")
+        logger.warning("clients sync skipped: GitHub token/repo missing")
         return False
     ensure_clients_csv()
     with open(CLIENTS_CSV_PATH, "rb") as file:
@@ -4513,6 +4598,73 @@ def commit_clients_csv_to_github(storage: dict, logger: logging.Logger) -> bool:
     return False
 
 
+def should_attempt_clients_sync(storage: dict, timezone: str, debounce_seconds: int = 45) -> bool:
+    settings = storage.setdefault("settings", {})
+    last_attempt = settings.get("clients_last_sync_attempt_at")
+    if not last_attempt:
+        return True
+    try:
+        last_dt = datetime.fromisoformat(last_attempt).astimezone(ZoneInfo(timezone))
+    except ValueError:
+        return True
+    return (datetime.now(ZoneInfo(timezone)) - last_dt).total_seconds() >= debounce_seconds
+
+
+def should_attempt_tickets_sync(storage: dict, timezone: str, debounce_seconds: int = 45) -> bool:
+    settings = storage.setdefault("settings", {})
+    last_attempt = settings.get("tickets_last_sync_attempt_at")
+    if not last_attempt:
+        return True
+    try:
+        last_dt = datetime.fromisoformat(last_attempt).astimezone(ZoneInfo(timezone))
+    except ValueError:
+        return True
+    return (datetime.now(ZoneInfo(timezone)) - last_dt).total_seconds() >= debounce_seconds
+
+
+def commit_tickets_jsonl_to_github(storage: dict, logger: logging.Logger) -> bool:
+    token = (os.getenv("CLIENT_GITHUB_TOKEN") or os.getenv("GITHUB_TOKEN") or "").strip()
+    repo = (os.getenv("CLIENT_GITHUB_REPO") or os.getenv("GITHUB_REPO") or "").strip()
+    branch = (os.getenv("CLIENT_GITHUB_BRANCH") or os.getenv("GITHUB_BRANCH") or "main").strip()
+    if not token or not repo:
+        logger.warning("tickets sync skipped: GitHub token/repo missing")
+        return False
+    ensure_data_dir()
+    if not os.path.exists(TICKETS_JSONL_PATH):
+        with open(TICKETS_JSONL_PATH, "w", encoding="utf-8") as file:
+            file.write("")
+    with open(TICKETS_JSONL_PATH, "rb") as file:
+        content_bytes = file.read()
+    content_b64 = base64.b64encode(content_bytes).decode("utf-8")
+    url = f"https://api.github.com/repos/{repo}/contents/data/tickets.jsonl"
+    headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github+json"}
+    sha = None
+    response = requests.get(url, headers=headers, timeout=15)
+    if response.status_code == 200:
+        sha = (response.json() or {}).get("sha")
+    payload = {
+        "message": f"Update tickets.jsonl ({datetime.utcnow().isoformat()}Z)",
+        "content": content_b64,
+        "branch": branch,
+    }
+    if sha:
+        payload["sha"] = sha
+    response = requests.put(url, headers=headers, json=payload, timeout=20)
+    settings = storage.setdefault("settings", {})
+    if response.status_code in {200, 201}:
+        settings["tickets_pending_sync"] = 0
+        settings["tickets_last_sync_at"] = now_iso(os.getenv("TIMEZONE", "Europe/Moscow"))
+        settings["tickets_last_sync_error"] = None
+        save_storage(storage)
+        logger.info("tickets sync ok: github repo=%s", repo)
+        return True
+    settings["tickets_pending_sync"] = 1
+    settings["tickets_last_sync_error"] = f"http_{response.status_code}"
+    save_storage(storage)
+    logger.warning("tickets sync failed: status=%s body=%s", response.status_code, response.text)
+    return False
+
+
 def upsert_client_record(
     storage: dict,
     client_data: dict,
@@ -4534,17 +4686,37 @@ def upsert_client_record(
     }
     records[key] = updated
     write_clients_csv(records)
-    if not commit_clients_csv_to_github(storage, logger):
-        settings = storage.setdefault("settings", {})
-        settings["clients_pending_sync"] = 1
+    settings = storage.setdefault("settings", {})
+    settings["clients_pending_sync"] = 1
+    timezone_value = os.getenv("TIMEZONE", "Europe/Moscow")
+    if should_attempt_clients_sync(storage, timezone_value):
+        settings["clients_last_sync_attempt_at"] = now_iso(timezone_value)
+        save_storage(storage)
+        if not commit_clients_csv_to_github(storage, logger):
+            settings["clients_pending_sync"] = 1
+            save_storage(storage)
+    else:
         save_storage(storage)
 
 
-def append_ticket_jsonl(ticket: dict) -> None:
+def append_ticket_jsonl(ticket: dict, storage: dict | None = None, logger: logging.Logger | None = None) -> None:
     ensure_data_dir()
     payload = json.dumps(ticket, ensure_ascii=False)
     with open(TICKETS_JSONL_PATH, "a", encoding="utf-8") as file:
         file.write(f"{payload}\n")
+    if not storage or not logger:
+        return
+    timezone = os.getenv("TIMEZONE", "Europe/Moscow")
+    settings = storage.setdefault("settings", {})
+    settings["tickets_pending_sync"] = 1
+    if not should_attempt_tickets_sync(storage, timezone):
+        save_storage(storage)
+        return
+    settings["tickets_last_sync_attempt_at"] = now_iso(timezone)
+    save_storage(storage)
+    if not commit_tickets_jsonl_to_github(storage, logger):
+        settings["tickets_pending_sync"] = 1
+        save_storage(storage)
 
 
 
@@ -4573,12 +4745,13 @@ def build_ticket_from_client_message(
     now_value = now_iso(timezone)
     return {
         "ticket_id": ticket_id,
-        "status": STATUS_NEW,
+        "status": STATUS_NEW if phone else STATUS_WAITING_CLIENT,
         "source": "text",
         "telegram_user_id": chat.get("id"),
         "telegram_username": chat.get("username"),
         "full_name": full_name or "—",
         "phone": phone or None,
+        "client_phone": phone or None,
         "comment": comment,
         "created_at": now_value,
         "updated_at": now_value,
@@ -4598,7 +4771,7 @@ def build_ticket_from_client_message(
 def build_contact_request_keyboard() -> dict:
     return {
         "keyboard": [
-            [{"text": "📞 Поделиться контактом", "request_contact": True}],
+            [{"text": "📱 Отправить номер", "request_contact": True}],
             [{"text": "Ввести номер вручную"}],
         ],
         "resize_keyboard": True,
@@ -4652,9 +4825,11 @@ def process_client_ticket_message(
             active_ticket["phone"] = phone
             active_ticket["client_phone"] = phone
             active_ticket["needs_phone"] = False
+            if normalize_ticket_status(active_ticket.get("status")) == STATUS_WAITING_CLIENT:
+                active_ticket["status"] = STATUS_NEW
         active_ticket["updated_at"] = now_iso(timezone)
         save_storage(storage)
-        append_ticket_jsonl(active_ticket)
+        append_ticket_jsonl(active_ticket, storage, logger)
         if phone and not active_ticket.get("last_master_notify_at"):
             active_ticket["last_master_notify_at"] = now_iso(timezone)
             save_storage(storage)
@@ -4691,7 +4866,7 @@ def process_client_ticket_message(
     ticket = build_ticket_from_client_message(storage, chat, message, timezone, comment, phone or None)
     storage.setdefault("tickets", []).append(ticket)
     save_storage(storage)
-    append_ticket_jsonl(ticket)
+    append_ticket_jsonl(ticket, storage, logger)
     upsert_client_record(
         storage,
         {
@@ -4711,6 +4886,8 @@ def process_client_ticket_message(
             reply_markup=build_contact_request_keyboard(),
         )
         return True
+    if normalize_ticket_status(ticket.get("status")) != STATUS_NEW:
+        ticket["status"] = STATUS_NEW
     ticket["last_master_notify_at"] = now_iso(timezone)
     save_storage(storage)
     deliver_ticket(
@@ -5521,7 +5698,7 @@ def finalize_ticket(
             tldr_reply = tldr_result.reply
     ticket["tldr"] = tldr_reply or build_tldr_fallback(ticket)
     storage.setdefault("tickets", []).append(ticket)
-    append_ticket_jsonl(ticket)
+    append_ticket_jsonl(ticket, storage, logger)
     clear_session(storage, chat_id)
     save_storage(storage)
     summary = build_summary(ticket)
@@ -5859,7 +6036,11 @@ def update_ticket_status(
         return
     ticket["status"] = new_status
     ticket["updated_at"] = now_iso(timezone)
-    append_ticket_jsonl(ticket)
+    if from_user.get("id"):
+        ticket["assigned_master_id"] = from_user.get("id")
+        ticket["assigned_master_username"] = from_user.get("username")
+        ticket["assigned_at"] = now_iso(timezone)
+    append_ticket_jsonl(ticket, storage, logger)
     save_storage(storage)
     admin_logger.info(
         "status change ticket_id=%s by=%s status=%s",
@@ -6119,7 +6300,7 @@ def handle_clarification_response(
     ticket["updated_at"] = now_iso(timezone)
     if normalize_ticket_status(ticket.get("status")) == STATUS_WAITING_CLIENT:
         ticket["status"] = STATUS_IN_WORK
-    append_ticket_jsonl(ticket)
+    append_ticket_jsonl(ticket, storage, logger)
     save_storage(storage)
     update_text = "\n".join(
         [
@@ -6882,7 +7063,7 @@ def handle_admin_callback(
             return True
         ticket["status"] = new_status
         ticket["updated_at"] = now_iso(timezone)
-        append_ticket_jsonl(ticket)
+        append_ticket_jsonl(ticket, storage, logger)
         save_storage(storage)
         client_chat_id = ticket.get("client_chat_id") or ticket.get("client_user_id")
         if client_chat_id:
@@ -7475,6 +7656,125 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
     if not chat_id:
         return
 
+    masters_chat_id = get_masters_chat_id(storage)
+    is_masters_chat = (
+        chat.get("type") in {"group", "supergroup"}
+        and masters_chat_id is not None
+        and chat_id == masters_chat_id
+    )
+    from_user = message.get("from") or {}
+    from_user_id = from_user.get("id")
+    from_user_username = from_user.get("username")
+
+    if chat.get("type") in {"group", "supergroup"} and not is_masters_chat:
+        if text.startswith("/bind_masters_chat"):
+            if not is_master_or_admin(from_user_id, storage):
+                return
+            set_masters_chat(chat_id, chat.get("title") or "—", storage)
+            send_message(token, chat_id, f"✅ Чат мастеров привязан: {chat.get('title') or '—'}")
+        return
+
+    if is_masters_chat:
+        if not text:
+            return
+        if text and not text.startswith("/"):
+            mapped_command = resolve_master_panel_command(text)
+            if mapped_command:
+                text = mapped_command
+            else:
+                return
+        if text.startswith("/panel"):
+            if not is_master_or_admin(from_user_id, storage):
+                return
+            send_message(token, chat_id, "Панель мастера:", reply_markup=build_masters_panel_keyboard())
+            return
+        if text.startswith("/new"):
+            if not is_master_or_admin(from_user_id, storage):
+                return
+            tickets = filter_tickets_by_statuses(storage.get("tickets", []), {STATUS_NEW})
+            tickets.sort(key=lambda item: item.get("created_at", ""), reverse=True)
+            send_message(
+                token,
+                chat_id,
+                build_master_ticket_list_text(tickets, timezone, "Новые заявки:", limit=10),
+            )
+            return
+        if text.startswith("/queue"):
+            if not is_master_or_admin(from_user_id, storage):
+                return
+            tickets = filter_tickets_by_statuses(
+                storage.get("tickets", []),
+                {STATUS_NEW, STATUS_IN_WORK, STATUS_WAITING_CLIENT},
+            )
+            tickets.sort(key=lambda item: item.get("created_at", ""), reverse=True)
+            send_message(
+                token,
+                chat_id,
+                build_master_ticket_list_text(tickets, timezone, "Активная очередь:", limit=10),
+            )
+            return
+        if text.startswith("/my"):
+            if not is_master_or_admin(from_user_id, storage):
+                return
+            tickets = []
+            for ticket in storage.get("tickets", []):
+                if ticket.get("assigned_master_id") == from_user_id:
+                    tickets.append(ticket)
+                    continue
+                if (
+                    from_user_username
+                    and ticket.get("assigned_master_username")
+                    and str(ticket.get("assigned_master_username")).lower()
+                    == str(from_user_username).lower()
+                ):
+                    tickets.append(ticket)
+            tickets.sort(key=lambda item: item.get("created_at", ""), reverse=True)
+            send_message(
+                token,
+                chat_id,
+                build_master_ticket_list_text(tickets, timezone, "Мои заявки:", limit=10),
+            )
+            return
+        if text.startswith("/ticket"):
+            if not is_master_or_admin(from_user_id, storage):
+                return
+            parts = text.split(maxsplit=1)
+            if len(parts) < 2:
+                send_message(token, chat_id, "Укажите номер: /ticket <ticket_id>.")
+                return
+            ticket_id = parts[1].strip()
+            ticket = next(
+                (item for item in storage.get("tickets", []) if item.get("ticket_id") == ticket_id),
+                None,
+            )
+            if not ticket:
+                send_message(token, chat_id, "Заявка не найдена.")
+                return
+            send_message(
+                token,
+                chat_id,
+                build_master_card(ticket, timezone),
+                reply_markup=build_master_status_keyboard(ticket),
+            )
+            return
+        if text.startswith("/help"):
+            if not is_master_or_admin(from_user_id, storage):
+                return
+            send_message(
+                token,
+                chat_id,
+                "🧰 Помощь мастеру:\n"
+                "• /panel — панель быстрых действий.\n"
+                "• /new — новые заявки.\n"
+                "• /queue — активная очередь.\n"
+                "• /my — мои заявки.\n"
+                "• /ticket <id> — открыть карточку.\n"
+                "В этом чате бот реагирует только на команды и кнопки панели.",
+            )
+            return
+        if text.startswith("/"):
+            return
+
     update_session_client_context(session, chat)
 
     if handle_webapp_data(token, message, storage, timezone, logger):
@@ -7934,8 +8234,11 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
                 token,
                 chat_id,
                 "🧰 Помощь мастеру:\n"
-                "• Нажмите /start, чтобы получать заявки.\n"
-                "• /master или /queue — очередь заявок и статусы.\n"
+                "• /panel — панель быстрых действий (в чате мастеров).\n"
+                "• /new — новые заявки.\n"
+                "• /queue — активная очередь.\n"
+                "• /my — мои заявки.\n"
+                "• /ticket <id> — открыть карточку.\n"
                 "• В карточке заявки есть кнопки статуса и «Написать клиенту».",
             )
         else:
@@ -7944,7 +8247,7 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
                 chat_id,
                 "👋 Как оставить заявку:\n"
                 "• Откройте WebApp через /webapp или кнопку меню.\n"
-                "• Телефон обязателен в форме.\n"
+                "• Телефон обязателен в форме или отправьте контакт кнопкой.\n"
                 "• Ответ мастера придёт в этот чат.",
                 reply_markup=build_main_menu_keyboard(),
             )
