@@ -67,6 +67,11 @@ h1 {
   color: var(--hint);
 }
 
+.telegram-user {
+  margin-top: 6px;
+  font-size: 13px;
+}
+
 .form {
   display: flex;
   flex-direction: column;
