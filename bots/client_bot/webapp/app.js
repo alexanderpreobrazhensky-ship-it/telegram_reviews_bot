@@ -13,9 +13,11 @@ const state = {
   step: 1,
   carKnown: false,
   sessionMaxAgeSeconds: 86400,
+  sessionToken: "",
 };
 
 const sessionTokenKey = "lira_webapp_session_token";
+const sessionTokenTtlMs = 10 * 60 * 1000;
 
 const elements = {
   form: document.getElementById("requestForm"),
@@ -113,6 +115,40 @@ const setInvalid = (element, invalid) => {
   element.classList.toggle("is-invalid", invalid);
 };
 
+const normalizePhone = (value) => String(value || "").replace(/[^\d+]/g, "");
+
+const getStoredSessionToken = () => {
+  try {
+    const raw = localStorage.getItem(sessionTokenKey);
+    if (!raw) {
+      return "";
+    }
+    const payload = JSON.parse(raw);
+    if (!payload || !payload.token || !payload.expiresAt) {
+      return "";
+    }
+    if (Date.now() > payload.expiresAt) {
+      localStorage.removeItem(sessionTokenKey);
+      return "";
+    }
+    return payload.token;
+  } catch (error) {
+    return "";
+  }
+};
+
+const storeSessionToken = (token) => {
+  state.sessionToken = token;
+  try {
+    localStorage.setItem(
+      sessionTokenKey,
+      JSON.stringify({ token, expiresAt: Date.now() + sessionTokenTtlMs })
+    );
+  } catch (error) {
+    console.warn("failed to store session token", error);
+  }
+};
+
 const validateStep = (step) => {
   if (step === 1) {
     return true;
@@ -142,11 +178,16 @@ const validateStep = (step) => {
     const descriptionField = document.getElementById("description");
     const phoneField = document.getElementById("phone");
     const descriptionInvalid = isEmpty(descriptionField.value);
-    const phoneInvalid = isEmpty(phoneField.value);
+    const normalizedPhone = normalizePhone(phoneField.value);
+    const phoneInvalid = isEmpty(normalizedPhone) || normalizedPhone.replace(/\D/g, "").length < 7;
     setInvalid(descriptionField, descriptionInvalid);
     setInvalid(phoneField, phoneInvalid);
-    if (descriptionInvalid || phoneInvalid) {
-      setStatus("Заполните описание и телефон.", true);
+    if (descriptionInvalid) {
+      setStatus("Заполните описание.", true);
+      return false;
+    }
+    if (phoneInvalid) {
+      setStatus("Введите телефон для связи.", true);
       return false;
     }
     return true;
@@ -205,7 +246,7 @@ const buildPayload = () => {
     preferredDate: document.getElementById("preferredDate").value.trim(),
     preferredTime: document.getElementById("preferredTime").value.trim(),
     name: document.getElementById("name").value.trim(),
-    phone: document.getElementById("phone").value.trim(),
+    phone: normalizePhone(document.getElementById("phone").value),
     car_known: state.carKnown,
   };
 };
@@ -216,7 +257,7 @@ const submitForm = async (event) => {
     return;
   }
   const initData = (tg?.initData || "").trim();
-  const sessionToken = sessionStorage.getItem(sessionTokenKey) || "";
+  const sessionToken = state.sessionToken || getStoredSessionToken();
   if (!initData || initData.length < 10) {
     const message = "Сессия Telegram недействительна. Откройте WebApp заново из бота.";
     setStatus(message, true);
@@ -232,16 +273,22 @@ const submitForm = async (event) => {
         "X-Telegram-Init-Data": initData,
       },
       body: JSON.stringify({
-        sessionToken,
+        session_token: sessionToken,
         initData,
         form: buildPayload(),
       }),
     });
     const payload = await response.json().catch(() => ({}));
-    if (response.status === 401 && payload.error === "SESSION_EXPIRED") {
+    if (payload.error === "phone_required") {
+      const message = "Введите телефон";
+      setStatus(message, true);
+      tg?.showAlert?.(message);
+      return;
+    }
+    if (payload.error === "session_invalid") {
       const message = "Сессия Telegram недействительна. Откройте WebApp заново из бота.";
       setStatus(message, true);
-      tg?.showAlert?.("Сессия истекла. Пожалуйста, откройте мини-приложение заново.");
+      tg?.showAlert?.(message);
       return;
     }
     if (payload.ok === true) {
@@ -262,6 +309,7 @@ const init = async () => {
   applyTheme();
   tg?.onEvent?.("themeChanged", applyTheme);
   showStep(1);
+  state.sessionToken = getStoredSessionToken();
 
   const config = await fetchConfig();
   if (Number.isFinite(config.sessionMaxAgeSeconds)) {
@@ -294,11 +342,11 @@ const init = async () => {
         body: JSON.stringify({ initData: tg.initData }),
       });
       const payload = await response.json();
-      if (payload.ok && payload.token) {
-        sessionStorage.setItem(sessionTokenKey, payload.token);
-      } else if (payload.error === "SESSION_INVALID") {
-        const message = "Сессия Telegram недействительна. Откройте WebApp заново из бота.";
-        setStatus(message, true);
+    if (payload.ok && payload.token) {
+        storeSessionToken(payload.token);
+    } else if (payload.error === "SESSION_INVALID") {
+      const message = "Сессия Telegram недействительна. Откройте WebApp заново из бота.";
+      setStatus(message, true);
         elements.submitButton.disabled = true;
         tg?.showAlert?.(message);
       }
