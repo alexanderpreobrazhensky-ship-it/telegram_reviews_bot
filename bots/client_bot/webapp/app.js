@@ -32,6 +32,7 @@ const elements = {
   knownCarData: document.getElementById("knownCarData"),
   editCarButton: document.getElementById("editCarButton"),
   addressText: document.getElementById("addressText"),
+  telegramUser: document.getElementById("telegramUser"),
 };
 
 const defaultThemes = {
@@ -115,7 +116,25 @@ const setInvalid = (element, invalid) => {
   element.classList.toggle("is-invalid", invalid);
 };
 
-const normalizePhone = (value) => String(value || "").replace(/[^\d+]/g, "");
+const normalizePhone = (value) => String(value || "").replace(/\D/g, "");
+
+const normalizeRuPhone = (value) => {
+  let digits = normalizePhone(value);
+  if (!digits) {
+    return "";
+  }
+  if (digits.length === 10) {
+    digits = `7${digits}`;
+  } else if (digits.length === 11 && digits.startsWith("8")) {
+    digits = `7${digits.slice(1)}`;
+  }
+  if (digits.length !== 11 || !digits.startsWith("7")) {
+    return "";
+  }
+  return `+${digits}`;
+};
+
+const isValidRuPhone = (value) => Boolean(normalizeRuPhone(value));
 
 const getStoredSessionToken = () => {
   try {
@@ -178,8 +197,8 @@ const validateStep = (step) => {
     const descriptionField = document.getElementById("description");
     const phoneField = document.getElementById("phone");
     const descriptionInvalid = isEmpty(descriptionField.value);
-    const normalizedPhone = normalizePhone(phoneField.value);
-    const phoneInvalid = isEmpty(normalizedPhone) || normalizedPhone.replace(/\D/g, "").length < 7;
+    const normalizedPhone = normalizeRuPhone(phoneField.value);
+    const phoneInvalid = isEmpty(normalizedPhone);
     setInvalid(descriptionField, descriptionInvalid);
     setInvalid(phoneField, phoneInvalid);
     if (descriptionInvalid) {
@@ -236,9 +255,9 @@ const lookupPlate = async () => {
 };
 
 const buildPayload = () => {
-  return {
-    type: document.querySelector("input[name='requestType']:checked")?.value || "booking",
-    carPlate: elements.plate.value.trim(),
+    return {
+      type: document.querySelector("input[name='requestType']:checked")?.value || "booking",
+      carPlate: elements.plate.value.trim(),
     carMakeModel: document.getElementById("carMakeModel").value.trim(),
     carYear: document.getElementById("carYear").value.trim(),
     carMileage: document.getElementById("carMileage").value.trim(),
@@ -246,9 +265,23 @@ const buildPayload = () => {
     preferredDate: document.getElementById("preferredDate").value.trim(),
     preferredTime: document.getElementById("preferredTime").value.trim(),
     name: document.getElementById("name").value.trim(),
-    phone: normalizePhone(document.getElementById("phone").value),
+    phone: normalizeRuPhone(document.getElementById("phone").value),
     car_known: state.carKnown,
   };
+};
+
+const updateSubmitState = () => {
+  if (!elements.submitButton) {
+    return;
+  }
+  if (elements.submitButton.dataset.locked === "true") {
+    return;
+  }
+  const phoneField = document.getElementById("phone");
+  if (!phoneField) {
+    return;
+  }
+  elements.submitButton.disabled = !isValidRuPhone(phoneField.value);
 };
 
 const submitForm = async (event) => {
@@ -321,6 +354,7 @@ const init = async () => {
   if (!tg || !tg.initData || tg.initData.length < 10) {
     setStatus("Сессия Telegram недействительна. Откройте WebApp заново из бота.", true);
     elements.submitButton.disabled = true;
+    elements.submitButton.dataset.locked = "true";
   } else if (tg.initDataUnsafe?.auth_date) {
     const authDate = Number(tg.initDataUnsafe.auth_date);
     if (Number.isFinite(authDate)) {
@@ -328,7 +362,23 @@ const init = async () => {
       if (ageSeconds > state.sessionMaxAgeSeconds) {
         setStatus("Сессия Telegram устарела. Откройте WebApp заново из бота.", true);
         elements.submitButton.disabled = true;
+        elements.submitButton.dataset.locked = "true";
       }
+    }
+  }
+
+  const user = tg?.initDataUnsafe?.user;
+  if (user && elements.telegramUser) {
+    const name = [user.first_name, user.last_name].filter(Boolean).join(" ").trim();
+    const username = user.username ? `@${user.username}` : "";
+    const parts = [name, username].filter(Boolean);
+    if (parts.length) {
+      elements.telegramUser.textContent = `Ваш Telegram: ${parts.join(" • ")}`;
+      elements.telegramUser.hidden = false;
+    }
+    const nameInput = document.getElementById("name");
+    if (nameInput && !nameInput.value && name) {
+      nameInput.value = name;
     }
   }
 
@@ -348,6 +398,7 @@ const init = async () => {
       const message = "Сессия Telegram недействительна. Откройте WebApp заново из бота.";
       setStatus(message, true);
         elements.submitButton.disabled = true;
+        elements.submitButton.dataset.locked = "true";
         tg?.showAlert?.(message);
       }
     } catch (error) {
@@ -371,6 +422,11 @@ const init = async () => {
   elements.form.addEventListener("submit", submitForm);
 
   elements.plate.addEventListener("blur", lookupPlate);
+  const phoneField = document.getElementById("phone");
+  if (phoneField) {
+    phoneField.addEventListener("input", updateSubmitState);
+    updateSubmitState();
+  }
   elements.editCarButton.addEventListener("click", () => {
     state.carKnown = false;
     elements.knownCar.hidden = true;

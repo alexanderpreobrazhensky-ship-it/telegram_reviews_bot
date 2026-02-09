@@ -256,6 +256,7 @@ CLIENT_WEBAPP_INITDATA_MAX_AGE_SECONDS = int(os.getenv("CLIENT_WEBAPP_INITDATA_M
 WEBAPP_URL = (os.getenv("CLIENT_WEBAPP_URL") or os.getenv("WEBAPP_URL") or "").strip()
 MASTER_CHAT_MODE = (os.getenv("CLIENT_MASTER_CHAT_MODE") or os.getenv("MASTER_CHAT_MODE") or "OFF").strip().upper()
 MASTER_CHAT_ID_ENV = (os.getenv("CLIENT_MASTER_CHAT_ID") or os.getenv("MASTER_CHAT_ID") or "").strip()
+CLIENT_CHAT_ID = -5252742869
 if not WEBAPP_PATH.startswith("/"):
     WEBAPP_PATH = f"/{WEBAPP_PATH}"
 WEBAPP_PATH = WEBAPP_PATH.rstrip("/") or "/WEBAPP"
@@ -263,6 +264,10 @@ LIRA_PHONE = os.getenv("LIRA_PHONE", "").strip()
 LIRA_ADDRESS = (os.getenv("LIRA_ADDRESS") or "Удмуртская 10").strip()
 LIRA_MAP_URL = os.getenv("LIRA_MAP_URL", "").strip()
 WEBAPP_DIR = os.path.join(os.path.dirname(__file__), "webapp")
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+DATA_DIR = os.path.join(REPO_ROOT, "data")
+CLIENTS_CSV_PATH = os.path.join(DATA_DIR, "clients.csv")
+TICKETS_JSONL_PATH = os.path.join(DATA_DIR, "tickets.jsonl")
 
 DICTIONARY_RULES = load_dictionary_rules()
 
@@ -517,6 +522,8 @@ def get_masters_chat_id(storage: dict) -> int | None:
         return chat_id
     if isinstance(chat_id, str) and chat_id.strip().lstrip("-").isdigit():
         return int(chat_id)
+    if isinstance(CLIENT_CHAT_ID, int):
+        return CLIENT_CHAT_ID
     return None
 
 
@@ -1116,6 +1123,7 @@ def ensure_storage_defaults(storage: dict) -> None:
     storage.setdefault("masters_reachability", {})
     storage.setdefault("pending_reply", {})
     storage.setdefault("master_sessions", {})
+    storage.setdefault("masters", {})
     settings = storage.setdefault("settings", {})
     force_fallback_env = get_env_value("CLIENT_FORCE_FALLBACK", "FORCE_FALLBACK", "0")
     settings.setdefault("force_fallback", 1 if force_fallback_env == "1" else 0)
@@ -1144,9 +1152,12 @@ def ensure_storage_defaults(storage: dict) -> None:
     settings.setdefault("master_inbox_chat_id", None)
     settings.setdefault("master_inbox_notice_at", None)
     settings.setdefault("unreachable_notice_at", None)
-    settings.setdefault("masters_chat_id", None)
+    settings.setdefault("masters_chat_id", CLIENT_CHAT_ID)
     settings.setdefault("masters_chat_title", None)
     settings.setdefault("admins_bootstrapped", 0)
+    settings.setdefault("clients_pending_sync", 0)
+    settings.setdefault("clients_last_sync_at", None)
+    settings.setdefault("clients_last_sync_error", None)
     post_settings = storage.setdefault("post_settings", {})
     target_env = os.getenv("CLIENT_POST_TARGET_ID") or os.getenv("CLIENT_POST_CHAT_ID")
     if target_env and "target_chat_id" not in post_settings:
@@ -1318,7 +1329,59 @@ def get_admin_ids_with_source(storage: dict) -> tuple[set[int], str]:
     return get_admin_ids(storage), "storage"
 
 
+def get_master_registry(storage: dict) -> dict[str, dict]:
+    ensure_storage_defaults(storage)
+    masters = storage.setdefault("masters", {})
+    if isinstance(masters, list):
+        migrated: dict[str, dict] = {}
+        for item in masters:
+            if not isinstance(item, dict):
+                continue
+            user_id = parse_int_maybe(item.get("telegram_user_id"))
+            if user_id is None:
+                continue
+            migrated[str(user_id)] = item
+        storage["masters"] = migrated
+        save_storage(storage)
+        masters = migrated
+    return masters
+
+
+def upsert_master(
+    storage: dict,
+    user_id: int,
+    username: str | None,
+    timezone: str,
+    enabled: bool,
+) -> None:
+    masters = get_master_registry(storage)
+    entry = masters.setdefault(str(user_id), {})
+    entry["telegram_user_id"] = user_id
+    if username is not None:
+        entry["telegram_username"] = username
+    entry["enabled"] = bool(enabled)
+    entry["last_seen"] = now_iso(timezone)
+    save_storage(storage)
+
+
+def get_connected_master_ids(storage: dict) -> list[int]:
+    masters = get_master_registry(storage)
+    connected = []
+    for key, entry in masters.items():
+        if not isinstance(entry, dict):
+            continue
+        if not entry.get("enabled"):
+            continue
+        user_id = parse_int_maybe(entry.get("telegram_user_id") or key)
+        if user_id is not None:
+            connected.append(user_id)
+    return sorted(set(connected))
+
+
 def get_master_ids(storage: dict) -> tuple[list[int], str]:
+    connected = get_connected_master_ids(storage)
+    if connected:
+        return connected, "storage"
     raw_masters = os.getenv("CLIENT_MASTER_IDS")
     if raw_masters is not None and raw_masters.strip():
         parsed = parse_master_ids_env(raw_masters)
@@ -1775,6 +1838,7 @@ def build_master_card(ticket: dict, timezone: str) -> str:
         ticket.get("problem_text")
         or ticket.get("parts_text")
         or ticket.get("last_visit_text")
+        or ticket.get("comment")
         or "—"
     )
     if len(description) > 800:
@@ -1832,6 +1896,7 @@ def build_master_notification(ticket: dict) -> str:
         ticket.get("problem_text")
         or ticket.get("parts_text")
         or ticket.get("last_visit_text")
+        or ticket.get("comment")
         or "—"
     )
     car_mileage = ticket.get("car_mileage") or "—"
@@ -3017,6 +3082,7 @@ def set_bot_commands(token: str, storage: dict, logger: logging.Logger) -> None:
     ]
     master_commands = default_commands + [
         {"command": "master", "description": "Меню мастера"},
+        {"command": "queue", "description": "Очередь заявок"},
         {"command": "admin", "description": "Админ-меню"},
         {"command": "bind_masters_chat", "description": "Привязать чат мастеров"},
         {"command": "status", "description": "Статус системы"},
@@ -3416,12 +3482,17 @@ def build_ticket_from_webapp(
     description = normalize_text(str(form.get("description") or ""))
     rules = analyze_text_with_rules(description, DICTIONARY_RULES)
     phone = normalize_phone_input(form.get("phone"))
+    full_name = normalize_text(str(form.get("name") or "")) or normalize_client_full_name(user)
     return {
         "ticket_id": ticket_id,
         "created_at": now_value,
         "updated_at": now_value,
+        "telegram_user_id": user.get("id"),
+        "telegram_username": user.get("username"),
+        "full_name": full_name or "—",
+        "comment": description,
         "scenario_type": scenario,
-        "fio": normalize_text(str(form.get("name") or "")) or None,
+        "fio": full_name or None,
         "phone": phone or None,
         "client_user_id": user.get("id"),
         "client_username": user.get("username"),
@@ -3449,6 +3520,7 @@ def build_ticket_from_webapp(
         "source": "webapp",
         "reminded_at": None,
         "last_master_notify_at": None,
+        "needs_phone": not bool(phone),
         "ttl_expires_at": ttl_iso(timezone, TTL_HOURS),
     }
 
@@ -3485,6 +3557,18 @@ def handle_webapp_submission(
     ticket = build_ticket_from_webapp(form, user, timezone, storage)
     storage.setdefault("tickets", []).append(ticket)
     save_storage(storage)
+    upsert_client_record(
+        storage,
+        {
+            "telegram_user_id": user.get("id"),
+            "telegram_username": user.get("username"),
+            "phone": ticket.get("phone"),
+            "full_name": ticket.get("full_name"),
+        },
+        timezone,
+        logger,
+    )
+    append_ticket_jsonl(ticket)
     deliver_ticket(
         token,
         storage,
@@ -4127,6 +4211,22 @@ def deliver_ticket(
         send_message(token, client_chat_id, f"✅ Заявка принята №{ticket.get('ticket_id')}")
     masters = get_master_recipients(storage)
     delivered = 0
+    masters_chat_id = get_masters_chat_id(storage)
+    if masters_chat_id:
+        result = send_message_with_result(
+            masters_chat_id,
+            build_master_card(ticket, timezone),
+            reply_markup=build_master_status_keyboard(ticket),
+        )
+        if result.ok:
+            delivered += 1
+        else:
+            logger.warning(
+                "failed to send ticket to masters chat chat_id=%s status=%s error=%s",
+                masters_chat_id,
+                result.status_code,
+                result.error,
+            )
     for master_id in masters:
         if isinstance(master_id, int) and master_id > 0:
             if send_ticket_to_master(
@@ -4139,15 +4239,6 @@ def deliver_ticket(
                 message_key=f"ticket:{ticket.get('ticket_id')}:{source_label}",
             ):
                 delivered += 1
-    masters_chat_id = get_masters_chat_id(storage)
-    if masters_chat_id:
-        result = send_message_with_result(
-            masters_chat_id,
-            build_master_card(ticket, timezone),
-            reply_markup=build_master_status_keyboard(ticket),
-        )
-        if result.ok:
-            delivered += 1
     if delivered == 0:
         admin_ids = sorted(get_admin_ids(storage))
         warning_text = (
@@ -4316,11 +4407,145 @@ def parse_phone_candidate(text: str) -> str | None:
     return digits
 
 
-def normalize_phone_input(value: str | None) -> str:
+def normalize_ru_phone(value: str | None) -> str:
     if not value:
         return ""
-    cleaned = re.sub(r"[^\d+]", "", str(value))
-    return cleaned.strip()
+    digits = re.sub(r"\D", "", str(value))
+    if not digits:
+        return ""
+    if len(digits) == 10:
+        digits = f"7{digits}"
+    elif len(digits) == 11 and digits.startswith("8"):
+        digits = f"7{digits[1:]}"
+    if len(digits) != 11 or not digits.startswith("7"):
+        return ""
+    return f"+{digits}"
+
+
+def normalize_phone_input(value: str | None) -> str:
+    return normalize_ru_phone(value)
+
+
+def normalize_client_full_name(chat: dict) -> str:
+    parts = [str(chat.get("first_name") or "").strip(), str(chat.get("last_name") or "").strip()]
+    return " ".join(part for part in parts if part).strip()
+
+
+def ensure_data_dir() -> None:
+    os.makedirs(DATA_DIR, exist_ok=True)
+
+
+def ensure_clients_csv() -> None:
+    ensure_data_dir()
+    if os.path.exists(CLIENTS_CSV_PATH):
+        return
+    with open(CLIENTS_CSV_PATH, "w", encoding="utf-8", newline="") as file:
+        writer = csv.DictWriter(
+            file,
+            fieldnames=["telegram_user_id", "telegram_username", "phone", "full_name", "updated_at"],
+        )
+        writer.writeheader()
+
+
+def load_clients_csv() -> dict[str, dict]:
+    ensure_clients_csv()
+    records: dict[str, dict] = {}
+    with open(CLIENTS_CSV_PATH, "r", encoding="utf-8", newline="") as file:
+        reader = csv.DictReader(file)
+        for row in reader:
+            user_id = str(row.get("telegram_user_id") or "").strip()
+            if not user_id:
+                continue
+            records[user_id] = row
+    return records
+
+
+def write_clients_csv(records: dict[str, dict]) -> None:
+    ensure_clients_csv()
+    with open(CLIENTS_CSV_PATH, "w", encoding="utf-8", newline="") as file:
+        writer = csv.DictWriter(
+            file,
+            fieldnames=["telegram_user_id", "telegram_username", "phone", "full_name", "updated_at"],
+        )
+        writer.writeheader()
+        for key in sorted(records.keys(), key=lambda value: int(value) if value.isdigit() else value):
+            writer.writerow(records[key])
+
+
+def commit_clients_csv_to_github(storage: dict, logger: logging.Logger) -> bool:
+    token = (os.getenv("CLIENT_GITHUB_TOKEN") or os.getenv("GITHUB_TOKEN") or "").strip()
+    repo = (os.getenv("CLIENT_GITHUB_REPO") or os.getenv("GITHUB_REPO") or "").strip()
+    branch = (os.getenv("CLIENT_GITHUB_BRANCH") or os.getenv("GITHUB_BRANCH") or "main").strip()
+    if not token or not repo:
+        logger.info("clients sync skipped: GitHub token/repo missing")
+        return False
+    ensure_clients_csv()
+    with open(CLIENTS_CSV_PATH, "rb") as file:
+        content_bytes = file.read()
+    content_b64 = base64.b64encode(content_bytes).decode("utf-8")
+    url = f"https://api.github.com/repos/{repo}/contents/data/clients.csv"
+    headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github+json"}
+    sha = None
+    response = requests.get(url, headers=headers, timeout=15)
+    if response.status_code == 200:
+        sha = (response.json() or {}).get("sha")
+    payload = {
+        "message": f"Update clients.csv ({datetime.utcnow().isoformat()}Z)",
+        "content": content_b64,
+        "branch": branch,
+    }
+    if sha:
+        payload["sha"] = sha
+    response = requests.put(url, headers=headers, json=payload, timeout=20)
+    if response.status_code in {200, 201}:
+        settings = storage.setdefault("settings", {})
+        settings["clients_pending_sync"] = 0
+        settings["clients_last_sync_at"] = now_iso(os.getenv("TIMEZONE", "Europe/Moscow"))
+        settings["clients_last_sync_error"] = None
+        save_storage(storage)
+        logger.info("clients sync ok: github repo=%s", repo)
+        return True
+    settings = storage.setdefault("settings", {})
+    settings["clients_pending_sync"] = 1
+    settings["clients_last_sync_error"] = f"http_{response.status_code}"
+    save_storage(storage)
+    logger.warning("clients sync failed: status=%s body=%s", response.status_code, response.text)
+    return False
+
+
+def upsert_client_record(
+    storage: dict,
+    client_data: dict,
+    timezone: str,
+    logger: logging.Logger,
+) -> None:
+    user_id = client_data.get("telegram_user_id")
+    if user_id is None:
+        return
+    records = load_clients_csv()
+    key = str(user_id)
+    existing = records.get(key, {})
+    updated = {
+        "telegram_user_id": key,
+        "telegram_username": client_data.get("telegram_username") or existing.get("telegram_username") or "",
+        "phone": client_data.get("phone") or existing.get("phone") or "",
+        "full_name": client_data.get("full_name") or existing.get("full_name") or "",
+        "updated_at": now_iso(timezone),
+    }
+    records[key] = updated
+    write_clients_csv(records)
+    if not commit_clients_csv_to_github(storage, logger):
+        settings = storage.setdefault("settings", {})
+        settings["clients_pending_sync"] = 1
+        save_storage(storage)
+
+
+def append_ticket_jsonl(ticket: dict) -> None:
+    ensure_data_dir()
+    payload = json.dumps(ticket, ensure_ascii=False)
+    with open(TICKETS_JSONL_PATH, "a", encoding="utf-8") as file:
+        file.write(f"{payload}\n")
+
 
 
 def append_text(existing: str | None, extra: str) -> str:
@@ -4332,6 +4557,173 @@ def append_text(existing: str | None, extra: str) -> str:
     if extra_value.lower() in existing.lower():
         return existing
     return f"{existing}; {extra_value}"
+
+
+def build_ticket_from_client_message(
+    storage: dict,
+    chat: dict,
+    message: dict,
+    timezone: str,
+    comment: str,
+    phone: str | None,
+) -> dict:
+    date_prefix = datetime.now(ZoneInfo(timezone)).strftime("%Y%m%d")
+    ticket_id = next_ticket_id(storage, date_prefix)
+    full_name = normalize_client_full_name(chat)
+    now_value = now_iso(timezone)
+    return {
+        "ticket_id": ticket_id,
+        "status": STATUS_NEW,
+        "source": "text",
+        "telegram_user_id": chat.get("id"),
+        "telegram_username": chat.get("username"),
+        "full_name": full_name or "—",
+        "phone": phone or None,
+        "comment": comment,
+        "created_at": now_value,
+        "updated_at": now_value,
+        "client_user_id": chat.get("id"),
+        "client_chat_id": chat.get("id"),
+        "client_contact_link": f"tg://user?id={chat.get('id')}" if chat.get("id") else None,
+        "client_username": chat.get("username"),
+        "client_first_name": chat.get("first_name"),
+        "client_last_name": chat.get("last_name"),
+        "attachments_count": 1 if extract_attachment(message) else 0,
+        "needs_phone": not bool(phone),
+        "last_master_notify_at": None,
+        "ttl_expires_at": ttl_iso(timezone, TTL_HOURS),
+    }
+
+
+def build_contact_request_keyboard() -> dict:
+    return {
+        "keyboard": [
+            [{"text": "📞 Поделиться контактом", "request_contact": True}],
+            [{"text": "Ввести номер вручную"}],
+        ],
+        "resize_keyboard": True,
+        "one_time_keyboard": True,
+    }
+
+
+def collect_phone_from_message(message: dict) -> str:
+    contact = message.get("contact")
+    if isinstance(contact, dict):
+        contact_phone = normalize_phone_input(contact.get("phone_number"))
+        if contact_phone:
+            return contact_phone
+    text = (message.get("text") or "").strip()
+    if text:
+        return normalize_phone_input(text)
+    return ""
+
+
+def process_client_ticket_message(
+    token: str,
+    chat: dict,
+    message: dict,
+    storage: dict,
+    timezone: str,
+    logger: logging.Logger,
+) -> bool:
+    chat_id = chat.get("id")
+    if not chat_id:
+        return False
+    text = (message.get("text") or "").strip()
+    phone = collect_phone_from_message(message)
+    if text == "Ввести номер вручную":
+        comment = ""
+    else:
+        comment = normalize_text(text)
+    if not comment:
+        caption = normalize_text(message.get("caption") or "")
+        if text == "Ввести номер вручную":
+            comment = "Запрос ввода телефона вручную"
+        elif message.get("contact"):
+            comment = "Контакт клиента"
+        else:
+            comment = caption or "Вложение от клиента"
+    active_ticket = find_active_ticket(storage, chat_id, timezone)
+    if active_ticket:
+        if not active_ticket.get("phone"):
+            active_ticket["needs_phone"] = True
+        active_ticket["comment"] = append_text(active_ticket.get("comment"), comment)
+        if phone:
+            active_ticket["phone"] = phone
+            active_ticket["client_phone"] = phone
+            active_ticket["needs_phone"] = False
+        active_ticket["updated_at"] = now_iso(timezone)
+        save_storage(storage)
+        append_ticket_jsonl(active_ticket)
+        if phone and not active_ticket.get("last_master_notify_at"):
+            active_ticket["last_master_notify_at"] = now_iso(timezone)
+            save_storage(storage)
+            deliver_ticket(
+                token,
+                storage,
+                active_ticket,
+                timezone,
+                logger,
+                source_label="chat",
+                send_client_confirmation=False,
+            )
+        if active_ticket.get("needs_phone"):
+            send_message(
+                token,
+                chat_id,
+                "Пожалуйста, отправьте номер телефона для связи.",
+                reply_markup=build_contact_request_keyboard(),
+            )
+        else:
+            send_message(token, chat_id, "Заявка принята. Мастер свяжется с вами.")
+        upsert_client_record(
+            storage,
+            {
+                "telegram_user_id": chat_id,
+                "telegram_username": chat.get("username"),
+                "phone": active_ticket.get("phone"),
+                "full_name": normalize_client_full_name(chat),
+            },
+            timezone,
+            logger,
+        )
+        return True
+    ticket = build_ticket_from_client_message(storage, chat, message, timezone, comment, phone or None)
+    storage.setdefault("tickets", []).append(ticket)
+    save_storage(storage)
+    append_ticket_jsonl(ticket)
+    upsert_client_record(
+        storage,
+        {
+            "telegram_user_id": chat_id,
+            "telegram_username": chat.get("username"),
+            "phone": ticket.get("phone"),
+            "full_name": ticket.get("full_name"),
+        },
+        timezone,
+        logger,
+    )
+    if ticket.get("needs_phone"):
+        send_message(
+            token,
+            chat_id,
+            "Спасибо! Теперь отправьте номер телефона для связи.",
+            reply_markup=build_contact_request_keyboard(),
+        )
+        return True
+    ticket["last_master_notify_at"] = now_iso(timezone)
+    save_storage(storage)
+    deliver_ticket(
+        token,
+        storage,
+        ticket,
+        timezone,
+        logger,
+        source_label="chat",
+        send_client_confirmation=False,
+    )
+    send_message(token, chat_id, "Заявка принята. Мастер свяжется с вами.")
+    return True
 
 
 def apply_ticket_updates(ticket: dict, updates: dict, timezone: str) -> list[str]:
@@ -4696,10 +5088,17 @@ def build_ticket_from_session(session: dict, timezone: str, storage: dict) -> di
             last_visit_text = f"{data['last_visit_date']}; {last_visit_text}"
         else:
             last_visit_text = data["last_visit_date"]
+    full_name = " ".join(
+        part for part in [data.get("client_first_name"), data.get("client_last_name")] if part
+    ).strip() or data.get("fio")
     return {
         "ticket_id": ticket_id,
         "created_at": session.get("created_at", now_value),
         "updated_at": now_value,
+        "telegram_user_id": data.get("client_user_id") or data.get("client_chat_id"),
+        "telegram_username": data.get("client_username"),
+        "full_name": full_name or "—",
+        "comment": data.get("problem_text") or data.get("parts_text") or last_visit_text or "",
         "scenario_type": session.get("scenario"),
         "fio": data.get("fio"),
         "phone": data.get("phone"),
@@ -4731,6 +5130,7 @@ def build_ticket_from_session(session: dict, timezone: str, storage: dict) -> di
         "source": "chat",
         "reminded_at": None,
         "last_master_notify_at": None,
+        "needs_phone": not bool(data.get("phone")),
         "ttl_expires_at": data.get("ttl_expires_at", ttl_iso(timezone, TTL_HOURS)),
     }
 
@@ -5121,6 +5521,7 @@ def finalize_ticket(
             tldr_reply = tldr_result.reply
     ticket["tldr"] = tldr_reply or build_tldr_fallback(ticket)
     storage.setdefault("tickets", []).append(ticket)
+    append_ticket_jsonl(ticket)
     clear_session(storage, chat_id)
     save_storage(storage)
     summary = build_summary(ticket)
@@ -5458,6 +5859,7 @@ def update_ticket_status(
         return
     ticket["status"] = new_status
     ticket["updated_at"] = now_iso(timezone)
+    append_ticket_jsonl(ticket)
     save_storage(storage)
     admin_logger.info(
         "status change ticket_id=%s by=%s status=%s",
@@ -5702,7 +6104,10 @@ def handle_clarification_response(
     elif key == "plate":
         ticket["car_plate"] = answer
     elif key == "phone":
-        ticket["phone"] = answer
+        normalized_phone = normalize_phone_input(answer)
+        if normalized_phone:
+            ticket["phone"] = normalized_phone
+            ticket["client_phone"] = normalized_phone
     elif key == "symptom":
         ticket["clarification_symptom"] = answer
     elif key == "booking":
@@ -5714,6 +6119,7 @@ def handle_clarification_response(
     ticket["updated_at"] = now_iso(timezone)
     if normalize_ticket_status(ticket.get("status")) == STATUS_WAITING_CLIENT:
         ticket["status"] = STATUS_IN_WORK
+    append_ticket_jsonl(ticket)
     save_storage(storage)
     update_text = "\n".join(
         [
@@ -6360,7 +6766,7 @@ def handle_admin_callback(
         return True
     if data.startswith("admin:queue:detail:"):
         message_id = data.split(":")[3]
-        if not message_id.isdigit():
+        if not isinstance(message_id, str) or not message_id.isdigit():
             return True
         message = get_outgoing_by_id(storage, int(message_id))
         if not message:
@@ -6476,6 +6882,7 @@ def handle_admin_callback(
             return True
         ticket["status"] = new_status
         ticket["updated_at"] = now_iso(timezone)
+        append_ticket_jsonl(ticket)
         save_storage(storage)
         client_chat_id = ticket.get("client_chat_id") or ticket.get("client_user_id")
         if client_chat_id:
@@ -7117,6 +7524,13 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
         send_message(token, chat_id, build_system_status_text(storage, timezone))
         return
 
+    if text.startswith("/queue"):
+        if not is_master_or_admin(chat_id, storage):
+            send_message(token, chat_id, "Недостаточно прав доступа")
+            return
+        send_message(token, chat_id, "Очередь заявок:", reply_markup=build_master_menu_keyboard())
+        return
+
     if text.startswith("/bind_masters_chat"):
         if not is_master_or_admin(chat_id, storage):
             send_message(token, chat_id, "Недостаточно прав доступа")
@@ -7478,6 +7892,10 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
         save_storage(storage)
         return
 
+    if not text.startswith("/") and chat.get("type") == "private" and not is_master_or_admin(chat_id, storage):
+        if process_client_ticket_message(token, chat, message, storage, timezone, logger):
+            return
+
     if handle_attachment(
         token,
         chat_id,
@@ -7500,15 +7918,14 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
         return
 
     if text.startswith("/master"):
-        if is_master_or_admin(chat_id, storage):
-            send_message(token, chat_id, "Меню мастера:", reply_markup=build_master_menu_keyboard())
+        username = chat.get("username")
+        connected_ids = set(get_connected_master_ids(storage))
+        if chat_id in connected_ids:
+            upsert_master(storage, int(chat_id), username, timezone, enabled=False)
+            send_message(token, chat_id, "❌ Вы отключены от очереди мастеров.")
         else:
-            send_message(
-                token,
-                chat_id,
-                "Команда доступна мастерам. Оставьте заявку через меню.",
-                reply_markup=build_main_menu_keyboard(),
-            )
+            upsert_master(storage, int(chat_id), username, timezone, enabled=True)
+            send_message(token, chat_id, "✅ Вы подключены как мастер.", reply_markup=build_master_menu_keyboard())
         return
 
     if text.startswith("/help"):
@@ -7518,7 +7935,7 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
                 chat_id,
                 "🧰 Помощь мастеру:\n"
                 "• Нажмите /start, чтобы получать заявки.\n"
-                "• /master — очередь заявок и статусы.\n"
+                "• /master или /queue — очередь заявок и статусы.\n"
                 "• В карточке заявки есть кнопки статуса и «Написать клиенту».",
             )
         else:
