@@ -135,6 +135,8 @@ START_PAYLOAD_SCENARIOS = {
 START_PAYLOAD_MASTER_CHAT = {"start_master_chat", "start_question", "master_chat", "master"}
 ADMIN_PAGE_SIZE = 5
 ADMIN_LOG_LINES = 200
+MASTER_PAGE_SIZE = 10
+MASTER_CLOSED_PAGE_SIZE = 20
 ADMIN_STATE_NONE = "none"
 ADMIN_STATE_ADD_ADMIN = "await_admin_id"
 ADMIN_STATE_ADD_BLOCK = "await_block_id"
@@ -162,6 +164,8 @@ ADMIN_STATE_ASK_MORE_TEXT = "await_ask_more_text"
 ADMIN_STATE_REPORT_RANGE = "await_report_range"
 ADMIN_STATE_REPORT_TYPE = "await_report_type"
 ADMIN_STATE_REPORT_WEEKEND = "await_report_weekend"
+MASTER_STATE_NONE = "none"
+MASTER_STATE_FIND_TICKET = "await_ticket_id"
 
 CALLBACK_DEBOUNCE_WINDOW_SECONDS = 2
 CALLBACK_DEBOUNCE_TTL_SECONDS = 60
@@ -178,16 +182,16 @@ AI_FALLBACK_TTL_SECONDS = int(os.getenv("AI_FALLBACK_TTL_SECONDS") or "1800")
 AI_FALLBACK_WINDOW_SECONDS = int(os.getenv("AI_FALLBACK_WINDOW_SECONDS") or "600")
 
 STATUS_NEW = "new"
-STATUS_IN_PROGRESS = "in_progress"
+STATUS_IN_WORK = "in_work"
 STATUS_WAITING_CLIENT = "waiting_client"
-STATUS_DONE = "done"
+STATUS_CLOSED = "closed"
 STATUS_CANONICAL = {
     "new": STATUS_NEW,
-    "in_work": STATUS_IN_PROGRESS,
-    "in_progress": STATUS_IN_PROGRESS,
+    "in_work": STATUS_IN_WORK,
+    "in_progress": STATUS_IN_WORK,
     "waiting_client": STATUS_WAITING_CLIENT,
-    "closed": STATUS_DONE,
-    "done": STATUS_DONE,
+    "closed": STATUS_CLOSED,
+    "done": STATUS_CLOSED,
 }
 
 AI_ASK_BLOCKLIST = {
@@ -506,6 +510,31 @@ def get_master_inbox_title() -> str | None:
     return get_persistent_setting(SETTINGS_KEY_MASTER_CHAT_TITLE)
 
 
+def get_masters_chat_id(storage: dict) -> int | None:
+    settings = storage.get("settings", {})
+    chat_id = settings.get("masters_chat_id")
+    if isinstance(chat_id, int):
+        return chat_id
+    if isinstance(chat_id, str) and chat_id.strip().lstrip("-").isdigit():
+        return int(chat_id)
+    return None
+
+
+def set_masters_chat(chat_id: int | None, title: str | None, storage: dict) -> None:
+    settings = storage.setdefault("settings", {})
+    settings["masters_chat_id"] = chat_id
+    if title is not None:
+        settings["masters_chat_title"] = title
+    save_storage(storage)
+
+
+def get_masters_chat_title(storage: dict) -> str | None:
+    title = storage.get("settings", {}).get("masters_chat_title")
+    if isinstance(title, str) and title.strip():
+        return title
+    return None
+
+
 def parse_int_maybe(value: object) -> int | None:
     if value is None:
         return None
@@ -520,10 +549,14 @@ def parse_int_maybe(value: object) -> int | None:
 
 def get_pinned_message_id() -> int | None:
     value = get_core_setting(CORE_SETTING_PINNED_MESSAGE_ID)
+    if value is None:
+        return None
     if isinstance(value, int):
-        return value
-    if isinstance(value, str) and value.isdigit():
-        return int(value)
+        return value if value > 0 else None
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.isdigit():
+            return int(stripped)
     return None
 
 
@@ -535,14 +568,19 @@ def normalize_webapp_url(value: str | None) -> str | None:
     raw = (value or "").strip()
     if not raw:
         return None
-    lowered = raw.lower()
-    if lowered.startswith("https://https://"):
-        raw = raw[len("https://") :]
-    if raw.startswith("http://"):
-        raw = f"https://{raw[len('http://'):]}"
-    if not raw.startswith("https://"):
-        raw = f"https://{raw}"
-    return raw.rstrip("/")
+    normalized = raw.strip()
+    if normalized.startswith("HTTPS://"):
+        normalized = f"https://{normalized[len('HTTPS://'):]}"
+    if normalized.startswith("HTTP://"):
+        normalized = f"http://{normalized[len('HTTP://'):]}"
+    while normalized.lower().startswith("https://https://"):
+        normalized = f"https://{normalized[len('https://https://'):]}"
+    if not normalized.lower().startswith(("http://", "https://")):
+        normalized = f"https://{normalized}"
+    normalized = normalized.strip()
+    if not normalized:
+        return None
+    return normalized
 
 
 def get_webapp_public_url() -> str | None:
@@ -935,13 +973,8 @@ def parse_master_usernames() -> list[str]:
 
 
 def get_master_recipients(storage: dict) -> list[int]:
-    if MASTER_CHAT_MODE == "OFF":
-        admin_ids = sorted(get_admin_ids(storage))
-        return admin_ids
-    master_inbox = get_master_inbox_chat_id(storage)
-    if master_inbox is None:
-        return []
-    return [master_inbox]
+    masters, _ = get_master_ids(storage)
+    return masters
 
 
 def get_master_contact_username(logger: logging.Logger) -> tuple[str | None, bool, bool]:
@@ -969,6 +1002,34 @@ def parse_csv_ints(raw: str | None) -> list[int]:
         except ValueError:
             continue
     return values
+
+
+def parse_json_ints(raw: str | None) -> list[int]:
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    if isinstance(parsed, list):
+        values = []
+        for item in parsed:
+            value = parse_int_maybe(item)
+            if value is not None:
+                values.append(value)
+        return values
+    return []
+
+
+def parse_master_ids_env(raw: str | None) -> list[int]:
+    if not raw:
+        return []
+    cleaned = raw.strip()
+    if not cleaned:
+        return []
+    if cleaned.startswith("["):
+        return parse_json_ints(cleaned)
+    return parse_csv_ints(cleaned)
 
 
 def parse_single_int(raw: str | None) -> list[int]:
@@ -1052,6 +1113,9 @@ def ensure_storage_defaults(storage: dict) -> None:
     storage.setdefault("pinned_post", {})
     storage.setdefault("button_clicks", {})
     storage.setdefault("unreachable_users", {})
+    storage.setdefault("masters_reachability", {})
+    storage.setdefault("pending_reply", {})
+    storage.setdefault("master_sessions", {})
     settings = storage.setdefault("settings", {})
     force_fallback_env = get_env_value("CLIENT_FORCE_FALLBACK", "FORCE_FALLBACK", "0")
     settings.setdefault("force_fallback", 1 if force_fallback_env == "1" else 0)
@@ -1080,6 +1144,8 @@ def ensure_storage_defaults(storage: dict) -> None:
     settings.setdefault("master_inbox_chat_id", None)
     settings.setdefault("master_inbox_notice_at", None)
     settings.setdefault("unreachable_notice_at", None)
+    settings.setdefault("masters_chat_id", None)
+    settings.setdefault("masters_chat_title", None)
     settings.setdefault("admins_bootstrapped", 0)
     post_settings = storage.setdefault("post_settings", {})
     target_env = os.getenv("CLIENT_POST_TARGET_ID") or os.getenv("CLIENT_POST_CHAT_ID")
@@ -1252,6 +1318,30 @@ def get_admin_ids_with_source(storage: dict) -> tuple[set[int], str]:
     return get_admin_ids(storage), "storage"
 
 
+def get_master_ids(storage: dict) -> tuple[list[int], str]:
+    raw_masters = os.getenv("CLIENT_MASTER_IDS")
+    if raw_masters is not None and raw_masters.strip():
+        parsed = parse_master_ids_env(raw_masters)
+        return sorted(set(parsed)), "CLIENT_MASTER_IDS"
+    raw_admins = os.getenv("CLIENT_ADMIN_IDS")
+    if raw_admins is not None and raw_admins.strip():
+        parsed = parse_master_ids_env(raw_admins)
+        return sorted(set(parsed)), "CLIENT_ADMIN_IDS"
+    admin_ids = sorted(get_admin_ids(storage))
+    return admin_ids, "storage"
+
+
+def is_master_user(chat_id: int | None, storage: dict) -> bool:
+    if chat_id is None:
+        return False
+    masters, _ = get_master_ids(storage)
+    return int(chat_id) in set(masters)
+
+
+def is_master_or_admin(chat_id: int | None, storage: dict) -> bool:
+    return is_admin(chat_id, storage) or is_master_user(chat_id, storage)
+
+
 def get_admin_ids_from_env() -> set[int]:
     env_priority = (
         ("CLIENT_ADMIN_IDS", parse_csv_ints),
@@ -1358,6 +1448,79 @@ def is_unreachable_user(storage: dict, chat_id: int | None) -> bool:
     return str(chat_id) in unreachable
 
 
+def get_master_reachability(storage: dict, user_id: int) -> dict:
+    reachability = storage.setdefault("masters_reachability", {})
+    entry = reachability.setdefault(str(user_id), {})
+    entry.setdefault("reachable", False)
+    entry.setdefault("invalid", False)
+    entry.setdefault("marked_at", None)
+    return entry
+
+
+def mark_master_reachability(
+    storage: dict,
+    user_id: int,
+    reachable: bool | None,
+    invalid: bool | None,
+    timezone: str,
+) -> None:
+    entry = get_master_reachability(storage, user_id)
+    if reachable is not None:
+        entry["reachable"] = reachable
+    if invalid is not None:
+        entry["invalid"] = invalid
+    entry["marked_at"] = now_iso(timezone)
+    save_storage(storage)
+
+
+def should_send_to_master(storage: dict, user_id: int) -> bool:
+    reachability = storage.get("masters_reachability", {})
+    entry = reachability.get(str(user_id))
+    if not entry:
+        return True
+    if entry.get("invalid"):
+        return False
+    if entry.get("reachable") is False:
+        return False
+    return True
+
+
+def build_master_reachability_text(storage: dict) -> str:
+    reachability = storage.get("masters_reachability", {})
+    invalid_ids = []
+    unreachable_ids = []
+    for key, entry in reachability.items():
+        if entry.get("invalid"):
+            invalid_ids.append(key)
+        elif entry.get("reachable") is False:
+            unreachable_ids.append(key)
+    invalid_text = ", ".join(sorted(invalid_ids, key=lambda value: int(value))) or "—"
+    unreachable_text = ", ".join(sorted(unreachable_ids, key=lambda value: int(value))) or "—"
+    return "\n".join(
+        [
+            "🚫 Недоступные получатели",
+            f"invalid chat_id (400): {invalid_text}",
+            f"unreachable (403): {unreachable_text}",
+        ]
+    )
+
+
+def update_master_reachability_from_result(
+    storage: dict,
+    master_id: int,
+    result: TgRequestResult,
+    timezone: str,
+) -> None:
+    if result.ok:
+        return
+    if result.status_code == 403:
+        mark_master_reachability(storage, master_id, reachable=False, invalid=False, timezone=timezone)
+        return
+    if result.status_code == 400 and result.error:
+        if "chat not found" in result.error.lower():
+            mark_master_reachability(storage, master_id, reachable=False, invalid=True, timezone=timezone)
+
+
 def mark_unreachable_user(storage: dict, chat_id: int, timezone: str, reason: str) -> None:
     unreachable = storage.setdefault("unreachable_users", {})
     unreachable[str(chat_id)] = {
@@ -1395,6 +1558,22 @@ def set_admin_session(storage: dict, chat_id: int, state: str, data: dict | None
 def clear_admin_session(storage: dict, chat_id: int) -> None:
     ensure_storage_defaults(storage)
     storage.setdefault("admin_sessions", {}).pop(str(chat_id), None)
+
+
+def get_master_session(storage: dict, chat_id: int) -> dict:
+    ensure_storage_defaults(storage)
+    return storage.setdefault("master_sessions", {}).get(str(chat_id), {"state": MASTER_STATE_NONE})
+
+
+def set_master_session(storage: dict, chat_id: int, state: str, data: dict | None = None) -> None:
+    ensure_storage_defaults(storage)
+    payload = {"state": state, "data": data or {}}
+    storage.setdefault("master_sessions", {})[str(chat_id)] = payload
+
+
+def clear_master_session(storage: dict, chat_id: int) -> None:
+    ensure_storage_defaults(storage)
+    storage.setdefault("master_sessions", {}).pop(str(chat_id), None)
 
 
 def format_was_here(value: str | None) -> str:
@@ -1518,15 +1697,15 @@ def build_master_status_keyboard(ticket: dict) -> dict:
     ticket_id = ticket.get("ticket_id", "")
     keyboard: list[list[dict]] = [
         [
-            {"text": "▶️ В работу", "callback_data": f"ticket:{ticket_id}:{STATUS_IN_PROGRESS}"},
-            {"text": "⏳ Ожидает клиента", "callback_data": f"ticket:{ticket_id}:{STATUS_WAITING_CLIENT}"},
+            {"text": "▶️ В работу", "callback_data": f"ticket_status:{ticket_id}:{STATUS_IN_WORK}"},
+            {"text": "⏳ Ожидает клиента", "callback_data": f"ticket_status:{ticket_id}:{STATUS_WAITING_CLIENT}"},
         ],
         [
-            {"text": "✅ Закрыть", "callback_data": f"ticket:{ticket_id}:{STATUS_DONE}"},
+            {"text": "✅ Закрыть", "callback_data": f"ticket_status:{ticket_id}:{STATUS_CLOSED}"},
         ]
     ]
     row: list[dict] = []
-    row.append({"text": "💬 Написать клиенту", "callback_data": f"client:{ticket_id}"})
+    row.append({"text": "💬 Написать клиенту", "callback_data": f"ticket_reply:{ticket_id}"})
     row.append({"text": "✍️ Запросить уточнение", "callback_data": f"ticket:{ticket_id}:ask_more"})
     keyboard.append(row)
     return {"inline_keyboard": keyboard}
@@ -1586,7 +1765,12 @@ def build_master_card(ticket: dict, timezone: str) -> str:
     if username:
         cleaned = username.lstrip("@")
         username_display = f"@{cleaned}" if cleaned else "нет username"
-    tg_id = ticket.get("client_chat_id") or "—"
+    tg_id = ticket.get("client_user_id") or ticket.get("client_chat_id") or "—"
+    contact_link = ticket.get("client_contact_link") or "—"
+    client_name = " ".join(
+        part for part in [ticket.get("client_first_name"), ticket.get("client_last_name")] if part
+    ).strip() or "—"
+    client_phone = ticket.get("client_phone") or ticket.get("phone") or "—"
     description = (
         ticket.get("problem_text")
         or ticket.get("parts_text")
@@ -1614,6 +1798,13 @@ def build_master_card(ticket: dict, timezone: str) -> str:
         [
             f"🧾 Заявка {ticket.get('ticket_id', '—')} • {format_ticket_status(ticket.get('status'))}",
             f"TL;DR: {tldr}",
+            "Контакты клиента:",
+            f"Имя: {client_name}",
+            f"Username: {username_display}",
+            f"user_id: {tg_id}",
+            f"link: {contact_link}",
+            f"Телефон: {client_phone}",
+            "",
             f"👤 {ticket.get('fio') or '—'}",
             f"☎️ {ticket.get('phone') or '—'}",
             f"💬 {username_display} • id:{tg_id}",
@@ -1699,9 +1890,9 @@ def build_ticket_update_card(ticket: dict, fields_changed: list[str], timezone: 
 def format_ticket_status(value: str | None) -> str:
     mapping = {
         STATUS_NEW: "Новая",
-        STATUS_IN_PROGRESS: "В работе",
+        STATUS_IN_WORK: "В работе",
         STATUS_WAITING_CLIENT: "Ожидает клиента",
-        STATUS_DONE: "Закрыта",
+        STATUS_CLOSED: "Закрыта",
     }
     return mapping.get(normalize_ticket_status(value), "—")
 
@@ -1814,6 +2005,21 @@ def build_admin_settings_keyboard() -> dict:
     }
 
 
+def build_unreachable_recipients_keyboard() -> dict:
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "🔄 Сбросить", "callback_data": "admin:unreachable:reset"},
+                {"text": "📩 Инструкция мастерам", "callback_data": "admin:unreachable:instruction"},
+            ],
+            [
+                {"text": "⬅️ Назад", "callback_data": "admin:settings"},
+                {"text": "🏠 В меню", "callback_data": "admin:menu"},
+            ],
+        ]
+    }
+
+
 def build_admin_posts_keyboard() -> dict:
     return {
         "inline_keyboard": [
@@ -1883,8 +2089,10 @@ def build_master_contacts_text(storage: dict) -> str:
         )
     inbox = get_master_inbox_chat_id(storage)
     inbox_title = get_master_inbox_title() or "—"
-    unreachable = storage.get("unreachable_users", {})
-    unreachable_ids = ", ".join(unreachable.keys()) if unreachable else "—"
+    reachability = storage.get("masters_reachability", {})
+    unreachable_ids = ", ".join(
+        sorted([key for key, entry in reachability.items() if entry.get("reachable") is False and not entry.get("invalid")])
+    ) or "—"
     status = "✅ чат подключён" if inbox else "⚠️ чат не подключён"
     return "\n".join(
         [
@@ -1905,18 +2113,22 @@ def build_system_status_text(storage: dict, timezone: str) -> str:
     pinned_id = get_pinned_message_id()
     master_id = get_master_inbox_chat_id(storage)
     master_title = get_master_inbox_title() or "—"
+    masters_chat_id = get_masters_chat_id(storage)
+    masters_chat_title = get_masters_chat_title(storage) or "—"
     webapp_url = get_webapp_url()
     ai_service = AIService(logging.getLogger("ai"), settings=get_settings(storage))
     ai_state = build_ai_status_text(storage, timezone)
     master_status = (
         "OFF" if MASTER_CHAT_MODE == "OFF" else f"{'✅' if master_id else '⚠️'} {master_title} (id: {master_id or '—'})"
     )
+    masters_chat_status = f"{'✅' if masters_chat_id else '⚠️'} {masters_chat_title} (id: {masters_chat_id or '—'})"
     return "\n".join(
         [
             "🧭 Статус системы",
             f"Канал: {'✅' if channel_id else '⚠️'} {channel_title} (id: {channel_id or '—'})",
             f"Закреп: {'✅' if pinned_id else '⚠️'} message_id={pinned_id or '—'}",
             f"Чат мастеров: {master_status}",
+            f"Чат мастеров (заявки): {masters_chat_status}",
             f"WebApp: {'✅' if (WEBAPP_ENABLED and webapp_url) else '⚠️'} {webapp_url or '—'}",
             f"AI: {'ON' if ai_service.is_enabled() else 'OFF'}",
             "",
@@ -1941,9 +2153,9 @@ def build_admin_tickets_filter_keyboard() -> dict:
         "inline_keyboard": [
             [
                 {"text": "Новые", "callback_data": "admin:tickets:new:1"},
-                {"text": "В работе", "callback_data": "admin:tickets:in_progress:1"},
+                {"text": "В работе", "callback_data": "admin:tickets:in_work:1"},
                 {"text": "Ожидает клиента", "callback_data": "admin:tickets:waiting_client:1"},
-                {"text": "Закрытые", "callback_data": "admin:tickets:done:1"},
+                {"text": "Закрытые", "callback_data": "admin:tickets:closed:1"},
             ],
             [{"text": "🚦 Умная очередь", "callback_data": "admin:tickets:queue:1"}],
             [
@@ -1975,6 +2187,40 @@ def build_admin_ticket_list_keyboard(tickets: list[dict], status: str, page: int
     return {"inline_keyboard": rows}
 
 
+def build_master_menu_keyboard() -> dict:
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "📥 Новые", "callback_data": "master:queue:new:1"},
+                {"text": "🛠 В работе", "callback_data": "master:queue:in_work:1"},
+            ],
+            [
+                {"text": "⏳ Ожидают клиента", "callback_data": "master:queue:waiting_client:1"},
+                {"text": "✅ Закрытые", "callback_data": "master:queue:closed:1"},
+            ],
+            [
+                {"text": "🔎 Найти по номеру", "callback_data": "master:find"},
+            ],
+        ]
+    }
+
+
+def build_master_ticket_list_keyboard(tickets: list[dict], status: str, page: int, total_pages: int) -> dict:
+    rows: list[list[dict]] = []
+    for ticket in tickets:
+        ticket_id = ticket.get("ticket_id", "")
+        rows.append([{"text": ticket_id, "callback_data": f"master:ticket:{ticket_id}"}])
+    nav_row: list[dict] = []
+    if page > 1:
+        nav_row.append({"text": "⬅️", "callback_data": f"master:queue:{status}:{page - 1}"})
+    if page < total_pages:
+        nav_row.append({"text": "➡️", "callback_data": f"master:queue:{status}:{page + 1}"})
+    if nav_row:
+        rows.append(nav_row)
+    rows.append([{"text": "⬅️ Назад", "callback_data": "master:menu"}])
+    return {"inline_keyboard": rows}
+
+
 def build_admin_queue_keyboard(failed_messages: list[dict]) -> dict:
     rows: list[list[dict]] = []
     if failed_messages:
@@ -2003,9 +2249,9 @@ def build_admin_ticket_detail_keyboard(ticket: dict) -> dict:
     ticket_id = ticket.get("ticket_id", "")
     rows = [
         [
-            {"text": "▶️ В работу", "callback_data": f"admin:ticket_status:{ticket_id}:{STATUS_IN_PROGRESS}"},
+            {"text": "▶️ В работу", "callback_data": f"admin:ticket_status:{ticket_id}:{STATUS_IN_WORK}"},
             {"text": "⏳ Ожидает клиента", "callback_data": f"admin:ticket_status:{ticket_id}:{STATUS_WAITING_CLIENT}"},
-            {"text": "✅ Закрыта", "callback_data": f"admin:ticket_status:{ticket_id}:{STATUS_DONE}"},
+            {"text": "✅ Закрыта", "callback_data": f"admin:ticket_status:{ticket_id}:{STATUS_CLOSED}"},
         ],
         [{"text": "↩️ Вернуть в новые", "callback_data": f"admin:ticket_status:{ticket_id}:{STATUS_NEW}"}],
     ]
@@ -2041,9 +2287,9 @@ def build_admin_export_status_keyboard() -> dict:
             [
                 {"text": "Любой", "callback_data": "admin:export_status:any"},
                 {"text": "Новые", "callback_data": "admin:export_status:new"},
-                {"text": "В работе", "callback_data": "admin:export_status:in_progress"},
+                {"text": "В работе", "callback_data": "admin:export_status:in_work"},
                 {"text": "Ожидает клиента", "callback_data": "admin:export_status:waiting_client"},
-                {"text": "Закрытые", "callback_data": "admin:export_status:done"},
+                {"text": "Закрытые", "callback_data": "admin:export_status:closed"},
             ],
             [{"text": "Назад", "callback_data": "admin:export"}],
         ]
@@ -2353,9 +2599,9 @@ def build_stats(storage: dict, timezone: str) -> str:
     last_7 = filter_tickets_by_days(tickets, 7, timezone)
     status_counts = {
         STATUS_NEW: 0,
-        STATUS_IN_PROGRESS: 0,
+        STATUS_IN_WORK: 0,
         STATUS_WAITING_CLIENT: 0,
-        STATUS_DONE: 0,
+        STATUS_CLOSED: 0,
     }
     type_counts: dict[str, int] = {}
     weekend_count = 0
@@ -2404,9 +2650,9 @@ def build_stats(storage: dict, timezone: str) -> str:
             (
                 "Статусы: "
                 f"новые {status_counts.get(STATUS_NEW, 0)}, "
-                f"в работе {status_counts.get(STATUS_IN_PROGRESS, 0)}, "
+                f"в работе {status_counts.get(STATUS_IN_WORK, 0)}, "
                 f"ожидает клиента {status_counts.get(STATUS_WAITING_CLIENT, 0)}, "
-                f"закрытые {status_counts.get(STATUS_DONE, 0)}"
+                f"закрытые {status_counts.get(STATUS_CLOSED, 0)}"
             ),
             f"Клики /start=* всего: {start_total}",
             f"Топ /start payload: {start_payload_text}",
@@ -2459,9 +2705,9 @@ def build_admin_report(storage: dict, timezone: str, days: int | None, scenario:
     tickets = filter_tickets_by_weekend(tickets, weekend_filter, timezone)
     status_counts = {
         STATUS_NEW: 0,
-        STATUS_IN_PROGRESS: 0,
+        STATUS_IN_WORK: 0,
         STATUS_WAITING_CLIENT: 0,
-        STATUS_DONE: 0,
+        STATUS_CLOSED: 0,
     }
     type_counts: dict[str, int] = {}
     weekend_count = 0
@@ -2495,9 +2741,9 @@ def build_admin_report(storage: dict, timezone: str, days: int | None, scenario:
             (
                 "Статусы: "
                 f"новые {status_counts.get(STATUS_NEW, 0)}, "
-                f"в работе {status_counts.get(STATUS_IN_PROGRESS, 0)}, "
+                f"в работе {status_counts.get(STATUS_IN_WORK, 0)}, "
                 f"ожидает клиента {status_counts.get(STATUS_WAITING_CLIENT, 0)}, "
-                f"закрытые {status_counts.get(STATUS_DONE, 0)}"
+                f"закрытые {status_counts.get(STATUS_CLOSED, 0)}"
             ),
             f"Клики /start=* всего: {start_total}",
             f"Топ кнопка /start: {top_start}",
@@ -2763,6 +3009,29 @@ def set_webhook(token: str, logger: logging.Logger) -> None:
         logger.warning("webhook set failed: %s", result.error or result.response_json)
 
 
+def set_bot_commands(token: str, storage: dict, logger: logging.Logger) -> None:
+    default_commands = [
+        {"command": "start", "description": "Запустить бота"},
+        {"command": "help", "description": "Помощь"},
+        {"command": "webapp", "description": "Открыть WebApp"},
+    ]
+    master_commands = default_commands + [
+        {"command": "master", "description": "Меню мастера"},
+        {"command": "admin", "description": "Админ-меню"},
+        {"command": "bind_masters_chat", "description": "Привязать чат мастеров"},
+        {"command": "status", "description": "Статус системы"},
+    ]
+    result = tg_request("setMyCommands", {"commands": default_commands})
+    if not result.ok:
+        logger.warning("setMyCommands failed: %s", result.error or result.response_json)
+    master_ids = set(get_master_recipients(storage)) | set(get_admin_ids(storage))
+    for chat_id in sorted(master_ids):
+        tg_request(
+            "setMyCommands",
+            {"commands": master_commands, "scope": {"type": "chat", "chat_id": chat_id}},
+        )
+
+
 def verify_webapp_init_data(init_data: str, token: str) -> tuple[bool, dict | None, str, int | None]:
     if not init_data:
         return False, None, "missing", None
@@ -2860,6 +3129,25 @@ def get_user_id_from_init_data(init_data: dict) -> int | None:
     return parse_int_maybe(user.get("id"))
 
 
+def get_user_from_init_data(init_data: dict) -> dict | None:
+    user_raw = init_data.get("user")
+    try:
+        user = json.loads(user_raw) if user_raw else {}
+    except json.JSONDecodeError:
+        user = {}
+    if not isinstance(user, dict):
+        return None
+    user_id = parse_int_maybe(user.get("id"))
+    if not user_id:
+        return None
+    return {
+        "id": user_id,
+        "username": user.get("username"),
+        "first_name": user.get("first_name"),
+        "last_name": user.get("last_name"),
+    }
+
+
 def register_webapp_routes(app: Flask, token: str, logger: logging.Logger) -> Flask:
     webapp_route = WEBAPP_PATH
 
@@ -2955,12 +3243,12 @@ def register_webapp_routes(app: Flask, token: str, logger: logging.Logger) -> Fl
         logger.info("webapp session initdata check: ok=%s reason=%s age=%s", ok, reason, age_seconds)
         if not ok:
             return jsonify({"ok": False, "error": "SESSION_INVALID", "reason": reason}), 401
-        user_id = get_user_id_from_init_data(parsed or {})
-        if not user_id:
+        user = get_user_from_init_data(parsed or {})
+        if not user or not user.get("id"):
             return jsonify({"ok": False, "error": "SESSION_INVALID", "reason": "user_missing"}), 401
         secret = get_webapp_session_secret(token)
         session_token = build_webapp_session_token(
-            user_id,
+            int(user["id"]),
             secret,
             CLIENT_WEBAPP_INITDATA_MAX_AGE_SECONDS,
         )
@@ -2978,36 +3266,43 @@ def register_webapp_routes(app: Flask, token: str, logger: logging.Logger) -> Fl
                 "form": request.form.to_dict(),
                 "initData": request.form.get("initData", ""),
             }
-        session_token = (payload.get("sessionToken") or "").strip()
+        form = payload.get("form") or {}
+        phone = normalize_phone_input(form.get("phone"))
+        if not phone:
+            return jsonify({"ok": False, "error": "phone_required"}), 400
+        session_token = (payload.get("session_token") or payload.get("sessionToken") or "").strip()
+        user: dict | None = None
         if session_token:
             secret = get_webapp_session_secret(token)
             ok, parsed_token, reason = verify_webapp_session_token(session_token, secret)
             logger.info("webapp submit session token check: ok=%s reason=%s", ok, reason)
-            if not ok:
-                logger.info("webapp submit status=session_expired reason=%s", reason)
-                return jsonify({"ok": False, "error": "SESSION_EXPIRED"}), 401
-            user_id = parse_int_maybe((parsed_token or {}).get("user_id"))
-            if not user_id:
-                logger.info("webapp submit status=session_expired reason=user_missing")
-                return jsonify({"ok": False, "error": "SESSION_EXPIRED"}), 401
-            init_data = {"user": json.dumps({"id": user_id})}
-            return handle_webapp_submission(init_data, payload.get("form") or {}, token, logger)
-        init_data = (request.headers.get("X-Telegram-Init-Data", "") or "").strip()
-        init_data = init_data or (payload.get("initData") or "").strip()
-        init_data = init_data or (request.form.get("initData") or "").strip()
-        ok, parsed, reason, age_seconds = verify_webapp_init_data(init_data, token)
-        logger.info("webapp submit initdata check: ok=%s reason=%s age=%s", ok, reason, age_seconds)
-        if not ok:
-            logger.info("webapp submit status=session_expired reason=%s", reason)
-            return jsonify({"ok": False, "error": "SESSION_EXPIRED"}), 401
-        if age_seconds is not None and age_seconds > WEBAPP_SUBMIT_INITDATA_MAX_AGE_SECONDS:
-            logger.info(
-                "webapp submit status=session_expired reason=age_exceeded age=%s limit=%s",
-                age_seconds,
-                WEBAPP_SUBMIT_INITDATA_MAX_AGE_SECONDS,
-            )
-            return jsonify({"ok": False, "error": "SESSION_EXPIRED"}), 401
-        return handle_webapp_submission(parsed or {}, payload.get("form") or {}, token, logger)
+            if ok:
+                user_id = parse_int_maybe((parsed_token or {}).get("user_id"))
+                if user_id:
+                    user = {"id": user_id}
+        init_data_raw = (request.headers.get("X-Telegram-Init-Data", "") or "").strip()
+        init_data_raw = init_data_raw or (payload.get("initData") or "").strip()
+        init_data_raw = init_data_raw or (request.form.get("initData") or "").strip()
+        if user is None or init_data_raw:
+            ok, parsed, reason, age_seconds = verify_webapp_init_data(init_data_raw, token)
+            logger.info("webapp submit initdata check: ok=%s reason=%s age=%s", ok, reason, age_seconds)
+            if ok:
+                if age_seconds is not None and age_seconds > WEBAPP_SUBMIT_INITDATA_MAX_AGE_SECONDS:
+                    logger.info(
+                        "webapp submit status=session_invalid reason=age_exceeded age=%s limit=%s",
+                        age_seconds,
+                        WEBAPP_SUBMIT_INITDATA_MAX_AGE_SECONDS,
+                    )
+                    return jsonify({"ok": False, "error": "session_invalid"}), 403
+                user = get_user_from_init_data(parsed or {})
+            elif user is None:
+                logger.info("webapp submit status=session_invalid reason=%s", reason)
+                return jsonify({"ok": False, "error": "session_invalid"}), 403
+        if not user or not user.get("id"):
+            logger.info("webapp submit status=session_invalid reason=user_missing")
+            return jsonify({"ok": False, "error": "session_invalid"}), 403
+        form["phone"] = phone
+        return handle_webapp_submission(user, form, token, logger)
 
     return app
 
@@ -3120,13 +3415,20 @@ def build_ticket_from_webapp(
     scenario = scenario_map.get(form.get("type"), "other")
     description = normalize_text(str(form.get("description") or ""))
     rules = analyze_text_with_rules(description, DICTIONARY_RULES)
+    phone = normalize_phone_input(form.get("phone"))
     return {
         "ticket_id": ticket_id,
         "created_at": now_value,
         "updated_at": now_value,
         "scenario_type": scenario,
         "fio": normalize_text(str(form.get("name") or "")) or None,
-        "phone": normalize_text(str(form.get("phone") or "")) or None,
+        "phone": phone or None,
+        "client_user_id": user.get("id"),
+        "client_username": user.get("username"),
+        "client_first_name": user.get("first_name"),
+        "client_last_name": user.get("last_name"),
+        "client_phone": phone,
+        "client_contact_link": f"tg://user?id={user.get('id')}" if user.get("id") else None,
         "pdn_consent": True,
         "was_here_before": "yes" if form.get("car_known") else None,
         "car_plate": normalize_text(str(form.get("carPlate") or "")) or None,
@@ -3143,8 +3445,8 @@ def build_ticket_from_webapp(
         "issue_keywords": rules.get("keywords"),
         "attachments_count": 0,
         "status": STATUS_NEW,
-        "client_username": user.get("username"),
         "client_chat_id": user.get("id"),
+        "source": "webapp",
         "reminded_at": None,
         "last_master_notify_at": None,
         "ttl_expires_at": ttl_iso(timezone, TTL_HOURS),
@@ -3152,7 +3454,7 @@ def build_ticket_from_webapp(
 
 
 def handle_webapp_submission(
-    init_data: dict,
+    user: dict,
     form: dict,
     token: str,
     logger: logging.Logger,
@@ -3161,18 +3463,13 @@ def handle_webapp_submission(
         logger.info("webapp submit status=error reason=webapp_disabled")
         return jsonify({"ok": False, "error": "INTERNAL_ERROR"}), 500
     timezone = os.getenv("TIMEZONE", "Europe/Moscow")
-    user_raw = init_data.get("user")
-    try:
-        user = json.loads(user_raw) if user_raw else {}
-    except json.JSONDecodeError:
-        user = {}
     if not user or not user.get("id"):
         logger.info("webapp submit status=error reason=user_missing")
-        return jsonify({"ok": False, "error": "INTERNAL_ERROR"}), 500
+        return jsonify({"ok": False, "error": "session_invalid"}), 403
     if not isinstance(form, dict):
         logger.info("webapp submit status=error reason=invalid_form")
         return jsonify({"ok": False, "error": "INTERNAL_ERROR"}), 500
-    required_fields = ["carPlate", "description", "phone"]
+    required_fields = ["carPlate", "description"]
     if any(not str(form.get(field) or "").strip() for field in required_fields):
         logger.info("webapp submit status=error reason=missing_required")
         return jsonify({"ok": False, "error": "INTERNAL_ERROR"}), 500
@@ -3188,23 +3485,14 @@ def handle_webapp_submission(
     ticket = build_ticket_from_webapp(form, user, timezone, storage)
     storage.setdefault("tickets", []).append(ticket)
     save_storage(storage)
-    master_recipients = get_master_recipients(storage)
-    notify_masters(
+    deliver_ticket(
         token,
-        master_recipients,
-        build_master_notification(ticket),
-        logger,
         storage,
+        ticket,
         timezone,
-        "ticket",
-        reply_markup=build_master_status_keyboard(ticket),
-        ticket_id=ticket.get("ticket_id"),
-        message_key=f"ticket:{ticket['ticket_id']}:webapp",
+        logger,
+        source_label="webapp",
     )
-    unreachable = storage.get("unreachable_users", {})
-    if unreachable:
-        unreachable_ids = ", ".join(sorted(unreachable.keys()))
-        logger.info("webapp submit unreachable recipients: %s", unreachable_ids)
     logger.info("webapp submit status=success ticket_id=%s", ticket.get("ticket_id"))
     return jsonify({"ok": True, "ticket_id": ticket.get("ticket_id")})
 
@@ -3676,9 +3964,10 @@ def send_attachment_to_master(
     ticket_id: str | None = None,
 ) -> bool:
     logger = logging.getLogger("client_bot")
-    if isinstance(master_username, int) and master_username > 0 and is_unreachable_user(storage, master_username):
-        logger.warning("skip attachment to unreachable user_id=%s", master_username)
-        return False
+    if isinstance(master_username, int) and master_username > 0:
+        if not should_send_to_master(storage, master_username):
+            logger.warning("skip attachment to unreachable user_id=%s", master_username)
+            return False
     file_path = store_outgoing_file(content, filename)
     if is_queue_enabled():
         enqueue_document(
@@ -3765,38 +4054,16 @@ def notify_masters(
         maybe_notify_missing_master_inbox(storage, timezone, logger)
         return
     sanitized_markup = sanitize_reply_markup(reply_markup)
-    if is_queue_enabled():
-        for master in master_usernames:
-            queue_key = f"{message_key}:to:{master}" if message_key else None
-            enqueue_message(
-                storage,
-                master,
-                kind,
-                text,
-                reply_markup=sanitized_markup,
-                disable_web_page_preview=True,
-                message_key=queue_key,
-                ticket_id=ticket_id,
-                timezone=timezone,
-            )
-            if ticket_id:
-                logger.info("queued ticket %s for master %s", ticket_id, master)
-        save_storage(storage)
-        return
 
     for master in master_usernames:
         if ticket_id:
             logger.info("Sending ticket %s to master %s", ticket_id, master)
-        if isinstance(master, int) and master > 0 and is_unreachable_user(storage, master):
+        if isinstance(master, int) and master > 0 and not should_send_to_master(storage, master):
             logger.warning("skip unreachable master user_id=%s", master)
             continue
         result = send_message_with_result(master, text, reply_markup=sanitized_markup)
-        if result.ok:
-            continue
-        if result.status_code in {400, 403} and isinstance(master, int) and master > 0:
-            reason = result.error or ("chat_not_found" if result.status_code == 400 else "forbidden")
-            mark_unreachable_user(storage, master, timezone, reason)
-            maybe_notify_unreachable_user(storage, timezone, logger, master)
+        if not result.ok and isinstance(master, int) and master > 0:
+            update_master_reachability_from_result(storage, master, result, timezone)
         logger.error("failed to send message to master %s ticket_id=%s", master, ticket_id)
 
 
@@ -3822,6 +4089,73 @@ def notify_ticket_update(
         ticket_id=ticket.get("ticket_id"),
     )
     logger.info("ticket_update: fields_changed=%s", fields_changed)
+
+
+def send_ticket_to_master(
+    token: str,
+    master_id: int,
+    ticket: dict,
+    storage: dict,
+    timezone: str,
+    logger: logging.Logger,
+    message_key: str | None = None,
+) -> bool:
+    if not should_send_to_master(storage, master_id):
+        logger.info("skip master send (unreachable) user_id=%s", master_id)
+        return False
+    text = build_master_card(ticket, timezone)
+    reply_markup = build_master_status_keyboard(ticket)
+    result = send_message_with_result(master_id, text, reply_markup=reply_markup)
+    if result.ok:
+        return True
+    update_master_reachability_from_result(storage, master_id, result, timezone)
+    logger.error("failed to send ticket to master=%s ticket_id=%s", master_id, ticket.get("ticket_id"))
+    return False
+
+
+def deliver_ticket(
+    token: str,
+    storage: dict,
+    ticket: dict,
+    timezone: str,
+    logger: logging.Logger,
+    source_label: str,
+    send_client_confirmation: bool = True,
+) -> None:
+    client_chat_id = ticket.get("client_chat_id") or ticket.get("client_user_id")
+    if client_chat_id and send_client_confirmation:
+        send_message(token, client_chat_id, f"✅ Заявка принята №{ticket.get('ticket_id')}")
+    masters = get_master_recipients(storage)
+    delivered = 0
+    for master_id in masters:
+        if isinstance(master_id, int) and master_id > 0:
+            if send_ticket_to_master(
+                token,
+                master_id,
+                ticket,
+                storage,
+                timezone,
+                logger,
+                message_key=f"ticket:{ticket.get('ticket_id')}:{source_label}",
+            ):
+                delivered += 1
+    masters_chat_id = get_masters_chat_id(storage)
+    if masters_chat_id:
+        result = send_message_with_result(
+            masters_chat_id,
+            build_master_card(ticket, timezone),
+            reply_markup=build_master_status_keyboard(ticket),
+        )
+        if result.ok:
+            delivered += 1
+    if delivered == 0:
+        admin_ids = sorted(get_admin_ids(storage))
+        warning_text = (
+            "⚠️ Заявка не доставлена мастерам. "
+            f"ticket_id={ticket.get('ticket_id')}"
+        )
+        for admin_id in admin_ids[:1] if admin_ids else []:
+            send_message_with_result(admin_id, warning_text)
 
 
 def run_tg_send_test(
@@ -3946,7 +4280,7 @@ def parse_ticket_expiry(ticket: dict, timezone: str) -> datetime | None:
 
 def is_ticket_active(ticket: dict, timezone: str) -> bool:
     status = normalize_ticket_status(ticket.get("status"))
-    if status not in {STATUS_NEW, STATUS_IN_PROGRESS, STATUS_WAITING_CLIENT}:
+    if status not in {STATUS_NEW, STATUS_IN_WORK, STATUS_WAITING_CLIENT}:
         return False
     expires_at = parse_ticket_expiry(ticket, timezone)
     if not expires_at:
@@ -3980,6 +4314,13 @@ def parse_phone_candidate(text: str) -> str | None:
     if sum(symbol.isdigit() for symbol in digits) < 9:
         return None
     return digits
+
+
+def normalize_phone_input(value: str | None) -> str:
+    if not value:
+        return ""
+    cleaned = re.sub(r"[^\d+]", "", str(value))
+    return cleaned.strip()
 
 
 def append_text(existing: str | None, extra: str) -> str:
@@ -4362,6 +4703,14 @@ def build_ticket_from_session(session: dict, timezone: str, storage: dict) -> di
         "scenario_type": session.get("scenario"),
         "fio": data.get("fio"),
         "phone": data.get("phone"),
+        "client_user_id": data.get("client_user_id") or data.get("client_chat_id"),
+        "client_username": data.get("client_username"),
+        "client_first_name": data.get("client_first_name"),
+        "client_last_name": data.get("client_last_name"),
+        "client_phone": data.get("phone") or "",
+        "client_contact_link": data.get("client_contact_link") or (
+            f"tg://user?id={data.get('client_user_id')}" if data.get("client_user_id") else None
+        ),
         "pdn_consent": data.get("pdn_consent", False),
         "was_here_before": data.get("was_here_before"),
         "car_plate": data.get("car_plate"),
@@ -4378,8 +4727,8 @@ def build_ticket_from_session(session: dict, timezone: str, storage: dict) -> di
         "issue_keywords": data.get("issue_keywords"),
         "attachments_count": data.get("attachments_count", 0),
         "status": STATUS_NEW,
-        "client_username": data.get("client_username"),
         "client_chat_id": data.get("client_chat_id"),
+        "source": "chat",
         "reminded_at": None,
         "last_master_notify_at": None,
         "ttl_expires_at": data.get("ttl_expires_at", ttl_iso(timezone, TTL_HOURS)),
@@ -4688,7 +5037,7 @@ def handle_ai_message(
         update_session_ttl(session, timezone)
         save_session(storage, chat_id, session)
         finalize_ticket(
-            token, chat_id, session, storage, timezone, logger, master_usernames, ai_service
+            token, chat_id, session, storage, timezone, logger, ai_service
         )
         return True
     session["stage"] = next_stage
@@ -4710,7 +5059,6 @@ def finalize_ticket(
     storage: dict,
     timezone: str,
     logger: logging.Logger,
-    master_usernames: list[str | int],
     ai_service: AIService,
 ) -> None:
     ai_logger = logging.getLogger("ai")
@@ -4723,7 +5071,7 @@ def finalize_ticket(
             save_storage(storage)
             notify_ticket_update(
                 token,
-                master_usernames,
+                get_master_recipients(storage),
                 active_ticket,
                 fields_changed,
                 logger,
@@ -4777,12 +5125,12 @@ def finalize_ticket(
     save_storage(storage)
     summary = build_summary(ticket)
     send_message(token, chat_id, summary)
+    send_message(token, chat_id, f"✅ Заявка принята №{ticket.get('ticket_id')}")
     now_value = datetime.now(ZoneInfo(timezone))
     if now_value.weekday() >= 5:
         send_message(
             token,
             chat_id,
-            "Заявка принята.\n"
             "Мастер получит её в рабочее время и свяжется для подтверждения.\n"
             "Это не является подтверждённой записью.",
         )
@@ -4790,22 +5138,19 @@ def finalize_ticket(
         send_message(
             token,
             chat_id,
-            "Я передал заявку мастеру. Он свяжется с вами для подтверждения записи.",
+            "Мастер свяжется с вами для подтверждения записи.",
         )
     ticket["finalized_at"] = now_iso(timezone)
     ticket["last_master_notify_at"] = now_iso(timezone)
     save_storage(storage)
-    notify_masters(
+    deliver_ticket(
         token,
-        master_usernames,
-        build_master_notification(ticket),
-        logger,
         storage,
+        ticket,
         timezone,
-        "ticket",
-        reply_markup=build_master_status_keyboard(ticket),
-        ticket_id=ticket["ticket_id"],
-        message_key=f"ticket:{ticket['ticket_id']}:final",
+        logger,
+        source_label="chat",
+        send_client_confirmation=False,
     )
     logger.info("ticket created %s", ticket["ticket_id"])
     logger.info("sent master card %s", ticket["ticket_id"])
@@ -4838,9 +5183,15 @@ def update_session_ttl(session: dict, timezone: str) -> None:
 def update_session_client_context(session: dict, chat: dict) -> None:
     data = session.setdefault("data", {})
     if chat.get("username"):
-        data["client_username"] = f"@{chat['username']}"
+        data["client_username"] = str(chat["username"])
     if chat.get("id"):
+        data["client_user_id"] = chat["id"]
         data["client_chat_id"] = chat["id"]
+        data["client_contact_link"] = f"tg://user?id={chat['id']}"
+    if chat.get("first_name"):
+        data["client_first_name"] = chat.get("first_name")
+    if chat.get("last_name"):
+        data["client_last_name"] = chat.get("last_name")
 
 
 def process_master_request(
@@ -5081,12 +5432,7 @@ def update_ticket_status(
     admin_logger = logging.getLogger("admin")
     callback_id = callback.get("id")
     from_user = callback.get("from", {})
-    if not check_admin_access(
-        from_user.get("id"),
-        from_user.get("username"),
-        storage,
-        logger,
-    ):
+    if not is_master_or_admin(from_user.get("id"), storage):
         if callback_id:
             answer_callback_query(token, callback_id, "Недостаточно прав доступа")
         return
@@ -5100,7 +5446,7 @@ def update_ticket_status(
         return
     ticket_id = parts[1]
     new_status = normalize_ticket_status(parts[2])
-    if new_status not in {STATUS_IN_PROGRESS, STATUS_WAITING_CLIENT, STATUS_DONE}:
+    if new_status not in {STATUS_IN_WORK, STATUS_WAITING_CLIENT, STATUS_CLOSED}:
         return
     ticket = next(
         (item for item in storage.get("tickets", []) if item.get("ticket_id") == ticket_id),
@@ -5122,11 +5468,28 @@ def update_ticket_status(
     status_label = format_ticket_status(new_status)
     if callback_id:
         answer_callback_query(token, callback_id, f"Статус обновлён: {status_label}")
-    send_message(
-        token,
-        callback.get("from", {}).get("id"),
-        f"Статус заявки {ticket_id}: {status_label}",
-    )
+    client_chat_id = ticket.get("client_chat_id") or ticket.get("client_user_id")
+    if client_chat_id:
+        send_message(
+            token,
+            client_chat_id,
+            f"ℹ️ По заявке №{ticket_id} статус: {status_label}",
+        )
+    message = callback.get("message") or {}
+    chat = message.get("chat") or {}
+    chat_id = chat.get("id")
+    message_id = message.get("message_id")
+    card_text = build_master_card(ticket, timezone)
+    reply_markup = build_master_status_keyboard(ticket)
+    if chat_id and message_id:
+        edit_result = edit_message_text(chat_id, int(message_id), card_text)
+        if edit_result.ok and reply_markup:
+            tg_request(
+                "editMessageReplyMarkup",
+                {"chat_id": chat_id, "message_id": message_id, "reply_markup": reply_markup},
+            )
+        if not edit_result.ok:
+            send_message_with_result(chat_id, card_text, reply_markup=reply_markup)
 
 
 def handle_ask_more_request(
@@ -5350,7 +5713,7 @@ def handle_clarification_response(
     ticket["clarification_answer_at"] = now_iso(timezone)
     ticket["updated_at"] = now_iso(timezone)
     if normalize_ticket_status(ticket.get("status")) == STATUS_WAITING_CLIENT:
-        ticket["status"] = STATUS_IN_PROGRESS
+        ticket["status"] = STATUS_IN_WORK
     save_storage(storage)
     update_text = "\n".join(
         [
@@ -6100,7 +6463,7 @@ def handle_admin_callback(
             return True
         ticket_id = parts[2]
         new_status = normalize_ticket_status(parts[3])
-        if new_status not in {STATUS_NEW, STATUS_IN_PROGRESS, STATUS_WAITING_CLIENT, STATUS_DONE}:
+        if new_status not in {STATUS_NEW, STATUS_IN_WORK, STATUS_WAITING_CLIENT, STATUS_CLOSED}:
             send_message(token, chat_id, "Недоступный статус.")
             return True
         ticket = next(
@@ -6114,9 +6477,30 @@ def handle_admin_callback(
         ticket["status"] = new_status
         ticket["updated_at"] = now_iso(timezone)
         save_storage(storage)
+        client_chat_id = ticket.get("client_chat_id") or ticket.get("client_user_id")
+        if client_chat_id:
+            send_message(
+                token,
+                client_chat_id,
+                f"ℹ️ По заявке №{ticket_id} статус: {format_ticket_status(new_status)}",
+            )
         if callback_id:
             answer_callback_query(token, callback_id, "Статус обновлён.")
-        send_message(token, chat_id, build_admin_ticket_card(ticket, timezone))
+        card_text = build_admin_ticket_card(ticket, timezone)
+        reply_markup = build_admin_ticket_detail_keyboard(ticket)
+        message = callback.get("message") or {}
+        message_id = message.get("message_id")
+        if message_id and chat_id:
+            edit_result = edit_message_text(chat_id, int(message_id), card_text)
+            if edit_result.ok and reply_markup:
+                tg_request(
+                    "editMessageReplyMarkup",
+                    {"chat_id": chat_id, "message_id": message_id, "reply_markup": reply_markup},
+                )
+            if not edit_result.ok:
+                send_message(token, chat_id, card_text, reply_markup=reply_markup)
+        else:
+            send_message(token, chat_id, card_text, reply_markup=reply_markup)
         return True
     if data.startswith("admin:ticket_contact:"):
         ticket_id = data.split(":", 2)[2]
@@ -6302,7 +6686,30 @@ def handle_admin_callback(
         send_document(token, chat_id, log_path, caption="client_bot.log")
         return True
     if data == "admin:unreachable":
-        send_message(token, chat_id, build_unreachable_users_text(storage), reply_markup=build_admin_settings_keyboard())
+        send_message(
+            token,
+            chat_id,
+            build_master_reachability_text(storage),
+            reply_markup=build_unreachable_recipients_keyboard(),
+        )
+        return True
+    if data == "admin:unreachable:reset":
+        storage["masters_reachability"] = {}
+        save_storage(storage)
+        send_message(
+            token,
+            chat_id,
+            "✅ Список недоступных получателей очищен.",
+            reply_markup=build_unreachable_recipients_keyboard(),
+        )
+        return True
+    if data == "admin:unreachable:instruction":
+        send_message(
+            token,
+            chat_id,
+            "Откройте бота и нажмите /start, чтобы получать заявки.",
+            reply_markup=build_unreachable_recipients_keyboard(),
+        )
         return True
     if data == "admin:blocklist":
         blocklist = [int(item) for item in storage.get("blocklist", []) if str(item).isdigit()]
@@ -6329,6 +6736,125 @@ def handle_admin_callback(
                 send_message(token, chat_id, "Удалено из блок-листа.")
         return True
     return True
+
+
+def handle_master_callback(
+    token: str,
+    callback: dict,
+    storage: dict,
+    timezone: str,
+    logger: logging.Logger,
+) -> bool:
+    data = callback.get("data") or ""
+    chat_id = callback.get("from", {}).get("id")
+    callback_id = callback.get("id")
+    if callback_id:
+        answer_callback_query(token, callback_id)
+    if not is_master_or_admin(chat_id, storage):
+        if chat_id:
+            send_message(token, chat_id, "Недостаточно прав доступа.")
+        return True
+    if data == "master:menu":
+        send_message(token, chat_id, "Меню мастера:", reply_markup=build_master_menu_keyboard())
+        return True
+    if data == "master:find":
+        set_master_session(storage, chat_id, MASTER_STATE_FIND_TICKET, {})
+        save_storage(storage)
+        send_message(token, chat_id, "Введите номер заявки.")
+        return True
+    if data.startswith("master:queue:"):
+        parts = data.split(":")
+        if len(parts) != 4:
+            return True
+        status = parts[2]
+        page = int(parts[3]) if parts[3].isdigit() else 1
+        tickets = list(storage.get("tickets", []))
+        tickets = [ticket for ticket in tickets if normalize_ticket_status(ticket.get("status")) == status]
+        tickets.sort(key=lambda item: item.get("created_at", ""), reverse=True)
+        page_size = MASTER_CLOSED_PAGE_SIZE if status == STATUS_CLOSED else MASTER_PAGE_SIZE
+        if status == STATUS_CLOSED:
+            tickets = tickets[:MASTER_CLOSED_PAGE_SIZE]
+        total_pages = max(1, (len(tickets) + page_size - 1) // page_size)
+        page = max(1, min(page, total_pages))
+        start = (page - 1) * page_size
+        page_items = tickets[start : start + page_size]
+        if not page_items:
+            send_message(token, chat_id, "Заявок нет.", reply_markup=build_master_menu_keyboard())
+            return True
+        lines = []
+        for ticket in page_items:
+            lines.append(
+                " | ".join(
+                    [
+                        ticket.get("ticket_id", "—"),
+                        format_dt(ticket.get("created_at"), timezone),
+                        format_ticket_status(ticket.get("status")),
+                        ticket.get("fio") or "—",
+                        ticket.get("phone") or "—",
+                    ]
+                )
+            )
+        header = f"Заявки ({format_ticket_status(status)}) стр. {page}/{total_pages}"
+        send_message(
+            token,
+            chat_id,
+            "\n".join([header] + lines),
+            reply_markup=build_master_ticket_list_keyboard(page_items, status, page, total_pages),
+        )
+        return True
+    if data.startswith("master:ticket:"):
+        ticket_id = data.split(":", 2)[2]
+        ticket = next(
+            (item for item in storage.get("tickets", []) if item.get("ticket_id") == ticket_id),
+            None,
+        )
+        if not ticket:
+            send_message(token, chat_id, "Заявка не найдена.")
+            return True
+        send_message(
+            token,
+            chat_id,
+            build_master_card(ticket, timezone),
+            reply_markup=build_master_status_keyboard(ticket),
+        )
+        return True
+    return True
+
+
+def handle_master_reply_request(
+    token: str,
+    callback: dict,
+    storage: dict,
+    timezone: str,
+    logger: logging.Logger,
+) -> None:
+    callback_id = callback.get("id")
+    from_user = callback.get("from", {})
+    if not is_master_or_admin(from_user.get("id"), storage):
+        if callback_id:
+            answer_callback_query(token, callback_id, "Недостаточно прав доступа")
+        return
+    data = callback.get("data") or ""
+    parts = data.split(":")
+    if len(parts) != 2:
+        return
+    ticket_id = parts[1]
+    ticket = next(
+        (item for item in storage.get("tickets", []) if item.get("ticket_id") == ticket_id),
+        None,
+    )
+    if not ticket:
+        if callback_id:
+            answer_callback_query(token, callback_id, "Заявка не найдена.")
+        return
+    pending_reply = storage.setdefault("pending_reply", {})
+    pending_reply[str(from_user.get("id"))] = ticket_id
+    save_storage(storage)
+    send_message(
+        token,
+        from_user.get("id"),
+        f"Введите сообщение клиенту по заявке {ticket_id}.",
+    )
 
 
 def process_callback(
@@ -6359,6 +6885,8 @@ def process_callback(
         if chat_id:
             send_message(token, chat_id, "⚠️ Ошибка, попробуйте ещё раз /admin, смотрите логи")
         return True
+    if data.startswith("master:"):
+        return handle_master_callback(token, callback, storage, timezone, logger)
     if data.startswith("ticket:"):
         parts = data.split(":")
         if len(parts) >= 3 and parts[2] == "ask_more":
@@ -6368,6 +6896,12 @@ def process_callback(
                 handle_ask_more_selection(token, callback, storage, timezone, logger)
         else:
             update_ticket_status(token, callback, storage, timezone, logger)
+        return True
+    if data.startswith("ticket_status:"):
+        update_ticket_status(token, callback, storage, timezone, logger)
+        return True
+    if data.startswith("ticket_reply:"):
+        handle_master_reply_request(token, callback, storage, timezone, logger)
         return True
     if data.startswith("client:"):
         handle_client_contact_callback(token, callback, storage)
@@ -6474,6 +7008,12 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
     timezone = os.getenv("TIMEZONE", "Europe/Moscow")
     storage = load_storage()
     ensure_storage_defaults(storage)
+    master_ids, _ = get_master_ids(storage)
+    callback_user_id = callback.get("from", {}).get("id") if callback else None
+    if callback_user_id and callback_user_id in master_ids:
+        mark_master_reachability(storage, int(callback_user_id), reachable=True, invalid=False, timezone=timezone)
+    if chat_id and chat_id in master_ids:
+        mark_master_reachability(storage, int(chat_id), reachable=True, invalid=False, timezone=timezone)
     if channel_post:
         channel_chat = channel_post.get("chat") or {}
         channel_id = channel_chat.get("id")
@@ -6568,6 +7108,36 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
             send_message(token, chat_id, "Недостаточно прав доступа")
             return
         run_tg_send_test(token, chat_id, storage, timezone, master_usernames, logger)
+        return
+
+    if text.startswith("/status"):
+        if not is_master_or_admin(chat_id, storage):
+            send_message(token, chat_id, "Недостаточно прав доступа")
+            return
+        send_message(token, chat_id, build_system_status_text(storage, timezone))
+        return
+
+    if text.startswith("/bind_masters_chat"):
+        if not is_master_or_admin(chat_id, storage):
+            send_message(token, chat_id, "Недостаточно прав доступа")
+            return
+        if chat.get("type") not in {"group", "supergroup"}:
+            send_message(
+                token,
+                chat_id,
+                "Добавьте бота в группу и вызовите команду там.",
+            )
+            return
+        set_masters_chat(chat_id, chat.get("title") or "—", storage)
+        send_message(token, chat_id, f"✅ Чат мастеров привязан: {chat.get('title') or '—'}")
+        return
+
+    if text.startswith("/unbind_masters_chat"):
+        if not is_master_or_admin(chat_id, storage):
+            send_message(token, chat_id, "Недостаточно прав доступа")
+            return
+        set_masters_chat(None, None, storage)
+        send_message(token, chat_id, "✅ отвязано")
         return
 
     if is_admin(chat_id, storage):
@@ -6865,6 +7435,49 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
             send_message(token, chat_id, "⚠️ Ошибка, попробуйте ещё раз /admin, смотрите логи")
             return
 
+    if is_master_or_admin(chat_id, storage):
+        master_session = get_master_session(storage, chat_id)
+        if master_session.get("state") == MASTER_STATE_FIND_TICKET and text and not text.startswith("/"):
+            ticket_id = text.strip()
+            ticket = next(
+                (item for item in storage.get("tickets", []) if item.get("ticket_id") == ticket_id),
+                None,
+            )
+            clear_master_session(storage, chat_id)
+            save_storage(storage)
+            if not ticket:
+                send_message(token, chat_id, "Заявка не найдена.", reply_markup=build_master_menu_keyboard())
+                return
+            send_message(
+                token,
+                chat_id,
+                build_master_card(ticket, timezone),
+                reply_markup=build_master_status_keyboard(ticket),
+            )
+            return
+
+    pending_reply = storage.get("pending_reply", {}).get(str(chat_id))
+    if pending_reply and text and not text.startswith("/"):
+        ticket = next(
+            (item for item in storage.get("tickets", []) if item.get("ticket_id") == pending_reply),
+            None,
+        )
+        client_chat_id = ticket.get("client_chat_id") if ticket else None
+        message_text = f"Сообщение от мастера ЛИРА по заявке {pending_reply}: {text}"
+        if client_chat_id:
+            result = send_message_with_result(client_chat_id, message_text)
+            if result.ok:
+                send_message(token, chat_id, "Сообщение отправлено клиенту.")
+                storage["pending_reply"].pop(str(chat_id), None)
+                save_storage(storage)
+                return
+            send_message(token, chat_id, "Не удалось отправить сообщение клиенту.")
+            return
+        send_message(token, chat_id, "Контакт клиента не найден.")
+        storage["pending_reply"].pop(str(chat_id), None)
+        save_storage(storage)
+        return
+
     if handle_attachment(
         token,
         chat_id,
@@ -6887,26 +7500,49 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
         return
 
     if text.startswith("/master"):
-        process_master_request(
-            token,
-            chat_id,
-            chat,
-            session,
-            storage,
-            timezone,
-            master_usernames,
-            logger,
-        )
+        if is_master_or_admin(chat_id, storage):
+            send_message(token, chat_id, "Меню мастера:", reply_markup=build_master_menu_keyboard())
+        else:
+            send_message(
+                token,
+                chat_id,
+                "Команда доступна мастерам. Оставьте заявку через меню.",
+                reply_markup=build_main_menu_keyboard(),
+            )
         return
 
     if text.startswith("/help"):
+        if is_master_or_admin(chat_id, storage):
+            send_message(
+                token,
+                chat_id,
+                "🧰 Помощь мастеру:\n"
+                "• Нажмите /start, чтобы получать заявки.\n"
+                "• /master — очередь заявок и статусы.\n"
+                "• В карточке заявки есть кнопки статуса и «Написать клиенту».",
+            )
+        else:
+            send_message(
+                token,
+                chat_id,
+                "👋 Как оставить заявку:\n"
+                "• Откройте WebApp через /webapp или кнопку меню.\n"
+                "• Телефон обязателен в форме.\n"
+                "• Ответ мастера придёт в этот чат.",
+                reply_markup=build_main_menu_keyboard(),
+            )
+        return
+
+    if text.startswith("/webapp"):
+        webapp_url = get_webapp_url()
+        if not webapp_url:
+            send_message(token, chat_id, "WebApp недоступен. Попробуйте позже.")
+            return
         send_message(
             token,
             chat_id,
-            "Выберите пункт меню и отвечайте на вопросы. "
-            "В любой момент доступна команда /master. "
-            "Чтобы отменить сценарий — /cancel.",
-            reply_markup=build_main_menu_keyboard(),
+            "Открыть WebApp:",
+            reply_markup={"inline_keyboard": [[{"text": "🌐 Открыть", "web_app": {"url": webapp_url}}]]},
         )
         return
 
@@ -6938,6 +7574,9 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
             "webapp" if get_webapp_url() else "fallback",
             chat_id,
         )
+        if is_master_or_admin(chat_id, storage):
+            send_message(token, chat_id, "✅ Вы подключены как мастер.", reply_markup=build_master_menu_keyboard())
+            return
         webapp_url = get_webapp_url()
         if webapp_url:
             set_chat_menu_button_webapp(chat_id, webapp_url, "Мини-приложение")
@@ -7026,16 +7665,19 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
             return
 
     if text == MENU_MASTER:
-        process_master_request(
-            token,
-            chat_id,
-            chat,
-            session,
-            storage,
-            timezone,
-            master_usernames,
-            logger,
-        )
+        if is_master_or_admin(chat_id, storage):
+            send_message(token, chat_id, "Меню мастера:", reply_markup=build_master_menu_keyboard())
+        else:
+            process_master_request(
+                token,
+                chat_id,
+                chat,
+                session,
+                storage,
+                timezone,
+                master_usernames,
+                logger,
+            )
         return
 
     if active_ticket and not session.get("stage") and text and not text.startswith("/"):
@@ -7341,7 +7983,7 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
         update_session_ttl(session, timezone)
         save_session(storage, chat_id, session)
         finalize_ticket(
-            token, chat_id, session, storage, timezone, logger, master_usernames, ai_service
+            token, chat_id, session, storage, timezone, logger, ai_service
         )
         return
 
@@ -7383,7 +8025,7 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
         update_session_ttl(session, timezone)
         save_session(storage, chat_id, session)
         finalize_ticket(
-            token, chat_id, session, storage, timezone, logger, master_usernames, ai_service
+            token, chat_id, session, storage, timezone, logger, ai_service
         )
         return
 
@@ -7415,7 +8057,7 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
             update_session_ttl(session, timezone)
             save_session(storage, chat_id, session)
             finalize_ticket(
-                token, chat_id, session, storage, timezone, logger, master_usernames, ai_service
+                token, chat_id, session, storage, timezone, logger, ai_service
             )
             return
         else:
@@ -7455,7 +8097,7 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
             update_session_ttl(session, timezone)
             save_session(storage, chat_id, session)
             finalize_ticket(
-                token, chat_id, session, storage, timezone, logger, master_usernames, ai_service
+                token, chat_id, session, storage, timezone, logger, ai_service
             )
             return
         else:
@@ -7481,7 +8123,7 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
         update_session_ttl(session, timezone)
         save_session(storage, chat_id, session)
         finalize_ticket(
-            token, chat_id, session, storage, timezone, logger, master_usernames, ai_service
+            token, chat_id, session, storage, timezone, logger, ai_service
         )
         return
 
@@ -7708,6 +8350,13 @@ def main() -> None:
     db_init_settings()
     ensure_persistent_defaults()
     ensure_core_settings_defaults()
+    raw_webapp_url = os.getenv("CLIENT_WEBAPP_URL") or os.getenv("WEBAPP_URL") or ""
+    normalized_webapp_url = normalize_webapp_url(raw_webapp_url)
+    logger.info(
+        "webapp url normalized: from=%s to=%s",
+        raw_webapp_url or "—",
+        normalized_webapp_url or "—",
+    )
     storage = load_storage()
     ensure_storage_defaults(storage)
     migrate_storage_settings_to_db(storage)
@@ -7716,6 +8365,7 @@ def main() -> None:
     bootstrapped = bootstrap_admins(storage)
     if restored or bootstrapped:
         save_storage(storage)
+    set_bot_commands(token, storage, logger)
     logging.getLogger("storage").info(
         "storage loaded tickets=%s sessions=%s",
         len(storage.get("tickets", [])),
@@ -7733,6 +8383,14 @@ def main() -> None:
     )
     if not admin_ids:
         logger.warning("[client_bot] admins list is empty")
+    master_ids, master_source = get_master_ids(storage)
+    master_sample = master_ids[:5]
+    logger.info(
+        "masters parsed: count=%s sample=%s source=%s",
+        len(master_ids),
+        master_sample,
+        master_source,
+    )
     queue_stats = get_queue_stats(storage, timezone)
     logger.info(
         "outgoing queue: enabled=%s pending=%s",
