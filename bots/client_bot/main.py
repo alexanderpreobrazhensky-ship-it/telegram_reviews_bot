@@ -249,9 +249,7 @@ RUN_MODE = (
     or os.getenv("RUN_MODE")
     or "polling"
 ).strip().lower()
-PORT = int(os.getenv("PORT", "8000"))
 DOMAIN = (os.getenv("DOMAIN") or "").strip().rstrip("/")
-PUBLIC_BASE_URL = (os.getenv("PUBLIC_BASE_URL") or "").strip().rstrip("/")
 WEBAPP_PATH = (os.getenv("WEBAPP_PATH") or "/WEBAPP").strip() or "/WEBAPP"
 WEBAPP_ENABLED = (
     (os.getenv("CLIENT_WEBAPP_ENABLED") or os.getenv("WEBAPP_ENABLED") or "1")
@@ -3115,34 +3113,6 @@ def build_webapp_config() -> dict:
     }
 
 
-def build_webhook_path(token: str) -> str:
-    secret = (os.getenv("BOT_PATH_SECRET") or "").strip()
-    if not secret:
-        secret = token[-12:]
-    return f"/webhook/{secret}"
-
-
-def build_webhook_url(token: str) -> str | None:
-    if not DOMAIN:
-        return None
-    if DOMAIN.startswith(("http://", "https://")):
-        base = DOMAIN.rstrip("/")
-    else:
-        base = f"https://{DOMAIN}"
-    return f"{base}{build_webhook_path(token)}"
-
-
-def set_webhook(token: str, logger: logging.Logger) -> None:
-    webhook_url = build_webhook_url(token)
-    if not webhook_url:
-        logger.warning("WEBHOOK_URL missing: set DOMAIN to enable webhook")
-        return
-    result = tg_request("setWebhook", {"url": webhook_url})
-    if result.ok:
-        logger.info("webhook set: %s", webhook_url)
-    else:
-        logger.warning("webhook set failed: %s", result.error or result.response_json)
-
 
 def set_bot_commands(token: str, storage: dict, logger: logging.Logger) -> None:
     default_commands = [
@@ -3407,9 +3377,6 @@ def register_webapp_routes(app: Flask, token: str, logger: logging.Logger) -> Fl
                 "initData": request.form.get("initData", ""),
             }
         form = payload.get("form") or {}
-        phone = normalize_phone_input(form.get("phone"))
-        if not phone:
-            return jsonify({"ok": False, "error": "phone_required"}), 400
         session_token = (payload.get("session_token") or payload.get("sessionToken") or "").strip()
         user: dict | None = None
         if session_token:
@@ -3433,28 +3400,19 @@ def register_webapp_routes(app: Flask, token: str, logger: logging.Logger) -> Fl
                         age_seconds,
                         WEBAPP_SUBMIT_INITDATA_MAX_AGE_SECONDS,
                     )
-                    return jsonify({"ok": False, "error": "session_invalid"}), 403
+                    return jsonify({"ok": False, "error": "SESSION_INVALID", "reason": reason}), 401
                 user = get_user_from_init_data(parsed or {})
             elif user is None:
                 logger.info("webapp submit status=session_invalid reason=%s", reason)
-                return jsonify({"ok": False, "error": "session_invalid"}), 403
+                return jsonify({"ok": False, "error": "SESSION_INVALID", "reason": reason}), 401
         if not user or not user.get("id"):
             logger.info("webapp submit status=session_invalid reason=user_missing")
-            return jsonify({"ok": False, "error": "session_invalid"}), 403
+            return jsonify({"ok": False, "error": "SESSION_INVALID", "reason": "user_missing"}), 401
+        phone = normalize_phone_input(form.get("phone"))
+        if not phone:
+            return jsonify({"ok": False, "error": "phone_required"}), 400
         form["phone"] = phone
         return handle_webapp_submission(user, form, token, logger)
-
-    return app
-
-
-def register_webhook_route(app: Flask, token: str, logger: logging.Logger) -> Flask:
-    webhook_path = build_webhook_path(token)
-
-    @app.post(webhook_path)
-    def telegram_webhook() -> object:
-        update = request.get_json(silent=True) or {}
-        handle_update(token, update, logger)
-        return "ok"
 
     return app
 
@@ -3465,7 +3423,7 @@ def create_flask_app(token: str, logger: logging.Logger) -> Flask:
     @app.get("/")
     def root() -> object:
         return "OK"
-    register_webhook_route(app, token, logger)
+
     return register_webapp_routes(app, token, logger)
 
 
@@ -3480,14 +3438,35 @@ def handle_webapp_data(
     if not data_raw:
         return False
     chat = message.get("chat", {})
+    from_user = message.get("from", {})
     chat_id = chat.get("id")
-    user_id = message.get("from", {}).get("id")
+    user_id = from_user.get("id")
     if not chat_id:
         return True
     try:
         payload = json.loads(data_raw)
         if not isinstance(payload, dict) or payload.get("v") != 1:
             raise ValueError("invalid payload")
+        logger.info("webapp data received user_id=%s chat_id=%s", user_id, chat_id)
+
+        form = payload.get("form")
+        if isinstance(form, dict):
+            phone = normalize_phone_input(form.get("phone"))
+            if not phone:
+                send_message(token, chat_id, "Введите телефон в формате +7XXXXXXXXXX и отправьте форму ещё раз.")
+                return True
+            form["phone"] = phone
+            user = {
+                "id": user_id,
+                "username": from_user.get("username"),
+                "first_name": from_user.get("first_name"),
+                "last_name": from_user.get("last_name"),
+            }
+            logger.info("webapp submit via web_app_data user_id=%s username=%s", user_id, from_user.get("username"))
+            handle_webapp_submission(user, form, token, logger)
+            send_message(token, chat_id, "Заявка принята. Мы свяжемся с вами.")
+            return True
+
         action = payload.get("action")
         if action not in {"booking", "parts", "question", "route", "call"}:
             raise ValueError(f"unsupported action: {action}")
@@ -3611,7 +3590,7 @@ def handle_webapp_submission(
     timezone = os.getenv("TIMEZONE", "Europe/Moscow")
     if not user or not user.get("id"):
         logger.info("webapp submit status=error reason=user_missing")
-        return jsonify({"ok": False, "error": "session_invalid"}), 403
+        return jsonify({"ok": False, "error": "session_invalid"}), 401
     if not isinstance(form, dict):
         logger.info("webapp submit status=error reason=invalid_form")
         return jsonify({"ok": False, "error": "INTERNAL_ERROR"}), 500
@@ -9145,16 +9124,11 @@ def main() -> None:
     if AUTO_PIN_ON_START:
         ok, message = ensure_channel_pin(storage, timezone, logger, force_new=False)
         logger.info("auto pin on start: %s", message)
-    if RUN_MODE == "polling":
-        logger.info("client_bot mode=polling")
-        delete_webhook(token, logger, drop_pending_updates=False)
-        poll_updates(token, logger)
-        return
-    webhook_url = build_webhook_url(token) or "not_configured"
-    logger.info("client_bot mode=webhook endpoint=%s port=%s", webhook_url, PORT)
-    set_webhook(token, logger)
-    app = create_flask_app(token, logger)
-    app.run(host="0.0.0.0", port=PORT, debug=False, use_reloader=False)
+    if RUN_MODE != "polling":
+        logger.warning("RUN_MODE=%s is not supported in BotHost migration, fallback to polling", RUN_MODE)
+    logger.info("client_bot mode=polling")
+    delete_webhook(token, logger, drop_pending_updates=False)
+    poll_updates(token, logger)
 
 
 def start_polling_background() -> threading.Thread | None:
