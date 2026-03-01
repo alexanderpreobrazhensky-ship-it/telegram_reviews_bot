@@ -26,6 +26,7 @@ def build_app():
 
 def main() -> None:
     app, cfg = build_app()
+    logger.info("client_bot_service startup: token_source=CLIENT_TELEGRAM_BOT_TOKEN mode=%s", cfg.mode)
     if cfg.mode == "polling":
         start_polling_background()
     app.run(host=cfg.host, port=cfg.port)

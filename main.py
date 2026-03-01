@@ -19,6 +19,7 @@ from flask import Flask, request, jsonify
 
 from review_fetch import detect_platform, fetch_url, parse_2gis_review, parse_yandex_review
 from bots.client_bot import main as client_bot_main
+from shared.clients_registry import upsert_client as upsert_shared_client
 
 # -----------------------------
 # Logging
@@ -4643,6 +4644,17 @@ def telegram_webhook():
 
         if not chat_id or not user_id:
             return "ok"
+        try:
+            upsert_shared_client(
+                {
+                    "telegram_user_id": user_id,
+                    "telegram_username": user.get("username"),
+                    "full_name": _display_name(user),
+                },
+                source_tag="telegram_reviews_bot",
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("reviews clients registry upsert failed: %s", exc)
         cmd_token = text_clean.split()[0] if text_clean else ""
         cmd = cmd_token.split("@")[0].lower() if cmd_token.startswith("/") else ""
         cmd_args = text_clean[len(cmd_token):].strip() if cmd_token else ""
@@ -5272,7 +5284,7 @@ def telegram_webhook():
 # Startup
 # -----------------------------
 def setup_client_bot() -> None:
-    token = os.getenv("CLIENT_TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN_CLIENT")
+    token = os.getenv("CLIENT_TELEGRAM_BOT_TOKEN")
     if not token:
         logger.warning("client_bot token missing; skipping WebApp routes and polling start")
         return

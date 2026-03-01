@@ -27,7 +27,7 @@ class ClientWebAppSessionTestCase(unittest.TestCase):
         payload = response.get_json()
         self.assertIsNotNone(payload)
         self.assertTrue(payload.get("ok"))
-        self.assertTrue(payload.get("token"))
+        self.assertTrue(payload.get("session_token"))
 
     def test_session_endpoint_invalid(self) -> None:
         response = self.client.post("/api/webapp/session", json={"initData": ""})
@@ -35,14 +35,14 @@ class ClientWebAppSessionTestCase(unittest.TestCase):
         payload = response.get_json()
         self.assertIsNotNone(payload)
         self.assertFalse(payload.get("ok"))
-        self.assertEqual(payload.get("error"), "SESSION_INVALID")
+        self.assertEqual(payload.get("error"), "invalid_init_data")
 
     def test_submit_with_session_token(self) -> None:
         session_response = self.client.post("/api/webapp/session", json={"initData": "TEST_VALID"})
         self.assertEqual(session_response.status_code, 200)
         session_payload = session_response.get_json()
         self.assertIsNotNone(session_payload)
-        token = session_payload.get("token")
+        token = session_payload.get("session_token")
         self.assertTrue(token)
         form = {
             "carPlate": "A123AA",

@@ -1,152 +1,127 @@
 # README_AFTER_DEPLOY
 
-## 1) Overview
-Проект разделён на два независимых процесса:
-- `client_bot_service` — клиентский бот, WebApp, заявки, мастера, статусы, закреп.
-- `reviews_bot_service` — бот отзывов, публикации, AI-анализ, архитектурные заготовки для Email/1С/VK/Max.
+## Архитектура после разделения
 
-Текущий функционал **сохранён** через совместимость с существующими runtime-модулями (`bots/client_bot/main.py` и `main.py`) с постепенным выносом в новую структуру.
-
-## 2) Архитектура
+- `services/client_bot_service` — клиентский бот, intake заявок, WebApp, мастер-чат, pin-flow.
+- `services/reviews_bot_service` — бот отзывов.
+- Оба сервиса используют **единую картотеку клиентов**: `./clients.jsonl` в корне репозитория (можно переопределить `CLIENTS_REGISTRY_PATH`).
 
 ```text
-/services
-  /client_bot_service
-    /app
-      main.py
-      config.py
-      /models
-      /storage
-      /telegram
-      /webapp
-      /integrations
-      /utils
-  /reviews_bot_service
-    /app
-      main.py
-      config.py
-      /reviews
-      /integrations
-/data
-  clients.jsonl
-  tickets.jsonl
-  system.json
+.
+├─ clients.jsonl                  # единая картотека для client+reviews
+├─ services/
+│  ├─ client_bot_service/
+│  └─ reviews_bot_service/
+├─ shared/
+│  └─ clients_registry.py         # общий stdlib-модуль обновления картотеки
+└─ data/
+   ├─ tickets.jsonl
+   └─ system.json
 ```
 
-### Runtime принципы
-- Единый `unified main.py` не используется как оркестратор для обоих доменов.
-- Каждый сервис запускается отдельно (`python -m app.main` из директории сервиса).
-- По умолчанию режим polling; webhook остаётся опциональным в legacy-логике.
-- Сервисы не вызывают друг друга напрямую.
-
-## 3) ENV таблицы
+## ENV (без опасных fallback)
 
 ### client_bot_service
-- `CLIENT_TELEGRAM_BOT_TOKEN` (fallback: `TELEGRAM_BOT_TOKEN`)
-- `CLIENT_BOT_MODE` (`polling` по умолчанию)
-- `CLIENT_SERVICE_HOST` (`0.0.0.0`)
-- `CLIENT_SERVICE_PORT` (`8010`)
-- `CLIENT_DATA_DIR` (`data`)
+- `CLIENT_TELEGRAM_BOT_TOKEN` — обязательный токен клиентского бота (только этот env).
+- `CLIENT_BOT_MODE` — режим (`polling` по умолчанию).
+- `CLIENT_SERVICE_HOST` — `0.0.0.0` по умолчанию.
+- `CLIENT_SERVICE_PORT` — `8010` по умолчанию.
+- `CLIENT_MASTERS_CHAT_ID` — chat_id мастер-чата (поддерживаются отрицательные `-100...`).
+- `CLIENT_MASTER_USER_IDS` — список `user_id` мастеров (через запятую/пробел).
+- `CLIENT_NOTIFY_MODE` — `dm_then_chat` по умолчанию (`dm_only`, `chat_only`, `chat_then_dm` поддержаны).
+- `CLIENTS_REGISTRY_PATH` — optional путь к `clients.jsonl` (по умолчанию корень репозитория).
 
 ### reviews_bot_service
-- `TELEGRAM_BOT_TOKEN`
-- `REVIEWS_SERVICE_HOST` (`0.0.0.0`)
-- `REVIEWS_SERVICE_PORT` (`8020`)
+- `REVIEWS_TELEGRAM_BOT_TOKEN` (приоритет) или `TELEGRAM_BOT_TOKEN`.
+- `REVIEWS_BOT_MODE` — режим (`polling` по умолчанию).
+- `REVIEWS_SERVICE_HOST` — `0.0.0.0`.
+- `REVIEWS_SERVICE_PORT` — `8020`.
 
-### совместимость
-Существующие переменные legacy-модулей продолжают работать (AI engine, webhook/domain, routing/admin/master и т.д.).
+При старте сервисы логируют `token source` и `mode` без вывода токена.
 
-## 4) WebApp маршруты
-Основные маршруты client_bot runtime:
-- `GET /WEBAPP` и `GET /WEBAPP/`
-- `GET /WEBAPP/config.json`
-- `GET /WEBAPP/<static>`
-- `GET /api/webapp/health`
-- `GET /api/webapp/lookup`
-- `POST /api/webapp/session`
-- `POST /api/webapp/submit`
+## Единая картотека `clients.jsonl`
 
-Гарантии:
-- обязательный `phone`;
-- серверная нормализация телефона к `+7XXXXXXXXXX`;
-- валидация `initData`;
-- поддержка theme в фронтенде (унаследована из legacy webapp).
+Модель записи:
+- `telegram_user_id`
+- `telegram_username` (единый стандарт: **без @**)
+- `full_name`
+- `phones[]` (нормализация к `+7XXXXXXXXXX`)
+- `car_numbers[]`
+- `vin_codes[]`
+- `email`, `vk_username`, `max_username`
+- `created_at`, `updated_at` (ISO)
+- `source_tags[]`
 
-## 5) Ticket flow
-- intake: Telegram private messages/WebApp submit;
-- создание тикета со статусом `new`;
-- маршрутизация мастерам (уведомления в мастер-канал/чат/личку по текущей конфигурации);
-- переходы статусов: `new`, `in_progress`, `waiting_data`, `processed`, `archived`;
-- `postponed` заложен в модели, поле `postponed_until` присутствует для планировщика.
+Правила обновления:
+- ключ: `telegram_user_id`, fallback: `telegram_username`;
+- массивы дополняются уникальными значениями (без перезаписи);
+- `updated_at` всегда обновляется;
+- `full_name` дополняется, если ранее был пустой;
+- запись атомарная (`write-then-rename`) + lock-файл.
 
-## 6) Master flow
-- Роли: admin/master.
-- Источники мастеров: ENV + админ-действия в runtime.
-- Для мастер-чата включён фильтр:
-  - текст в супергруппе без команды не создаёт заявку;
-  - реакции только на команды/inline callback.
-- Ответ клиенту: через карточку заявки и callback-диалоги legacy runtime.
+## Intake-логика client bot
 
-## 7) Pin flow
-- используется механизм pinned-message legacy runtime;
-- хранится `pinned_message_id` в runtime storage;
-- попытка `edit` при наличии pinned;
-- fallback на создание нового закрепа при невозможности edit;
-- защита от размножения закрепов.
+Любое **private** сообщение клиента, которое не `/command`, считается обращением:
+1. клиент upsert в `clients.jsonl`;
+2. создаётся/обновляется тикет;
+3. текст сохраняется в `comment`;
+4. если телефона нет — статус `waiting_data`, клиенту запрос номера с примерами;
+5. даже `waiting_data` тикет доставляется мастерам, чтобы обращение не терялось;
+6. при валидном телефоне (`+7XXXXXXXXXX`) тикет переводится в `new`.
 
-## 8) Storage
-Гибридная стратегия:
-- основной слой: текстовые файлы в `/data` (`clients.jsonl`, `tickets.jsonl`, `system.json`);
-- адаптер `github_storage.py` и режим с `GITHUB_TOKEN` подготовлены для синхронизации коммитами;
-- при отсутствии токена — локальный режим.
+В тикетах фиксируются client-поля (`client_user_id`, `client_username`, `full_name`, `client_phone`).
 
-### Клиентская картотека
-Модель `Client` хранит:
-- `telegram_user_id`, `telegram_username`, `full_name`
-- `phones[]`, `car_numbers[]`, `vin_codes[]`
-- `vk_username`, `max_username`, `email`
-- `created_at`, `updated_at`, `source_tags[]`
+## Master-chat и фильтр источников
 
-Логика обновления: только расширение массивов без разрушения существующих данных.
+- Для `CLIENT_MASTERS_CHAT_ID` обычные сообщения **не создают** тикеты.
+- Обрабатываются только команды `/...` и callback-кнопки.
+- Доступна команда `/tickets` (и `/new`) для списка `new + waiting_data`.
+- Кнопки статусов: «В работу», «Запросить данные», «Обработана».
 
-## 9) Будущие интеграции
-Созданы заглушки:
-- `future_1c_adapter.py`
-- `future_vk_adapter.py`
-- `future_max_adapter.py`
-- `future_email_adapter.py` (в reviews service)
+Доставка тикетов:
+- по `CLIENT_NOTIFY_MODE`;
+- ошибки конкретных мастеров 400/403 не останавливают рассылку остальным;
+- при недоступности ЛС используется fallback в мастер-чат (если настроен).
 
-Единый интерфейс:
-```python
-class ExternalSourceAdapter:
-    def import_contacts(self): ...
-    def import_requests(self): ...
-    def sync_client(self, client): ...
-```
+## Pin flow
 
-## 10) Ограничения Telegram
-- длина сообщений, rate limit, ограничения edit/pin;
-- в группах/супергруппах бот зависит от privacy-mode и контекста команд;
-- `initData` Telegram WebApp ограничен по времени жизни подписи.
+`pinned_message_id` хранится в storage как **int**.
 
-## 11) Команды запуска
+Алгоритм:
+1. есть `pinned_message_id` → пробуем `editMessageText/editReplyMarkup`;
+2. `message is not modified` = успех, новый закреп не создаётся;
+3. `message to edit not found` / `not enough rights` → fallback: создать новое сообщение и сохранить новый `pinned_message_id`;
+4. если ID нет — создать закреп и сохранить ID.
 
-### Client bot service
+## WebApp session/submit
+
+### API
+- `POST /api/webapp/session` → `session_token`, `ttl_seconds` или ошибка `invalid_init_data`.
+- `POST /api/webapp/submit` принимает `session_token` или `initData`.
+- различимые ошибки: `invalid_init_data`, `session_expired`, `phone_required`.
+
+### Frontend
+- перед submit пытается получить `/api/webapp/session`;
+- submit отправляется через `/api/webapp/submit`;
+- если session не получена, fallback на `initData`;
+- телефон обязателен на фронте и сервере.
+
+## Команды запуска
+
 ```bash
-cd services/client_bot_service
-python -m app.main
+cd services/client_bot_service && python -m app.main
+cd services/reviews_bot_service && python -m app.main
 ```
 
-### Reviews bot service
-```bash
-cd services/reviews_bot_service
-python -m app.main
-```
+## Тесты
 
-### Тесты
 ```bash
 python -m unittest discover -s tests -p 'test_*.py'
 ```
 
-### CI
-Workflow: `.github/workflows/tests.yml`.
+Покрыто smoke-уровнем:
+- webapp static routes;
+- webapp session/submit;
+- filter сообщений мастер-чата;
+- pin parsing int/str;
+- shared clients registry merge.
