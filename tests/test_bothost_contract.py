@@ -10,7 +10,7 @@ class BotHostContractTestCase(unittest.TestCase):
     def test_entrypoint_imports_service_main(self) -> None:
         with open("main.py", "r", encoding="utf-8") as fh:
             content = fh.read()
-        self.assertIn("from services.client_bot_service.app.main import main", content)
+        self.assertIn("from services.client_bot_service.app.main import main as client_main", content)
         self.assertNotIn("window", content)
 
     def test_port_resolution_port_has_priority(self) -> None:
@@ -50,6 +50,25 @@ class BotHostContractTestCase(unittest.TestCase):
             self.assertEqual(client_main.sanitize_domain(os.getenv("DOMAIN")), "bot_123.bothost.ru")
             self.assertEqual(client_main.resolve_webapp_public_url(), "https://bot_123.bothost.ru/WEBAPP")
 
+    def test_token_resolution_raises_without_any_token(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "CLIENT_TELEGRAM_BOT_TOKEN": "",
+                "TELEGRAM_BOT_TOKEN": "",
+                "BOT_API_TOKEN": "",
+                "API_TOKEN": "",
+            },
+            clear=False,
+        ):
+            with self.assertRaises(RuntimeError):
+                ClientBotConfig.resolve_token()
+
+    def test_normalize_webapp_url_removes_double_scheme(self) -> None:
+        self.assertEqual(
+            client_main.normalize_webapp_url("https://HTTPS://example.com/WEBAPP/"),
+            "https://example.com/WEBAPP",
+        )
 
 if __name__ == "__main__":
     unittest.main()

@@ -3589,6 +3589,7 @@ def build_ticket_from_webapp(
         "telegram_username": user.get("username"),
         "full_name": full_name or "—",
         "comment": description,
+        "original_message_text": description,
         "scenario_type": scenario,
         "fio": full_name or None,
         "phone": phone or None,
@@ -4368,7 +4369,11 @@ def deliver_ticket(
         )
         return 0
 
-    if mode == "dm_only":
+    if not masters_chat_id:
+        delivered_dm += _send_dm()
+    elif not masters:
+        delivered_chat += _send_chat()
+    elif mode == "dm_only":
         delivered_dm += _send_dm()
     elif mode == "chat_only":
         delivered_chat += _send_chat()
@@ -4387,7 +4392,6 @@ def deliver_ticket(
         )
         for admin_id in admin_ids[:1] if admin_ids else []:
             send_message_with_result(admin_id, warning_text)
-
 
 def run_tg_send_test(
     token: str,
@@ -4677,13 +4681,14 @@ def build_ticket_from_client_message(
     return {
         "ticket_id": ticket_id,
         "status": STATUS_NEW if phone else STATUS_WAITING_CLIENT,
-        "source": "text",
+        "source": "telegram_chat",
         "telegram_user_id": chat.get("id"),
         "telegram_username": chat.get("username"),
         "full_name": full_name or "—",
         "phone": phone or None,
         "client_phone": phone or None,
         "comment": comment,
+        "original_message_text": comment,
         "created_at": now_value,
         "updated_at": now_value,
         "client_user_id": chat.get("id"),
@@ -4752,6 +4757,7 @@ def process_client_ticket_message(
         if not active_ticket.get("phone"):
             active_ticket["needs_phone"] = True
         active_ticket["comment"] = append_text(active_ticket.get("comment"), comment)
+        active_ticket["original_message_text"] = comment
         if phone:
             active_ticket["phone"] = phone
             active_ticket["client_phone"] = phone
@@ -5207,6 +5213,7 @@ def build_ticket_from_session(session: dict, timezone: str, storage: dict) -> di
         "telegram_username": data.get("client_username"),
         "full_name": full_name or "—",
         "comment": data.get("problem_text") or data.get("parts_text") or last_visit_text or "",
+        "original_message_text": data.get("problem_text") or data.get("parts_text") or last_visit_text or "",
         "scenario_type": session.get("scenario"),
         "fio": data.get("fio"),
         "phone": data.get("phone"),
@@ -5235,7 +5242,7 @@ def build_ticket_from_session(session: dict, timezone: str, storage: dict) -> di
         "attachments_count": data.get("attachments_count", 0),
         "status": STATUS_NEW,
         "client_chat_id": data.get("client_chat_id"),
-        "source": "chat",
+        "source": "telegram_chat",
         "reminded_at": None,
         "last_master_notify_at": None,
         "needs_phone": not bool(data.get("phone")),
@@ -7643,7 +7650,7 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
         if text.startswith("/new") or text.startswith("/tickets"):
             if not is_master_or_admin(from_user_id, storage):
                 return
-            tickets = filter_tickets_by_statuses(storage.get("tickets", []), {STATUS_NEW, STATUS_WAITING_CLIENT, STATUS_IN_PROGRESS})
+            tickets = filter_tickets_by_statuses(storage.get("tickets", []), {STATUS_NEW, STATUS_WAITING_CLIENT})
             tickets.sort(key=lambda item: item.get("created_at", ""), reverse=True)
             send_message(
                 token,
@@ -9053,6 +9060,8 @@ def main() -> None:
         raw_webapp_url or "—",
         normalized_webapp_url or "—",
     )
+    if raw_webapp_url and not normalized_webapp_url:
+        logger.warning("webapp url rejected as invalid; fallback to DOMAIN+WEBAPP_PATH")
     storage = load_storage()
     ensure_storage_defaults(storage)
     migrate_storage_settings_to_db(storage)

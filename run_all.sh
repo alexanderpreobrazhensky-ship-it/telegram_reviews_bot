@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "Starting unified server (reviews_bot + client_bot WebApp + polling)..."
+echo "client_bot_service starting …"
 exec python main.py

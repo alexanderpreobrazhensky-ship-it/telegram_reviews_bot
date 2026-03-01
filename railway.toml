@@ -1,2 +1,2 @@
 [deploy]
-startCommand = "bash run_all.sh"
+startCommand = "python main.py"
