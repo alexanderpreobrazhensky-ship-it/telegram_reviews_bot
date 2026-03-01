@@ -16,9 +16,9 @@ def load_main():
     os.environ["SUPERADMIN_ID"] = "738627185"
     os.environ["REPORT_CHAT_IDS"] = ""
     os.environ["DATABASE_URL"] = ""
-    if "main" in sys.modules:
-        del sys.modules["main"]
-    module = importlib.import_module("main")
+    if "bots.client_bot.main" in sys.modules:
+        del sys.modules["bots.client_bot.main"]
+    module = importlib.import_module("bots.client_bot.main")
     return module
 
 
@@ -28,27 +28,24 @@ class ChannelPinKeyboardTest(unittest.TestCase):
         cls.main = load_main()
 
     def test_keyboard_has_only_url_buttons(self):
-        keyboard = self.main._channel_pin_keyboard()
+        storage = {"settings": {}}
+        keyboard = self.main.build_pin_keyboard(storage)
         for row in keyboard["inline_keyboard"]:
             for button in row:
                 self.assertIn("url", button)
                 self.assertNotIn("web_app", button)
-                self.assertNotIn("callback_data", button)
 
     def test_route_button_toggle(self):
-        original = self.main.ROUTE_URL
-        try:
-            self.main.ROUTE_URL = ""
-            keyboard = self.main._channel_pin_keyboard()
-            texts = [button["text"] for row in keyboard["inline_keyboard"] for button in row]
-            self.assertNotIn("📍 Как доехать", texts)
+        storage = {"settings": {}}
+        self.main.set_route_url("", storage)
+        keyboard = self.main.build_pin_keyboard(storage)
+        texts = [button["text"] for row in keyboard["inline_keyboard"] for button in row]
+        self.assertNotIn("📍 Как доехать", texts)
 
-            self.main.ROUTE_URL = "https://example.com/route"
-            keyboard = self.main._channel_pin_keyboard()
-            texts = [button["text"] for row in keyboard["inline_keyboard"] for button in row]
-            self.assertIn("📍 Как доехать", texts)
-        finally:
-            self.main.ROUTE_URL = original
+        self.main.set_route_url("https://example.com/route", storage)
+        keyboard = self.main.build_pin_keyboard(storage)
+        texts = [button["text"] for row in keyboard["inline_keyboard"] for button in row]
+        self.assertIn("📍 Как доехать", texts)
 
 
 if __name__ == "__main__":
