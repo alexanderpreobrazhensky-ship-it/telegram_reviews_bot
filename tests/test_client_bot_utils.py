@@ -30,6 +30,12 @@ class TestClientBotUtils(unittest.TestCase):
             "https://example.com/WEBAPP",
         )
 
+    def test_normalize_webapp_url_double_http_scheme(self):
+        self.assertEqual(
+            client_main.normalize_webapp_url("https://http://example.com/WEBAPP"),
+            "https://example.com/WEBAPP",
+        )
+
     def test_normalize_webapp_url_missing_scheme(self):
         self.assertEqual(
             client_main.normalize_webapp_url(" example.com/WEBAPP "),
