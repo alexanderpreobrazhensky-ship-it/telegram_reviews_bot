@@ -198,17 +198,24 @@ AI_FALLBACK_TTL_SECONDS = int(os.getenv("AI_FALLBACK_TTL_SECONDS") or "1800")
 AI_FALLBACK_WINDOW_SECONDS = int(os.getenv("AI_FALLBACK_WINDOW_SECONDS") or "600")
 
 STATUS_NEW = "new"
-STATUS_IN_WORK = "in_work"
+STATUS_IN_PROGRESS = "in_progress"
 STATUS_WAITING_CLIENT = "waiting_data"
-STATUS_CLOSED = "closed"
+STATUS_PROCESSED = "processed"
+STATUS_ARCHIVED = "archived"
+STATUS_POSTPONED = "postponed"
+STATUS_IN_WORK = STATUS_IN_PROGRESS
+STATUS_CLOSED = STATUS_PROCESSED
 STATUS_CANONICAL = {
     "new": STATUS_NEW,
-    "in_work": STATUS_IN_WORK,
-    "in_progress": STATUS_IN_WORK,
+    "in_work": STATUS_IN_PROGRESS,
+    "in_progress": STATUS_IN_PROGRESS,
     "waiting_client": STATUS_WAITING_CLIENT,
     "waiting_data": STATUS_WAITING_CLIENT,
-    "closed": STATUS_CLOSED,
-    "done": STATUS_CLOSED,
+    "closed": STATUS_PROCESSED,
+    "done": STATUS_PROCESSED,
+    "processed": STATUS_PROCESSED,
+    "archived": STATUS_ARCHIVED,
+    "postponed": STATUS_POSTPONED,
 }
 
 AI_ASK_BLOCKLIST = {
@@ -605,8 +612,14 @@ def normalize_webapp_url(value: str | None) -> str | None:
         normalized = f"http://{normalized[len('HTTP://'):]}"
     while normalized.lower().startswith("https://https://"):
         normalized = f"https://{normalized[len('https://https://'):]}"
+    while normalized.lower().startswith("https://http://"):
+        normalized = f"https://{normalized[len('https://http://'):]}"
     if not normalized.lower().startswith(("http://", "https://")):
         normalized = f"https://{normalized}"
+    if " " in normalized:
+        return None
+    if not normalized.lower().startswith("https://"):
+        return None
     normalized = normalized.strip()
     if not normalized:
         return None
@@ -1796,7 +1809,8 @@ def build_master_status_keyboard(ticket: dict) -> dict:
             {"text": "⏳ Запросить данные", "callback_data": f"ticket_status:{ticket_id}:{STATUS_WAITING_CLIENT}"},
         ],
         [
-            {"text": "✅ Закрыть", "callback_data": f"ticket_status:{ticket_id}:{STATUS_CLOSED}"},
+            {"text": "✅ Обработана", "callback_data": f"ticket_status:{ticket_id}:{STATUS_PROCESSED}"},
+            {"text": "🗄 В архив", "callback_data": f"ticket_status:{ticket_id}:{STATUS_ARCHIVED}"},
         ]
     ]
     row: list[dict] = []
@@ -1987,9 +2001,11 @@ def build_ticket_update_card(ticket: dict, fields_changed: list[str], timezone: 
 def format_ticket_status(value: str | None) -> str:
     mapping = {
         STATUS_NEW: "Новая",
-        STATUS_IN_WORK: "В работе",
+        STATUS_IN_PROGRESS: "В работе",
         STATUS_WAITING_CLIENT: "Ожидает данных",
-        STATUS_CLOSED: "Закрыта",
+        STATUS_PROCESSED: "Обработана",
+        STATUS_ARCHIVED: "В архиве",
+        STATUS_POSTPONED: "Отложена",
     }
     return mapping.get(normalize_ticket_status(value), "—")
 
@@ -4225,7 +4241,7 @@ def notify_masters(
         result = send_message_with_result(master, text, reply_markup=sanitized_markup)
         if not result.ok and isinstance(master, int) and master > 0:
             update_master_reachability_from_result(storage, master, result, timezone)
-        logger.error("failed to send message to master %s ticket_id=%s", master, ticket_id)
+            logger.error("failed to send message to master %s ticket_id=%s", master, ticket_id)
 
 
 def notify_ticket_update(
@@ -4293,7 +4309,8 @@ def deliver_ticket(
     delivered_dm = 0
     delivered_chat = 0
 
-    if mode in {"dm_then_chat", "dm_only", "chat_then_dm"}:
+    def _send_dm() -> int:
+        sent = 0
         for master_id in masters:
             if isinstance(master_id, int) and master_id > 0:
                 if send_ticket_to_master(
@@ -4305,35 +4322,45 @@ def deliver_ticket(
                     logger,
                     message_key=f"ticket:{ticket.get('ticket_id')}:{source_label}",
                 ):
-                    delivered_dm += 1
+                    sent += 1
+        return sent
 
-    should_send_chat = mode in {"chat_only", "dm_then_chat", "chat_then_dm"}
-    if should_send_chat and masters_chat_id:
-        if mode == "dm_then_chat" and delivered_dm > 0:
-            pass
-        else:
-            result = send_message_with_result(
-                masters_chat_id,
-                build_master_card(ticket, timezone),
-                reply_markup=build_master_status_keyboard(ticket),
-            )
-            if result.ok:
-                delivered_chat += 1
-                if result.response_json:
-                    message_id = result.response_json.get("result", {}).get("message_id")
-                    if message_id:
-                        ticket["masters_chat_message_id"] = message_id
-                        ticket["masters_chat_id"] = masters_chat_id
-                        ticket["updated_at"] = now_iso(timezone)
-                        save_storage(storage)
-                        append_ticket_jsonl(ticket, storage, logger)
-            else:
-                logger.warning(
-                    "failed to send ticket to masters chat chat_id=%s status=%s error=%s",
-                    masters_chat_id,
-                    result.status_code,
-                    result.error,
-                )
+    def _send_chat() -> int:
+        if not masters_chat_id:
+            return 0
+        result = send_message_with_result(
+            masters_chat_id,
+            build_master_card(ticket, timezone),
+            reply_markup=build_master_status_keyboard(ticket),
+        )
+        if result.ok:
+            if result.response_json:
+                message_id = result.response_json.get("result", {}).get("message_id")
+                if message_id:
+                    ticket["masters_chat_message_id"] = message_id
+                    ticket["masters_chat_id"] = masters_chat_id
+                    ticket["updated_at"] = now_iso(timezone)
+                    save_storage(storage)
+                    append_ticket_jsonl(ticket, storage, logger)
+            return 1
+        logger.warning(
+            "failed to send ticket to masters chat chat_id=%s status=%s error=%s",
+            masters_chat_id,
+            result.status_code,
+            result.error,
+        )
+        return 0
+
+    if mode == "dm_only":
+        delivered_dm += _send_dm()
+    elif mode == "chat_only":
+        delivered_chat += _send_chat()
+    elif mode == "chat_then_dm":
+        delivered_chat += _send_chat()
+        delivered_dm += _send_dm()
+    else:  # dm_then_chat
+        delivered_dm += _send_dm()
+        delivered_chat += _send_chat()
 
     if delivered_dm == 0 and delivered_chat == 0:
         admin_ids = sorted(get_admin_ids(storage))
@@ -5911,7 +5938,7 @@ def update_ticket_status(
         return
     ticket_id = parts[1]
     new_status = normalize_ticket_status(parts[2])
-    if new_status not in {STATUS_IN_WORK, STATUS_WAITING_CLIENT, STATUS_CLOSED}:
+    if new_status not in {STATUS_IN_PROGRESS, STATUS_WAITING_CLIENT, STATUS_PROCESSED, STATUS_ARCHIVED}:
         return
     ticket = next(
         (item for item in storage.get("tickets", []) if item.get("ticket_id") == ticket_id),
@@ -6937,7 +6964,7 @@ def handle_admin_callback(
             return True
         ticket_id = parts[2]
         new_status = normalize_ticket_status(parts[3])
-        if new_status not in {STATUS_NEW, STATUS_IN_WORK, STATUS_WAITING_CLIENT, STATUS_CLOSED}:
+        if new_status not in {STATUS_NEW, STATUS_IN_PROGRESS, STATUS_WAITING_CLIENT, STATUS_PROCESSED, STATUS_ARCHIVED, STATUS_POSTPONED}:
             send_message(token, chat_id, "Недоступный статус.")
             return True
         ticket = next(
@@ -7393,7 +7420,7 @@ def check_reminders(
 ) -> None:
     now_value = datetime.now(ZoneInfo(timezone))
     for ticket in storage.get("tickets", []):
-        if str(ticket.get("status") or "").strip().lower() != "postponed":
+        if normalize_ticket_status(ticket.get("status")) != STATUS_POSTPONED:
             continue
         postponed_until = _parse_iso_datetime(ticket.get("postponed_until"), timezone)
         if postponed_until is None or now_value < postponed_until:
@@ -7599,13 +7626,27 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
         if text.startswith("/new") or text.startswith("/tickets"):
             if not is_master_or_admin(from_user_id, storage):
                 return
-            tickets = filter_tickets_by_statuses(storage.get("tickets", []), {STATUS_NEW, STATUS_WAITING_CLIENT})
+            tickets = filter_tickets_by_statuses(storage.get("tickets", []), {STATUS_NEW, STATUS_WAITING_CLIENT, STATUS_IN_PROGRESS})
             tickets.sort(key=lambda item: item.get("created_at", ""), reverse=True)
             send_message(
                 token,
                 chat_id,
-                build_master_ticket_list_text(tickets, timezone, "Новые заявки:", limit=10),
+                build_master_ticket_list_text(tickets, timezone, "Активные заявки:", limit=10),
             )
+            return
+        if text.startswith("/waiting"):
+            if not is_master_or_admin(from_user_id, storage):
+                return
+            tickets = filter_tickets_by_statuses(storage.get("tickets", []), {STATUS_WAITING_CLIENT})
+            tickets.sort(key=lambda item: item.get("created_at", ""), reverse=True)
+            send_message(token, chat_id, build_master_ticket_list_text(tickets, timezone, "Ожидают данных:", limit=10))
+            return
+        if text.startswith("/inprogress"):
+            if not is_master_or_admin(from_user_id, storage):
+                return
+            tickets = filter_tickets_by_statuses(storage.get("tickets", []), {STATUS_IN_PROGRESS})
+            tickets.sort(key=lambda item: item.get("created_at", ""), reverse=True)
+            send_message(token, chat_id, build_master_ticket_list_text(tickets, timezone, "В работе:", limit=10))
             return
         if text.startswith("/queue"):
             if not is_master_or_admin(from_user_id, storage):
