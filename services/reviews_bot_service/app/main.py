@@ -1,12 +1,18 @@
 from __future__ import annotations
 
-import main as legacy_reviews
+import importlib
+import logging
+import os
 
 from .config import ReviewsConfig
+
+logger = logging.getLogger("reviews_bot_service")
 
 
 def build_app():
     cfg = ReviewsConfig.from_env()
+    os.environ["TELEGRAM_BOT_TOKEN"] = cfg.token
+    legacy_reviews = importlib.import_module("main")
     app = legacy_reviews.app
 
     if "reviews_service_health" not in app.view_functions:
@@ -17,6 +23,7 @@ def build_app():
                 "ok": True,
                 "service": "reviews_bot_service",
                 "ai_engine": getattr(legacy_reviews, "AI_ENGINE", "unknown"),
+                "mode": cfg.mode,
             },
             methods=["GET"],
         )
@@ -26,6 +33,8 @@ def build_app():
 
 def main() -> None:
     app, cfg = build_app()
+    source = "REVIEWS_TELEGRAM_BOT_TOKEN" if os.getenv("REVIEWS_TELEGRAM_BOT_TOKEN") else "TELEGRAM_BOT_TOKEN"
+    logger.info("reviews_bot_service startup: token_source=%s mode=%s", source, cfg.mode)
     app.run(host=cfg.host, port=cfg.port)
 
 

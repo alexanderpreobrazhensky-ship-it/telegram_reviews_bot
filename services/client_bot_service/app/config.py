@@ -14,9 +14,9 @@ class ClientBotConfig:
 
     @classmethod
     def from_env(cls) -> "ClientBotConfig":
-        token = (os.getenv("CLIENT_TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
+        token = (os.getenv("CLIENT_TELEGRAM_BOT_TOKEN") or "").strip()
         if not token:
-            raise ValueError("CLIENT_TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN is required")
+            raise ValueError("CLIENT_TELEGRAM_BOT_TOKEN is required")
         return cls(
             token=token,
             mode=(os.getenv("CLIENT_BOT_MODE") or "polling").strip().lower(),

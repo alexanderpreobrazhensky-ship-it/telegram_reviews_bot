@@ -290,12 +290,6 @@ const submitForm = async (event) => {
     return;
   }
   const initData = (tg?.initData || "").trim();
-  if (!initData || initData.length < 10) {
-    const message = "Сессия Telegram недействительна. Откройте WebApp заново из бота.";
-    setStatus(message, true);
-    tg?.showAlert?.(message);
-    return;
-  }
   const form = buildPayload();
   if (!form.phone) {
     const message = "Введите телефон";
@@ -303,18 +297,56 @@ const submitForm = async (event) => {
     tg?.showAlert?.(message);
     return;
   }
+
+  let sessionToken = state.sessionToken || getStoredSessionToken();
+  if (!sessionToken && initData) {
+    try {
+      const sessionResp = await fetch("/api/webapp/session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ initData }),
+      });
+      const sessionPayload = await sessionResp.json();
+      if (sessionPayload.ok && sessionPayload.session_token) {
+        sessionToken = sessionPayload.session_token;
+        storeSessionToken(sessionToken);
+      }
+    } catch (error) {
+      console.warn("session fetch before submit failed", error);
+    }
+  }
+
+  const payload = { form };
+  if (sessionToken) {
+    payload.session_token = sessionToken;
+  } else {
+    payload.initData = initData;
+  }
+
   try {
-    tg?.sendData?.(
-      JSON.stringify({
-        v: 1,
-        action: "submit_form",
-        initData,
-        form,
-      })
-    );
-    setStatus("Заявка отправлена в бот. Подтвердите отправку в Telegram.");
+    const response = await fetch("/api/webapp/submit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const body = await response.json();
+    if (response.ok && body.ok) {
+      setStatus("Заявка отправлена. Мы скоро свяжемся с вами.");
+      tg?.showAlert?.("Заявка отправлена");
+      return;
+    }
+    const reason = body?.error || "unknown";
+    if (reason === "phone_required") {
+      setStatus("Укажите корректный телефон в формате +79991234567", true);
+    } else if (reason === "session_expired") {
+      setStatus("Сессия устарела. Откройте WebApp заново из бота.", true);
+    } else if (reason === "invalid_init_data") {
+      setStatus("Сессия недоступна. Откройте WebApp заново из бота.", true);
+    } else {
+      setStatus("Не удалось отправить заявку. Попробуйте ещё раз.", true);
+    }
   } catch (error) {
-    console.warn("sendData failed", error);
+    console.warn("submit failed", error);
     setStatus("Не удалось отправить. Попробуйте позже.", true);
   }
 };
@@ -375,8 +407,8 @@ const init = async () => {
         body: JSON.stringify({ initData: tg.initData }),
       });
       const payload = await response.json();
-    if (payload.ok && payload.token) {
-        storeSessionToken(payload.token);
+    if (payload.ok && payload.session_token) {
+        storeSessionToken(payload.session_token);
     } else if (payload.error === "SESSION_INVALID") {
       const message = "Сессия Telegram недействительна. Откройте WebApp заново из бота.";
       setStatus(message, true);
