@@ -14,9 +14,10 @@ def build_app():
     app = create_flask_app(cfg.token, logger)
 
     @app.get("/service-health")
+    @app.get("/health")
     def health():
         return {
-            "ok": True,
+            "status": "ok",
             "service": "client_bot_service",
             "mode": cfg.mode,
         }
@@ -26,7 +27,7 @@ def build_app():
 
 def main() -> None:
     app, cfg = build_app()
-    logger.info("client_bot_service startup: token_source=CLIENT_TELEGRAM_BOT_TOKEN mode=%s", cfg.mode)
+    logger.info("client_bot_service startup: mode=%s port=%s token_source=CLIENT_TELEGRAM_BOT_TOKEN", cfg.mode, cfg.port)
     if cfg.mode == "polling":
         start_polling_background()
     app.run(host=cfg.host, port=cfg.port)

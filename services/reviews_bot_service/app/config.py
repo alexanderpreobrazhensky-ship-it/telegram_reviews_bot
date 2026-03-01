@@ -13,9 +13,9 @@ class ReviewsConfig:
 
     @classmethod
     def from_env(cls) -> "ReviewsConfig":
-        token = (os.getenv("REVIEWS_TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
+        token = (os.getenv("REVIEWS_TELEGRAM_BOT_TOKEN") or "").strip()
         if not token:
-            raise ValueError("REVIEWS_TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN is required")
+            raise RuntimeError("REVIEWS_TELEGRAM_BOT_TOKEN is required")
         return cls(
             host=(os.getenv("REVIEWS_SERVICE_HOST") or "0.0.0.0").strip(),
             port=int(os.getenv("REVIEWS_SERVICE_PORT") or "8020"),

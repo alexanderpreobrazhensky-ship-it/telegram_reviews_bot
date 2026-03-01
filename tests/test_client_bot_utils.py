@@ -1,3 +1,4 @@
+import logging
 import unittest
 from unittest.mock import patch
 
@@ -38,3 +39,34 @@ class TestClientBotUtils(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TicketTtlAndPostponedTestCase(unittest.TestCase):
+    def test_find_active_ticket_honors_env_ttl(self) -> None:
+        from datetime import datetime, timedelta
+        from zoneinfo import ZoneInfo
+        import bots.client_bot.main as m
+
+        now = datetime.now(ZoneInfo("Europe/Moscow"))
+        storage = {"tickets": [
+            {"ticket_id": "T1", "client_chat_id": 10, "status": "new", "updated_at": (now - timedelta(hours=13)).isoformat()},
+            {"ticket_id": "T2", "client_chat_id": 10, "status": "new", "updated_at": (now - timedelta(hours=1)).isoformat()},
+        ]}
+        ticket = m.find_active_ticket(storage, 10, "Europe/Moscow")
+        self.assertIsNotNone(ticket)
+        self.assertEqual(ticket.get("ticket_id"), "T2")
+
+    def test_postponed_auto_return_switches_to_new(self) -> None:
+        import bots.client_bot.main as m
+        storage = {"tickets": [{"ticket_id": "P1", "status": "postponed", "postponed_until": "2000-01-01T00:00:00+00:00", "client_chat_id": 1}], "settings": {}}
+        with unittest.mock.patch("bots.client_bot.main.deliver_ticket") as deliver, unittest.mock.patch("bots.client_bot.main.save_storage"):
+            m.check_reminders("T", storage, "Europe/Moscow", [], logging.getLogger("test"))
+        self.assertEqual(storage["tickets"][0]["status"], "new")
+        self.assertTrue(deliver.called)
+
+
+class PinIdParsingTestCase(unittest.TestCase):
+    def test_parse_int_maybe_handles_string_int(self) -> None:
+        import bots.client_bot.main as m
+        self.assertEqual(m.parse_int_maybe(" 123 "), 123)
+        self.assertIsNone(m.parse_int_maybe("12a"))
