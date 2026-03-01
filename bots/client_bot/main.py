@@ -83,6 +83,7 @@ VERSION = "0.4.0"
 POLLING_TIMEOUT = 30
 POLLING_SLEEP_SECONDS = 1
 TTL_HOURS = 24
+CLIENT_ACTIVE_TICKET_TTL_HOURS = int(os.getenv("CLIENT_ACTIVE_TICKET_TTL_HOURS") or "12")
 OUTGOING_QUEUE_INTERVAL_SECONDS = 3
 
 MENU_BOOKING = "📅 Запись"
@@ -537,11 +538,9 @@ def get_master_inbox_title() -> str | None:
 
 def get_masters_chat_id(storage: dict) -> int | None:
     settings = storage.get("settings", {})
-    chat_id = settings.get("masters_chat_id")
-    if isinstance(chat_id, int):
-        return chat_id
-    if isinstance(chat_id, str) and chat_id.strip().lstrip("-").isdigit():
-        return int(chat_id)
+    parsed = parse_chat_id(settings.get("masters_chat_id"))
+    if parsed is not None:
+        return parsed
     if isinstance(CLIENT_CHAT_ID, int):
         return CLIENT_CHAT_ID
     return None
@@ -572,6 +571,15 @@ def parse_int_maybe(value: object) -> int | None:
         if stripped.lstrip("-").isdigit():
             return int(stripped)
     return None
+
+
+def parse_chat_id(value: object) -> int | None:
+    parsed = parse_int_maybe(value)
+    if parsed is None:
+        return None
+    if parsed == 0:
+        return None
+    return parsed
 
 
 def get_pinned_message_id() -> int | None:
@@ -3315,6 +3323,10 @@ def register_webapp_routes(app: Flask, token: str, logger: logging.Logger) -> Fl
             return webapp_disabled_response()
         return send_from_directory(WEBAPP_DIR, filename)
 
+    @app.get("/health")
+    def service_health() -> object:
+        return jsonify({"status": "ok", "service": "client_bot_service", "mode": RUN_MODE or "polling"})
+
     @app.get("/api/webapp/health")
     def webapp_health() -> object:
         static_files = ["index.html", "app.css", "app.js"]
@@ -4436,21 +4448,27 @@ def maybe_start_clarification(
     return True
 
 
-def parse_ticket_expiry(ticket: dict, timezone: str) -> datetime | None:
-    ttl_str = ticket.get("ttl_expires_at")
-    if ttl_str:
-        try:
-            return datetime.fromisoformat(ttl_str).astimezone(ZoneInfo(timezone))
-        except ValueError:
-            return None
-    created_at = ticket.get("created_at")
-    if not created_at:
+def _parse_iso_datetime(value: object, timezone: str) -> datetime | None:
+    if not value:
         return None
     try:
-        created_dt = datetime.fromisoformat(created_at).astimezone(ZoneInfo(timezone))
+        return datetime.fromisoformat(str(value)).astimezone(ZoneInfo(timezone))
     except ValueError:
         return None
-    return created_dt + timedelta(hours=TTL_HOURS)
+
+
+def parse_ticket_expiry(ticket: dict, timezone: str) -> datetime | None:
+    ttl_str = ticket.get("ttl_expires_at")
+    parsed_ttl = _parse_iso_datetime(ttl_str, timezone)
+    if parsed_ttl is not None:
+        return parsed_ttl
+    updated_dt = _parse_iso_datetime(ticket.get("updated_at"), timezone)
+    if updated_dt is not None:
+        return updated_dt + timedelta(hours=CLIENT_ACTIVE_TICKET_TTL_HOURS)
+    created_dt = _parse_iso_datetime(ticket.get("created_at"), timezone)
+    if created_dt is None:
+        return None
+    return created_dt + timedelta(hours=CLIENT_ACTIVE_TICKET_TTL_HOURS)
 
 
 def is_ticket_active(ticket: dict, timezone: str) -> bool:
@@ -7373,6 +7391,19 @@ def check_reminders(
     master_usernames: list[str | int],
     logger: logging.Logger,
 ) -> None:
+    now_value = datetime.now(ZoneInfo(timezone))
+    for ticket in storage.get("tickets", []):
+        if str(ticket.get("status") or "").strip().lower() != "postponed":
+            continue
+        postponed_until = _parse_iso_datetime(ticket.get("postponed_until"), timezone)
+        if postponed_until is None or now_value < postponed_until:
+            continue
+        ticket["status"] = STATUS_NEW
+        ticket["updated_at"] = now_iso(timezone)
+        ticket["postponed_until"] = None
+        save_storage(storage)
+        logger.info("postponed_ticket_reactivated ticket_id=%s", ticket.get("ticket_id"))
+        deliver_ticket(token, storage, ticket, timezone, logger, source_label="postponed_auto_return", send_client_confirmation=False)
     settings = get_settings(storage)
     reminder_minutes = settings.get("reminder_minutes", 30)
     auto_reply_hours = settings.get("auto_reply_hours", 6)
@@ -7545,12 +7576,20 @@ def handle_update(token: str, update: dict, logger: logging.Logger) -> None:
 
     if is_masters_chat:
         if not text:
+            logger.info("master_chat_message_ignored chat_id=%s reason=empty", chat_id)
             return
+        if text and not text.startswith("/") and not callback:
+            reply_to = message.get("reply_to_message") or {}
+            reply_text = str(reply_to.get("text") or reply_to.get("caption") or "")
+            if "TICKET_ID:" not in reply_text:
+                logger.info("master_chat_message_ignored chat_id=%s reason=no_command_no_ticket_marker", chat_id)
+                return
         if text and not text.startswith("/"):
             mapped_command = resolve_master_panel_command(text)
             if mapped_command:
                 text = mapped_command
             else:
+                logger.info("master_chat_message_ignored chat_id=%s reason=unknown_plain_text", chat_id)
                 return
         if text.startswith("/panel"):
             if not is_master_or_admin(from_user_id, storage):
@@ -8928,11 +8967,10 @@ def main() -> None:
     logger.info("[client_bot] openpyxl available: %s", is_openpyxl_available())
     token_info = get_client_token()
     if not token_info:
-        logger.warning("client_bot token missing; bot disabled")
-        return
+        raise RuntimeError("CLIENT_TELEGRAM_BOT_TOKEN is required")
     token, token_source = token_info
     configure_telegram(token)
-    logger.info("client_bot token source: %s", token_source)
+    logger.info("client_bot startup mode=%s port=%s token_source=%s", RUN_MODE, os.getenv("CLIENT_SERVICE_PORT", "8010"), token_source)
     db_init_settings()
     ensure_persistent_defaults()
     ensure_core_settings_defaults()
@@ -9022,8 +9060,7 @@ def start_polling_background() -> threading.Thread | None:
     global RUN_MODE
     token = os.getenv("CLIENT_TELEGRAM_BOT_TOKEN")
     if not token:
-        logging.getLogger("client_bot").warning("client_bot polling skipped: token is not configured")
-        return None
+        raise RuntimeError("CLIENT_TELEGRAM_BOT_TOKEN is required")
     RUN_MODE = "polling"
     thread = threading.Thread(target=main, name="client_bot_polling", daemon=True)
     thread.start()

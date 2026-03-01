@@ -15,6 +15,12 @@ class ServiceSmokeTestCase(unittest.TestCase):
         register_webapp_routes(self.app, token="TEST_TOKEN", logger=logging.getLogger("test"))
         self.client = self.app.test_client()
 
+    def test_client_service_health_route(self) -> None:
+        response = self.client.get("/health")
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload.get("status"), "ok")
+
     def test_webapp_health_200(self) -> None:
         response = self.client.get("/api/webapp/health")
         self.assertEqual(response.status_code, 200)
@@ -84,11 +90,11 @@ class ServiceSmokeTestCase(unittest.TestCase):
         self.assertTrue(notify_masters.called or storage["tickets"])
 
     def test_reviews_health_no_secret_leak(self) -> None:
-        os.environ.setdefault("TELEGRAM_BOT_TOKEN", "123456:ABCDEF_SECRET")
+        os.environ["REVIEWS_TELEGRAM_BOT_TOKEN"] = "123456:ABCDEF_SECRET"
         module = importlib.import_module("services.reviews_bot_service.app.main")
         app, _ = module.build_app()
         client = app.test_client()
-        response = client.get("/service-health")
+        response = client.get("/health")
         body = response.get_data(as_text=True)
         self.assertEqual(response.status_code, 200)
         self.assertNotIn("ABCDEF_SECRET", body)

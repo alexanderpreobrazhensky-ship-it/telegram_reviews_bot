@@ -11,12 +11,12 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_REGISTRY_PATH = REPO_ROOT / "clients.jsonl"
-LOCK_TIMEOUT_SECONDS = 5.0
+LOCK_TIMEOUT_SECONDS = float((os.getenv("CLIENTS_REGISTRY_LOCK_TIMEOUT_SECONDS") or "5").strip())
 LOCK_SLEEP_SECONDS = 0.05
 
 
 def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    return datetime.now(timezone.utc).isoformat()
 
 
 def registry_path() -> Path:
@@ -28,7 +28,7 @@ def registry_path() -> Path:
 
 @contextmanager
 def _file_lock(path: Path):
-    lock_path = path.with_suffix(path.suffix + ".lock")
+    lock_path = path.parent / "clients.lock"
     started = time.monotonic()
     while True:
         try:
@@ -126,6 +126,9 @@ def upsert_client(client: dict[str, Any], source_tag: str | None = None) -> dict
     vins = _as_unique_list(client.get("vin_codes") or ([client.get("vin")] if client.get("vin") else []))
 
     with _file_lock(path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not path.exists():
+            path.write_text("", encoding="utf-8")
         records = _read_all(path)
         match_index = None
         for idx, record in enumerate(records):

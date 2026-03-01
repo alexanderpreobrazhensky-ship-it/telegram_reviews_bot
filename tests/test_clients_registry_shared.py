@@ -47,6 +47,13 @@ class SharedClientsRegistryTestCase(unittest.TestCase):
         self.assertIn("telegram_client_bot", lines[0]["source_tags"])
         self.assertIn("webapp", lines[0]["source_tags"])
 
+    def test_fallback_username_key_and_created_at_kept(self) -> None:
+        first = upsert_client({"telegram_username": "onlyname", "phones": ["+70000000000"]}, source_tag="a")
+        second = upsert_client({"telegram_username": "onlyname", "phones": ["+71111111111"]}, source_tag="b")
+        self.assertEqual(first["created_at"], second["created_at"])
+        self.assertNotEqual(first["updated_at"], second["updated_at"])
+        self.assertEqual(second["phones"], ["+70000000000", "+71111111111"])
+
 
 if __name__ == "__main__":
     unittest.main()
