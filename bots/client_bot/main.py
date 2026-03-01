@@ -260,7 +260,16 @@ RUN_MODE = (
     or os.getenv("RUN_MODE")
     or "polling"
 ).strip().lower()
-DOMAIN = (os.getenv("DOMAIN") or "").strip().rstrip("/")
+def sanitize_domain(value: str | None) -> str:
+    raw = (value or "").strip()
+    if not raw:
+        return ""
+    parsed = urlparse(raw if "://" in raw else f"https://{raw}")
+    host = (parsed.netloc or parsed.path or "").strip().strip("/").lower()
+    return host
+
+
+DOMAIN = sanitize_domain(os.getenv("DOMAIN"))
 WEBAPP_PATH = (os.getenv("WEBAPP_PATH") or "/WEBAPP").strip() or "/WEBAPP"
 WEBAPP_ENABLED = (
     (os.getenv("CLIENT_WEBAPP_ENABLED") or os.getenv("WEBAPP_ENABLED") or "1")
@@ -494,7 +503,7 @@ def ensure_core_settings_defaults() -> None:
     pin_version = (os.getenv("PIN_TEMPLATE_VERSION") or "v1").strip()
     if get_core_setting(CORE_SETTING_PIN_TEMPLATE_VERSION) is None:
         set_core_setting(CORE_SETTING_PIN_TEMPLATE_VERSION, pin_version)
-    webapp_url = normalize_webapp_url(os.getenv("CLIENT_WEBAPP_URL"))
+    webapp_url = resolve_webapp_public_url()
     if webapp_url and get_core_setting(CORE_SETTING_WEBAPP_URL) is None:
         set_core_setting(CORE_SETTING_WEBAPP_URL, webapp_url)
 
@@ -605,29 +614,40 @@ def normalize_webapp_url(value: str | None) -> str | None:
     raw = (value or "").strip()
     if not raw:
         return None
-    normalized = raw.strip()
-    if normalized.startswith("HTTPS://"):
-        normalized = f"https://{normalized[len('HTTPS://'):]}"
-    if normalized.startswith("HTTP://"):
-        normalized = f"http://{normalized[len('HTTP://'):]}"
+    normalized = raw
     while normalized.lower().startswith("https://https://"):
-        normalized = f"https://{normalized[len('https://https://'):]}"
+        normalized = normalized[len("https://"):]
+    while normalized.lower().startswith("http://http://"):
+        normalized = normalized[len("http://"): ]
     while normalized.lower().startswith("https://http://"):
-        normalized = f"https://{normalized[len('https://http://'):]}"
+        normalized = "https://" + normalized[len("https://http://"):]
+    while normalized.lower().startswith("https://https://"):
+        normalized = "https://" + normalized[len("https://https://"):]
     if not normalized.lower().startswith(("http://", "https://")):
         normalized = f"https://{normalized}"
-    if " " in normalized:
+    parsed = urlparse(normalized)
+    host = (parsed.netloc or "").strip().lower()
+    if not host:
         return None
-    if not normalized.lower().startswith("https://"):
+    path = (parsed.path or "").rstrip("/")
+    url = f"https://{host}{path}"
+    if parsed.query:
+        url = f"{url}?{parsed.query}"
+    return url
+
+
+def resolve_webapp_public_url() -> str | None:
+    direct = normalize_webapp_url(os.getenv("CLIENT_WEBAPP_URL") or os.getenv("WEBAPP_URL"))
+    if direct:
+        return direct
+    domain = sanitize_domain(os.getenv("DOMAIN"))
+    if not domain:
         return None
-    normalized = normalized.strip()
-    if not normalized:
-        return None
-    return normalized
+    return f"https://{domain}{WEBAPP_PATH}"
 
 
 def get_webapp_public_url() -> str | None:
-    return normalize_webapp_url(os.getenv("CLIENT_WEBAPP_URL"))
+    return resolve_webapp_public_url()
 
 
 def get_route_url(storage: dict | None = None) -> str | None:
@@ -699,10 +719,7 @@ def build_logger(timezone: str) -> logging.Logger:
 def get_webapp_url() -> str | None:
     if not WEBAPP_ENABLED:
         return None
-    url = normalize_webapp_url(os.getenv("CLIENT_WEBAPP_URL"))
-    if url:
-        return url
-    return None
+    return resolve_webapp_public_url()
 
 
 def get_lira_phone() -> str | None:
@@ -8980,9 +8997,16 @@ def poll_updates(token: str, logger: logging.Logger) -> None:
 
 
 def get_client_token() -> tuple[str, str] | None:
-    token = os.getenv("CLIENT_TELEGRAM_BOT_TOKEN")
-    if token:
-        return token.strip(), "CLIENT_TELEGRAM_BOT_TOKEN"
+    candidates = [
+        ("CLIENT_TELEGRAM_BOT_TOKEN", os.getenv("CLIENT_TELEGRAM_BOT_TOKEN")),
+        ("TELEGRAM_BOT_TOKEN", os.getenv("TELEGRAM_BOT_TOKEN")),
+        ("BOT_API_TOKEN", os.getenv("BOT_API_TOKEN")),
+        ("API_TOKEN", os.getenv("API_TOKEN")),
+    ]
+    for source, raw in candidates:
+        token = (raw or "").strip()
+        if token:
+            return token, source
     return None
 
 
@@ -9008,15 +9032,22 @@ def main() -> None:
     logger.info("[client_bot] openpyxl available: %s", is_openpyxl_available())
     token_info = get_client_token()
     if not token_info:
-        raise RuntimeError("CLIENT_TELEGRAM_BOT_TOKEN is required")
+        raise RuntimeError("Client bot token is required: set CLIENT_TELEGRAM_BOT_TOKEN (fallbacks: TELEGRAM_BOT_TOKEN, BOT_API_TOKEN, API_TOKEN)")
     token, token_source = token_info
     configure_telegram(token)
-    logger.info("client_bot startup mode=%s port=%s token_source=%s", RUN_MODE, os.getenv("CLIENT_SERVICE_PORT", "8010"), token_source)
+    logger.info(
+        "client_bot startup mode=%s domain=%s webapp_url=%s port=%s token_source=%s",
+        RUN_MODE,
+        DOMAIN or "-",
+        resolve_webapp_public_url() or "-",
+        os.getenv("PORT") or os.getenv("CLIENT_SERVICE_PORT") or "8000",
+        token_source,
+    )
     db_init_settings()
     ensure_persistent_defaults()
     ensure_core_settings_defaults()
     raw_webapp_url = os.getenv("CLIENT_WEBAPP_URL") or os.getenv("WEBAPP_URL") or ""
-    normalized_webapp_url = normalize_webapp_url(raw_webapp_url)
+    normalized_webapp_url = resolve_webapp_public_url()
     logger.info(
         "webapp url normalized: from=%s to=%s",
         raw_webapp_url or "—",
@@ -9090,8 +9121,8 @@ def main() -> None:
     if AUTO_PIN_ON_START:
         ok, message = ensure_channel_pin(storage, timezone, logger, force_new=False)
         logger.info("auto pin on start: %s", message)
-    if RUN_MODE != "polling":
-        logger.warning("RUN_MODE=%s is not supported in BotHost migration, fallback to polling", RUN_MODE)
+    if RUN_MODE == "webhook":
+        logger.warning("webhook mode requested but polling remains active in this build; keep CLIENT_BOT_MODE=polling")
     logger.info("client_bot mode=polling")
     delete_webhook(token, logger, drop_pending_updates=False)
     poll_updates(token, logger)
@@ -9099,9 +9130,9 @@ def main() -> None:
 
 def start_polling_background() -> threading.Thread | None:
     global RUN_MODE
-    token = os.getenv("CLIENT_TELEGRAM_BOT_TOKEN")
-    if not token:
-        raise RuntimeError("CLIENT_TELEGRAM_BOT_TOKEN is required")
+    token_info = get_client_token()
+    if not token_info:
+        raise RuntimeError("Client bot token is required: set CLIENT_TELEGRAM_BOT_TOKEN (fallbacks: TELEGRAM_BOT_TOKEN, BOT_API_TOKEN, API_TOKEN)")
     RUN_MODE = "polling"
     thread = threading.Thread(target=main, name="client_bot_polling", daemon=True)
     thread.start()
