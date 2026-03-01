@@ -1,1 +1,1 @@
-web: bash run_all.sh
+web: python main.py
