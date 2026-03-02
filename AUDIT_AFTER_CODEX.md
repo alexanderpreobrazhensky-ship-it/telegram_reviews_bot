@@ -80,6 +80,12 @@
 - `message is not modified` считается успешным апдейтом;
 - fallback при `message to edit not found` / rights error.
 
+### 1.9 Очередь постов отделена от client-bot
+**Исправление:**
+- в `client-bot` отключён запуск `posts_queue_worker` и инициализация файлов очереди;
+- в `reviews-bot` добавлен модуль `posts_queue.py` с инициализацией `data/posts_queue.json` и миграцией из legacy `data/posts_queue.jsonl`;
+- добавлен smoke-тест ownership (`tests/test_posts_queue_ownership.py`).
+
 ---
 
 ## 2) Изменённые файлы
@@ -89,10 +95,17 @@
 3. `railway.toml`
 4. `run_all.sh`
 5. `bots/client_bot/main.py`
-6. `tests/test_bothost_contract.py`
-7. `tests/test_master_chat_filter.py`
-8. `README_AFTER_DEPLOY.md`
-9. `AUDIT_AFTER_CODEX.md`
+6. `bots/reviews_bot/main.py`
+7. `bots/reviews_bot/__init__.py`
+8. `services/reviews_bot_service/app/main.py`
+9. `services/reviews_bot_service/app/posts_queue.py`
+10. `services/client_bot_service/test_health.py`
+11. `services/reviews_bot_service/test_health.py`
+12. `tests/test_bothost_contract.py`
+13. `tests/test_master_chat_filter.py`
+14. `tests/test_posts_queue_ownership.py`
+15. `README_AFTER_DEPLOY.md`
+16. `AUDIT_AFTER_CODEX.md`
 
 ---
 
