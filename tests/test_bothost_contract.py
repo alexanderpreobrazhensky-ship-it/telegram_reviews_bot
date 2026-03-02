@@ -36,6 +36,8 @@ class BotHostContractTestCase(unittest.TestCase):
                 "TELEGRAM_BOT_TOKEN": "tg-token",
                 "BOT_API_TOKEN": "bot-token",
                 "API_TOKEN": "api-token",
+                "BOT_TOKEN": "bot-token2",
+                "TOKEN": "token3",
             },
             clear=False,
         ):
@@ -52,11 +54,31 @@ class BotHostContractTestCase(unittest.TestCase):
                 "TELEGRAM_BOT_TOKEN": "tg-token",
                 "BOT_API_TOKEN": "bot-token",
                 "API_TOKEN": "api-token",
+                "BOT_TOKEN": "bot-token2",
+                "TOKEN": "token3",
             },
             clear=False,
         ):
             with self.assertRaises(RuntimeError):
                 ClientBotConfig.resolve_token()
+
+    def test_token_resolution_supports_bot_token_fallbacks(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "ALLOW_TOKEN_FALLBACK": "1",
+                "CLIENT_TELEGRAM_BOT_TOKEN": "",
+                "TELEGRAM_BOT_TOKEN": "",
+                "BOT_API_TOKEN": "",
+                "API_TOKEN": "",
+                "BOT_TOKEN": "bot-token",
+                "TOKEN": "token",
+            },
+            clear=False,
+        ):
+            token, source = ClientBotConfig.resolve_token()
+        self.assertEqual(token, "bot-token")
+        self.assertEqual(source, "BOT_TOKEN")
 
     def test_domain_and_webapp_url_sanitization(self) -> None:
         with patch.dict(

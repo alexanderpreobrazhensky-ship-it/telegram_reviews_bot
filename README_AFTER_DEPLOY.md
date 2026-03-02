@@ -14,8 +14,9 @@
 
 ## 2) ENV переменные client-bot (алфавитно)
 
-- `ALLOW_TOKEN_FALLBACK` — `1` разрешает fallback токена на `TELEGRAM_BOT_TOKEN/BOT_API_TOKEN/API_TOKEN`. По умолчанию fallback выключен.
+- `ALLOW_TOKEN_FALLBACK` — `1` разрешает fallback токена на `TELEGRAM_BOT_TOKEN/BOT_API_TOKEN/API_TOKEN/BOT_TOKEN/TOKEN`. По умолчанию fallback выключен.
 - `API_TOKEN` — fallback токен (используется только при `ALLOW_TOKEN_FALLBACK=1`).
+- `BOT_TOKEN` — дополнительный fallback токен (используется только при `ALLOW_TOKEN_FALLBACK=1`).
 - `BOT_API_TOKEN` — fallback токен (используется только при `ALLOW_TOKEN_FALLBACK=1`).
 - `BOT_PATH_SECRET` — fallback secret для WebApp session token.
 - `CLIENT_BOT_MODE` — режим бота (`polling` по умолчанию, `webhook` оставлен на будущее).
@@ -38,6 +39,7 @@
 - `POSTGRESQL_URL` — fallback DSN.
 - `POSTGRES_URL` — fallback DSN.
 - `TELEGRAM_BOT_TOKEN` — fallback токен (только при `ALLOW_TOKEN_FALLBACK=1`).
+- `TOKEN` — дополнительный fallback токен (только при `ALLOW_TOKEN_FALLBACK=1`).
 - `TIMEZONE` — таймзона.
 - `WEBAPP_ENABLED` — fallback флаг webapp.
 - `WEBAPP_PATH` — путь webapp (default `/WEBAPP`).
@@ -46,8 +48,8 @@
 ## 3) Контракт токенов
 
 - По умолчанию читается **только** `CLIENT_TELEGRAM_BOT_TOKEN`.
-- Fallback токены (`TELEGRAM_BOT_TOKEN`, `BOT_API_TOKEN`, `API_TOKEN`) включаются **только** при `ALLOW_TOKEN_FALLBACK=1`.
-- В логах пишется `effective_bot=client` и `token_source=...` (без секрета).
+- Fallback токены (`TELEGRAM_BOT_TOKEN`, `BOT_API_TOKEN`, `API_TOKEN`, `BOT_TOKEN`, `TOKEN`) включаются **только** при `ALLOW_TOKEN_FALLBACK=1`.
+- В логах пишется `effective_bot=client` и `token_source=...` (без секрета); root `main.py` также логирует старт сервиса до инициализации Flask.
 
 ## 4) Контракт URL WebApp
 
@@ -84,7 +86,7 @@
   - `clients.jsonl` (корень репо)
   - `data/tickets.jsonl`
   - `data/system.json`
-  - `data/posts_queue.json`
+  - `data/posts_queue.json` (очередь постов client-bot)
 
 ## 8) Пример ENV для BotHost (без секретов)
 

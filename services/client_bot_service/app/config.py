@@ -23,6 +23,8 @@ class ClientBotConfig:
                     ("TELEGRAM_BOT_TOKEN", os.getenv("TELEGRAM_BOT_TOKEN")),
                     ("BOT_API_TOKEN", os.getenv("BOT_API_TOKEN")),
                     ("API_TOKEN", os.getenv("API_TOKEN")),
+                    ("BOT_TOKEN", os.getenv("BOT_TOKEN")),
+                    ("TOKEN", os.getenv("TOKEN")),
                 ]
             )
         for source, raw in candidates:
@@ -31,7 +33,7 @@ class ClientBotConfig:
                 return token, source
         raise RuntimeError(
             "Client bot token is required: set CLIENT_TELEGRAM_BOT_TOKEN "
-            "(fallbacks TELEGRAM_BOT_TOKEN/BOT_API_TOKEN/API_TOKEN require ALLOW_TOKEN_FALLBACK=1)"
+            "(fallbacks TELEGRAM_BOT_TOKEN/BOT_API_TOKEN/API_TOKEN/BOT_TOKEN/TOKEN require ALLOW_TOKEN_FALLBACK=1)"
         )
 
     @staticmethod

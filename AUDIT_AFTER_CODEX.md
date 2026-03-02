@@ -4,7 +4,7 @@
 
 1. BotHost мог авто-детектить Node/JS и пытаться запускать webapp frontend как server entrypoint (`window is not defined`).
 2. Поллинг мог конфликтовать с активным webhook и не получать апдейты стабильно.
-3. Токен client-bot мог браться из слишком широкого fallback chain без явного opt-in.
+3. Токен client-bot мог браться из fallback chain без явного opt-in.
 4. WebApp статика имела риск срабатывания на имя `app.js`.
 5. В репозитории были legacy-артефакты (`railway.toml`, `Procfile`, `run_all.sh`) мешающие предсказуемому BotHost деплою.
 
@@ -28,20 +28,23 @@
 - Обновлена webapp health проверка на новые имена файлов.
 
 ### 2.3 Polling/Webhook стабилизация
-- В polling режиме на старте теперь вызывается:
-  - `deleteWebhook(drop_pending_updates=True)`.
+- В polling режиме на старте вызывается `deleteWebhook(drop_pending_updates=True)` и логируется `mode=polling` + `polling started`.
+- Webhook не включается автоматически: при `CLIENT_BOT_MODE=webhook` без `WEBHOOK_URL` пишется warning и используется polling fallback.
 - Сохранился защитный цикл polling с retry и обработкой исключений.
 
 ### 2.4 ENV/token изоляция client-bot
 - Введён opt-in для fallback токенов:
-  - `ALLOW_TOKEN_FALLBACK=1` включает fallback chain.
+  - `ALLOW_TOKEN_FALLBACK=1` включает fallback chain (`TELEGRAM_BOT_TOKEN`, `BOT_API_TOKEN`, `API_TOKEN`, `BOT_TOKEN`, `TOKEN`).
   - По умолчанию используется только `CLIENT_TELEGRAM_BOT_TOKEN`.
 - Аналогично исправлено в:
   - `services/client_bot_service/app/config.py`
   - `bots/client_bot/main.py`
 - Startup лог дополнен: `effective_bot=client` + `token_source=...`.
 
-### 2.5 URL/Storage observability
+### 2.5 Очередь постов client-bot
+- В client-bot снова запускается `posts_queue_worker` (файловое хранилище `data/posts_queue.json`), функционал не вынесен в reviews-bot.
+
+### 2.6 URL/Storage observability
 - Лог старта расширен по режимам:
   - `effective_bot=client`
   - `mode=...`
@@ -83,7 +86,7 @@
 
 ## 5) Текущая архитектура (кратко)
 
-- `main.py` — единый root entrypoint.
+- `main.py` — единый root entrypoint (логирует старт и вызывает только client service).
 - `services/client_bot_service/app/main.py` — сервисная инициализация Flask + запуск background polling.
 - `bots/client_bot/main.py` — основная бизнес-логика, routing, webapp API/static, polling loop.
 - `services/client_bot_service/app/webapp/` — фронтовая статика (`index.html`, `webapp.js`, `webapp.css`, `config.json`).

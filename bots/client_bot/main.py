@@ -9016,6 +9016,8 @@ def get_client_token() -> tuple[str, str] | None:
                 ("TELEGRAM_BOT_TOKEN", os.getenv("TELEGRAM_BOT_TOKEN")),
                 ("BOT_API_TOKEN", os.getenv("BOT_API_TOKEN")),
                 ("API_TOKEN", os.getenv("API_TOKEN")),
+                ("BOT_TOKEN", os.getenv("BOT_TOKEN")),
+                ("TOKEN", os.getenv("TOKEN")),
             ]
         )
     for source, raw in candidates:
@@ -9047,7 +9049,7 @@ def main() -> None:
     logger.info("[client_bot] openpyxl available: %s", is_openpyxl_available())
     token_info = get_client_token()
     if not token_info:
-        raise RuntimeError("Client bot token is required: set CLIENT_TELEGRAM_BOT_TOKEN (fallbacks TELEGRAM_BOT_TOKEN/BOT_API_TOKEN/API_TOKEN require ALLOW_TOKEN_FALLBACK=1)")
+        raise RuntimeError("Client bot token is required: set CLIENT_TELEGRAM_BOT_TOKEN (fallbacks TELEGRAM_BOT_TOKEN/BOT_API_TOKEN/API_TOKEN/BOT_TOKEN/TOKEN require ALLOW_TOKEN_FALLBACK=1)")
     token, token_source = token_info
     configure_telegram(token)
     logger.info(
@@ -9117,7 +9119,13 @@ def main() -> None:
             daemon=True,
         )
         worker.start()
-    logger.info("posts queue worker disabled in client-bot; handled by reviews-bot only")
+    posts_worker = threading.Thread(
+        target=posts_queue_worker,
+        args=(timezone, logger),
+        daemon=True,
+    )
+    posts_worker.start()
+    logger.info("posts queue worker started in client-bot")
     settings = get_settings(storage)
     ai_service = AIService(logging.getLogger("ai"), settings=settings)
     ai_config_source = get_ai_config_source()
@@ -9134,11 +9142,15 @@ def main() -> None:
         ok, message = ensure_channel_pin(storage, timezone, logger, force_new=False)
         logger.info("auto pin on start: %s", message)
     if RUN_MODE == "webhook":
-        logger.info("client_bot mode=%s", RUN_MODE)
-    if RUN_MODE == "webhook":
-        logger.warning("webhook mode is not enabled in this build; switching to polling")
+        webhook_url = (os.getenv("CLIENT_WEBHOOK_URL") or os.getenv("WEBHOOK_URL") or "").strip()
+        if not webhook_url:
+            logger.warning("mode=webhook requested but WEBHOOK_URL is missing; fallback to polling")
+        else:
+            logger.info("mode=webhook configured (future-compatible), running polling fallback")
 
+    logger.info("mode=polling")
     delete_webhook(token, logger, drop_pending_updates=True)
+    logger.info("polling started")
     poll_updates(token, logger)
 
 
@@ -9146,7 +9158,7 @@ def start_polling_background() -> threading.Thread | None:
     global RUN_MODE
     token_info = get_client_token()
     if not token_info:
-        raise RuntimeError("Client bot token is required: set CLIENT_TELEGRAM_BOT_TOKEN (fallbacks TELEGRAM_BOT_TOKEN/BOT_API_TOKEN/API_TOKEN require ALLOW_TOKEN_FALLBACK=1)")
+        raise RuntimeError("Client bot token is required: set CLIENT_TELEGRAM_BOT_TOKEN (fallbacks TELEGRAM_BOT_TOKEN/BOT_API_TOKEN/API_TOKEN/BOT_TOKEN/TOKEN require ALLOW_TOKEN_FALLBACK=1)")
     RUN_MODE = "polling"
     thread = threading.Thread(target=main, name="client_bot_polling", daemon=True)
     thread.start()
