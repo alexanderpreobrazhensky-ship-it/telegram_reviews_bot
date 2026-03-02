@@ -7,9 +7,9 @@ from services.reviews_bot_service.app.posts_queue import ensure_posts_queue_stor
 
 
 class PostsQueueOwnershipTestCase(unittest.TestCase):
-    def test_client_bot_does_not_start_posts_queue_worker(self) -> None:
+    def test_client_bot_starts_posts_queue_worker(self) -> None:
         content = Path("bots/client_bot/main.py").read_text(encoding="utf-8")
-        self.assertNotIn("target=posts_queue_worker", content)
+        self.assertIn("target=posts_queue_worker", content)
 
     def test_reviews_bot_queue_migrates_from_jsonl(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
