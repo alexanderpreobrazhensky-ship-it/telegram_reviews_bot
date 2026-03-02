@@ -32,7 +32,7 @@ class WebAppStaticTest(unittest.TestCase):
 
     def test_static_routes(self):
         client = self.app.test_client()
-        for path in ("/WEBAPP", "/app.css", "/app.js", "/WEBAPP/config.json"):
+        for path in ("/WEBAPP", "/app.css", "/webapp.css", "/app.js", "/webapp.js", "/WEBAPP/config.json"):
             response = client.get(path)
             self.assertEqual(response.status_code, 200, msg=f"{path} expected 200, got {response.status_code}")
             response.close()

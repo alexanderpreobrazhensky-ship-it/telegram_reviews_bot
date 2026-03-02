@@ -16,11 +16,10 @@ class WebAppRoutesTestCase(unittest.TestCase):
         response = self.client.get("/WEBAPP")
         self.assertEqual(response.status_code, 200)
 
-        response = self.client.get("/app.js")
-        self.assertEqual(response.status_code, 200)
-
-        response = self.client.get("/app.css")
-        self.assertEqual(response.status_code, 200)
+        for path in ("/app.js", "/webapp.js", "/app.css", "/webapp.css", "/WEBAPP/config.json"):
+            response = self.client.get(path)
+            self.assertEqual(response.status_code, 200, msg=f"{path} expected 200")
+            response.close()
 
 
 if __name__ == "__main__":

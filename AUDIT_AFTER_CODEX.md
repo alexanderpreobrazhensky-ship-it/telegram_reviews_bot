@@ -1,186 +1,96 @@
 # AUDIT_AFTER_CODEX
 
-## 1) Что исправлено по BotHost проблемам
+## 1) Что было не так
 
-### 1.1 Нестабильный entrypoint / попытки запускать Node webapp
-**Проблема:** BotHost мог выбирать не тот стартовый путь (в т.ч. Node/webapp сценарий).
+1. BotHost мог авто-детектить Node/JS и пытаться запускать webapp frontend как server entrypoint (`window is not defined`).
+2. Поллинг мог конфликтовать с активным webhook и не получать апдейты стабильно.
+3. Токен client-bot мог браться из слишком широкого fallback chain без явного opt-in.
+4. WebApp статика имела риск срабатывания на имя `app.js`.
+5. В репозитории были legacy-артефакты (`railway.toml`, `Procfile`, `run_all.sh`) мешающие предсказуемому BotHost деплою.
 
-**Исправление:**
-- корневой `main.py` оставлен исключительно как Python entrypoint client-service;
-- launcher-конфиги приведены к единой команде `python main.py`:
-  - `Procfile`
-  - `railway.toml`
-  - `run_all.sh`
+## 2) Что изменено
 
-**Результат:** старт только client-bot service, без запуска `webapp/app.js` как процесса.
+### 2.1 BotHost hardening
+- Добавлен корневой `Dockerfile` (python-only, `CMD ["python", "main.py"]`).
+- Legacy деплой-артефакты перенесены в `legacy/`:
+  - `legacy/railway.toml`
+  - `legacy/Procfile`
+  - `legacy/run_all.sh`
 
----
+### 2.2 WebApp static hardening
+- Переименованы реальные фронтовые файлы:
+  - `services/client_bot_service/app/webapp/app.js` → `webapp.js`
+  - `services/client_bot_service/app/webapp/app.css` → `webapp.css`
+- Обновлен `index.html` на новые пути `/webapp.js` и `/webapp.css`.
+- В backend оставлены алиасы совместимости:
+  - `/app.js` → отдаёт `webapp.js`
+  - `/app.css` → отдаёт `webapp.css`
+- Обновлена webapp health проверка на новые имена файлов.
 
-### 1.2 `client_bot token missing`
-**Проблема:** риск тихого skip при отсутствии одного конкретного env.
+### 2.3 Polling/Webhook стабилизация
+- В polling режиме на старте теперь вызывается:
+  - `deleteWebhook(drop_pending_updates=True)`.
+- Сохранился защитный цикл polling с retry и обработкой исключений.
 
-**Исправление:** единый chain резолва токена:
-1) `CLIENT_TELEGRAM_BOT_TOKEN`
-2) `TELEGRAM_BOT_TOKEN`
-3) `BOT_API_TOKEN`
-4) `API_TOKEN`
+### 2.4 ENV/token изоляция client-bot
+- Введён opt-in для fallback токенов:
+  - `ALLOW_TOKEN_FALLBACK=1` включает fallback chain.
+  - По умолчанию используется только `CLIENT_TELEGRAM_BOT_TOKEN`.
+- Аналогично исправлено в:
+  - `services/client_bot_service/app/config.py`
+  - `bots/client_bot/main.py`
+- Startup лог дополнен: `effective_bot=client` + `token_source=...`.
 
-При отсутствии всех — `RuntimeError`.
-В логи выводится только `token_source`.
+### 2.5 URL/Storage observability
+- Лог старта расширен по режимам:
+  - `effective_bot=client`
+  - `mode=...`
+  - `token_source=...`
+  - `storage_mode=db|files`
+- `build_webapp_config()` теперь дополнительно возвращает `webappUrl` и `baseUrl`.
 
----
+## 3) Изменённые файлы
 
-### 1.3 Путаница PORT/HOST/DOMAIN и double-scheme URL
-**Исправление:**
-- порт: `PORT -> CLIENT_SERVICE_PORT -> 8000`;
-- host: `CLIENT_SERVICE_HOST` (default `0.0.0.0`);
-- webapp URL: `CLIENT_WEBAPP_URL -> WEBAPP_URL -> https://{DOMAIN}{WEBAPP_PATH}`;
-- normalize URL (удаление `https://https://`, `https://http://`, trim, https-only);
-- невалидные URL отбрасываются, логируется warning.
+- `Dockerfile`
+- `bots/client_bot/main.py`
+- `services/client_bot_service/app/config.py`
+- `services/client_bot_service/app/webapp/index.html`
+- `services/client_bot_service/app/webapp/webapp.js`
+- `services/client_bot_service/app/webapp/webapp.css`
+- `tests/test_bothost_contract.py`
+- `tests/test_webapp_static.py`
+- `tests/test_client_webapp_static_routes.py`
+- `tests/test_webapp_routes.py`
+- `tests/test_polling_webhook_mode.py`
+- `README_AFTER_DEPLOY.md`
+- `AUDIT_AFTER_CODEX.md`
+- `legacy/railway.toml`
+- `legacy/Procfile`
+- `legacy/run_all.sh`
 
----
+## 4) Добавленные/обновленные тесты
 
-### 1.4 WebApp session/submit стабильность
-**Подтверждено в коде и тестах:**
-- `/WEBAPP`, `/app.css`, `/app.js`, `/WEBAPP/config.json` доступны;
-- `/api/webapp/session` выдаёт `session_token`;
-- `/api/webapp/submit` поддерживает `session_token` и fallback `initData`;
-- ошибки: `phone_required`, `invalid_init_data`, `session_expired`.
+1. `tests/test_bothost_contract.py`
+   - проверяет Dockerfile python-entrypoint и отсутствие node-команд;
+   - проверяет приоритет портов `PORT -> CLIENT_SERVICE_PORT -> 8000`;
+   - проверяет token fallback только при `ALLOW_TOKEN_FALLBACK=1`.
 
----
+2. `tests/test_webapp_static.py`, `tests/test_client_webapp_static_routes.py`, `tests/test_webapp_routes.py`
+   - проверяют 200 для `/WEBAPP`, `/app.js`, `/webapp.js`, `/app.css`, `/webapp.css`, `/WEBAPP/config.json`.
 
-### 1.5 Intake private chat и картотека
-**Сделано:**
-- `clients.jsonl` в корне остаётся default registry;
-- на private message создаётся/обновляется тикет;
-- если нет телефона — `waiting_data` + запрос телефона;
-- в тикет добавлены поля `original_message_text` и `source=telegram_chat`.
+3. `tests/test_polling_webhook_mode.py`
+   - проверяет, что в polling режиме вызывается `delete_webhook(..., drop_pending_updates=True)`.
 
----
+## 5) Текущая архитектура (кратко)
 
-### 1.6 Доставка мастерам (DM + чат)
-**Уточнена логика маршрутизации:**
-- нет `CLIENT_MASTERS_CHAT_ID` → DM only;
-- нет `CLIENT_MASTER_USER_IDS` → chat only;
-- если оба есть → `CLIENT_NOTIFY_MODE`.
-
-Ошибки DM не прерывают остальную рассылку.
-
----
-
-### 1.7 Master chat filter
-**Подтверждено:** обычный текст в master chat без команды не создаёт тикет.
-Добавлен отдельный тест.
-
----
-
-### 1.8 Pin flow
-**Статус:** логика уже соответствовала требованиям:
-- `pinned_message_id` как int;
-- `message is not modified` считается успешным апдейтом;
-- fallback при `message to edit not found` / rights error.
-
-### 1.9 Очередь постов отделена от client-bot
-**Исправление:**
-- в `client-bot` отключён запуск `posts_queue_worker` и инициализация файлов очереди;
-- в `reviews-bot` добавлен модуль `posts_queue.py` с инициализацией `data/posts_queue.json` и миграцией из legacy `data/posts_queue.jsonl`;
-- добавлен smoke-тест ownership (`tests/test_posts_queue_ownership.py`).
-
----
-
-## 2) Изменённые файлы
-
-1. `main.py`
-2. `Procfile`
-3. `railway.toml`
-4. `run_all.sh`
-5. `bots/client_bot/main.py`
-6. `bots/reviews_bot/main.py`
-7. `bots/reviews_bot/__init__.py`
-8. `services/reviews_bot_service/app/main.py`
-9. `services/reviews_bot_service/app/posts_queue.py`
-10. `services/client_bot_service/test_health.py`
-11. `services/reviews_bot_service/test_health.py`
-12. `tests/test_bothost_contract.py`
-13. `tests/test_master_chat_filter.py`
-14. `tests/test_posts_queue_ownership.py`
-15. `README_AFTER_DEPLOY.md`
-16. `AUDIT_AFTER_CODEX.md`
-
----
-
-## 3) Какие пункты BotHost-логов закрыты
-
-- ✅ Нет обязательной зависимости от Node entrypoint.
-- ✅ Старт через python-only entrypoint.
-- ✅ Нет `token missing` при наличии любого из 4 token env.
-- ✅ Нет тихого skip при отсутствии токена — явный `RuntimeError`.
-- ✅ Нормализуется WebApp URL, убираются double-scheme кейсы.
-- ✅ В master-chat plain text не рождает тикеты.
-- ✅ Маршрутизация DM/chat соответствует прод-правилам.
-
----
-
-## 4) Чеклист ручной проверки после деплоя
-
-### A. Startup
-- [ ] В логах есть `client_bot_service startup ... token_source=...`.
-- [ ] Нет stacktrace вида `window is not defined`.
-- [ ] Нет попыток запускать `/app/bots/client_bot/webapp/app.js` как entrypoint.
-
-### B. Token/env
-- [ ] При установленном `CLIENT_TELEGRAM_BOT_TOKEN` бот стартует.
-- [ ] При пустом `CLIENT_TELEGRAM_BOT_TOKEN`, но установленном `TELEGRAM_BOT_TOKEN` — стартует.
-- [ ] При полном отсутствии token env — процесс падает с `RuntimeError`.
-
-### C. WebApp URL/menu
-- [ ] `setChatMenuButton` проходит без ошибок `invalid URL`.
-- [ ] URL в меню корректный и https-only.
-
-### D. WebApp API
-- [ ] `GET /WEBAPP` → 200
-- [ ] `GET /app.css` → 200
-- [ ] `GET /app.js` → 200
-- [ ] `GET /WEBAPP/config.json` → 200
-- [ ] `POST /api/webapp/session` с валидным initData → 200 + session token
-- [ ] `POST /api/webapp/submit` без телефона → 400 `phone_required`
-- [ ] `POST /api/webapp/submit` с телефоном и валидной сессией/initData → 200
-
-### E. Tickets
-- [ ] Любой private text клиента создаёт тикет.
-- [ ] Клиент попадает в `clients.jsonl`.
-- [ ] Без телефона тикет виден мастерам как `waiting_data`.
-- [ ] С телефоном тикет идёт как `new`.
-
-### F. Master delivery and chat filter
-- [ ] Если задан только master chat — тикет доходит в чат.
-- [ ] Если заданы только master user ids — тикет доходит в DM.
-- [ ] Если заданы и чат, и DM — применяется `CLIENT_NOTIFY_MODE`.
-- [ ] Plain text в master chat (без команды) не создаёт новый тикет.
-
-### G. Pin
-- [ ] Повторный деплой не создаёт дубликаты pin при неизменном тексте.
-- [ ] При удалённом старом pin бот делает fallback и сохраняет новый `pinned_message_id`.
-
----
-
-## 5) Прогон тестов (локально)
-
-Основной прогон:
-```bash
-python -m unittest discover -s tests -p 'test_*.py'
-```
-
-Покрыто:
-- BotHost contract (entrypoint, port priority, token chain, URL normalize).
-- WebApp static/session/submit.
-- Master chat filter.
-
----
+- `main.py` — единый root entrypoint.
+- `services/client_bot_service/app/main.py` — сервисная инициализация Flask + запуск background polling.
+- `bots/client_bot/main.py` — основная бизнес-логика, routing, webapp API/static, polling loop.
+- `services/client_bot_service/app/webapp/` — фронтовая статика (`index.html`, `webapp.js`, `webapp.css`, `config.json`).
+- `legacy/` — изолированные старые деплой файлы.
 
 ## 6) Known limitations
 
-1. В репозитории всё ещё присутствуют Railway-исторические файлы/документация как артефакты, но runtime-старт для production унифицирован на `python main.py`.
-2. Polling остаётся целевым режимом BotHost; webhook сценарий не основной.
-3. Если мастер не нажал `/start` в ЛС, DM может вернуть `403` (это штатно; используйте master-chat и/или попросите мастера активировать бота).
-4. В тестах есть `ResourceWarning` в одном legacy-тесте на static routes (не влияет на pass/fail, но можно отдельно почистить закрытием file handles во всех тестах).
+1. Режим `CLIENT_BOT_MODE=webhook` оставлен как future-compatible, но текущий runtime всё равно переключается на polling (с warning в логах).
+2. В unit-тестах возможны `ResourceWarning` от старых тестов/Flask response cleanup (не влияет на pass/fail).
+3. Для полноценной валидации "Bot отвечает /start и /help" нужен реальный деплой на BotHost с рабочим Telegram токеном (локально это не эмулируется unit-тестом).
