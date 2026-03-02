@@ -184,3 +184,10 @@ DM ошибки (`400/403`) не останавливают рассылку о�
 ```bash
 python -m unittest discover -s tests -p 'test_*.py'
 ```
+
+## Разделение ответственности
+
+- `client-bot` отвечает за intake заявок, мастер-чат, WebApp и тикеты.
+- Очередь постов (`data/posts_queue.json|jsonl`) исключена из runtime `client-bot`: worker больше не стартует в `bots/client_bot/main.py`.
+- `reviews-bot` владеет очередью постов: при запуске `services/reviews_bot_service/app/main.py` вызывается `ensure_posts_queue_storage()` с миграцией `data/posts_queue.jsonl -> data/posts_queue.json`.
+

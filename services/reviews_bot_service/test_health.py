@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from app.main import build_app
+from services.reviews_bot_service.app.main import build_app
 
 
 class ReviewsServiceHealthTest(unittest.TestCase):

@@ -9065,8 +9065,7 @@ def main() -> None:
     storage = load_storage()
     ensure_storage_defaults(storage)
     migrate_storage_settings_to_db(storage)
-    ensure_posts_queue_file(storage, logger)
-    restored = restore_posts_queue_from_file(storage, logger)
+    restored = False
     bootstrapped = bootstrap_admins(storage)
     if restored or bootstrapped:
         save_storage(storage)
@@ -9109,12 +9108,7 @@ def main() -> None:
             daemon=True,
         )
         worker.start()
-    posts_worker = threading.Thread(
-        target=posts_queue_worker,
-        args=(timezone, logger),
-        daemon=True,
-    )
-    posts_worker.start()
+    logger.info("posts queue worker disabled in client-bot; handled by reviews-bot only")
     settings = get_settings(storage)
     ai_service = AIService(logging.getLogger("ai"), settings=settings)
     ai_config_source = get_ai_config_source()

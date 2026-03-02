@@ -5,6 +5,7 @@ import logging
 from flask import Flask
 
 from .config import ReviewsConfig
+from .posts_queue import ensure_posts_queue_storage
 
 logger = logging.getLogger("reviews_bot_service")
 
@@ -27,7 +28,8 @@ def build_app():
 
 def main() -> None:
     app, cfg = build_app()
-    logger.info("reviews_bot_service startup: mode=%s port=%s token_source=REVIEWS_TELEGRAM_BOT_TOKEN", cfg.mode, cfg.port)
+    queue_path = ensure_posts_queue_storage()
+    logger.info("reviews_bot_service startup: mode=%s port=%s token_source=REVIEWS_TELEGRAM_BOT_TOKEN posts_queue=%s", cfg.mode, cfg.port, queue_path)
     app.run(host=cfg.host, port=cfg.port)
 
 
