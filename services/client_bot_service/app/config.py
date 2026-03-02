@@ -15,19 +15,23 @@ class ClientBotConfig:
 
     @staticmethod
     def resolve_token() -> tuple[str, str]:
-        candidates = [
-            ("CLIENT_TELEGRAM_BOT_TOKEN", os.getenv("CLIENT_TELEGRAM_BOT_TOKEN")),
-            ("TELEGRAM_BOT_TOKEN", os.getenv("TELEGRAM_BOT_TOKEN")),
-            ("BOT_API_TOKEN", os.getenv("BOT_API_TOKEN")),
-            ("API_TOKEN", os.getenv("API_TOKEN")),
-        ]
+        allow_fallback = (os.getenv("ALLOW_TOKEN_FALLBACK") or "0").strip() == "1"
+        candidates = [("CLIENT_TELEGRAM_BOT_TOKEN", os.getenv("CLIENT_TELEGRAM_BOT_TOKEN"))]
+        if allow_fallback:
+            candidates.extend(
+                [
+                    ("TELEGRAM_BOT_TOKEN", os.getenv("TELEGRAM_BOT_TOKEN")),
+                    ("BOT_API_TOKEN", os.getenv("BOT_API_TOKEN")),
+                    ("API_TOKEN", os.getenv("API_TOKEN")),
+                ]
+            )
         for source, raw in candidates:
             token = (raw or "").strip()
             if token:
                 return token, source
         raise RuntimeError(
             "Client bot token is required: set CLIENT_TELEGRAM_BOT_TOKEN "
-            "(fallbacks: TELEGRAM_BOT_TOKEN, BOT_API_TOKEN, API_TOKEN)"
+            "(fallbacks TELEGRAM_BOT_TOKEN/BOT_API_TOKEN/API_TOKEN require ALLOW_TOKEN_FALLBACK=1)"
         )
 
     @staticmethod

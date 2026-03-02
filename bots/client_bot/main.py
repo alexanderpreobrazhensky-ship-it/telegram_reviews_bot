@@ -3150,6 +3150,8 @@ def build_webapp_config() -> dict:
         "mapUrl": map_url or "",
         "yandexUrl": yandex_url,
         "googleUrl": google_url,
+        "webappUrl": resolve_webapp_public_url() or "",
+        "baseUrl": resolve_webapp_public_url() or "",
         "sessionMaxAgeSeconds": WEBAPP_SUBMIT_INITDATA_MAX_AGE_SECONDS,
     }
 
@@ -3312,17 +3314,19 @@ def register_webapp_routes(app: Flask, token: str, logger: logging.Logger) -> Fl
             return webapp_disabled_response()
         return send_from_directory(WEBAPP_DIR, "index.html")
 
+    @app.get("/webapp.css")
     @app.get("/app.css")
     def webapp_css() -> object:
         if not WEBAPP_ENABLED:
             return webapp_disabled_response()
-        return send_from_directory(WEBAPP_DIR, "app.css")
+        return send_from_directory(WEBAPP_DIR, "webapp.css")
 
+    @app.get("/webapp.js")
     @app.get("/app.js")
     def webapp_js() -> object:
         if not WEBAPP_ENABLED:
             return webapp_disabled_response()
-        return send_from_directory(WEBAPP_DIR, "app.js")
+        return send_from_directory(WEBAPP_DIR, "webapp.js")
 
     @app.get("/favicon.ico")
     def webapp_favicon() -> object:
@@ -3362,7 +3366,7 @@ def register_webapp_routes(app: Flask, token: str, logger: logging.Logger) -> Fl
 
     @app.get("/api/webapp/health")
     def webapp_health() -> object:
-        static_files = ["index.html", "app.css", "app.js"]
+        static_files = ["index.html", "webapp.css", "webapp.js"]
         static_ok = WEBAPP_ENABLED and all(os.path.exists(os.path.join(WEBAPP_DIR, item)) for item in static_files)
         config_ok = False
         if WEBAPP_ENABLED:
@@ -9004,12 +9008,16 @@ def poll_updates(token: str, logger: logging.Logger) -> None:
 
 
 def get_client_token() -> tuple[str, str] | None:
-    candidates = [
-        ("CLIENT_TELEGRAM_BOT_TOKEN", os.getenv("CLIENT_TELEGRAM_BOT_TOKEN")),
-        ("TELEGRAM_BOT_TOKEN", os.getenv("TELEGRAM_BOT_TOKEN")),
-        ("BOT_API_TOKEN", os.getenv("BOT_API_TOKEN")),
-        ("API_TOKEN", os.getenv("API_TOKEN")),
-    ]
+    allow_fallback = (os.getenv("ALLOW_TOKEN_FALLBACK") or "0").strip() == "1"
+    candidates = [("CLIENT_TELEGRAM_BOT_TOKEN", os.getenv("CLIENT_TELEGRAM_BOT_TOKEN"))]
+    if allow_fallback:
+        candidates.extend(
+            [
+                ("TELEGRAM_BOT_TOKEN", os.getenv("TELEGRAM_BOT_TOKEN")),
+                ("BOT_API_TOKEN", os.getenv("BOT_API_TOKEN")),
+                ("API_TOKEN", os.getenv("API_TOKEN")),
+            ]
+        )
     for source, raw in candidates:
         token = (raw or "").strip()
         if token:
@@ -9039,11 +9047,11 @@ def main() -> None:
     logger.info("[client_bot] openpyxl available: %s", is_openpyxl_available())
     token_info = get_client_token()
     if not token_info:
-        raise RuntimeError("Client bot token is required: set CLIENT_TELEGRAM_BOT_TOKEN (fallbacks: TELEGRAM_BOT_TOKEN, BOT_API_TOKEN, API_TOKEN)")
+        raise RuntimeError("Client bot token is required: set CLIENT_TELEGRAM_BOT_TOKEN (fallbacks TELEGRAM_BOT_TOKEN/BOT_API_TOKEN/API_TOKEN require ALLOW_TOKEN_FALLBACK=1)")
     token, token_source = token_info
     configure_telegram(token)
     logger.info(
-        "client_bot startup mode=%s domain=%s webapp_url=%s port=%s token_source=%s",
+        "client_bot startup effective_bot=client mode=%s domain=%s webapp_url=%s port=%s token_source=%s",
         RUN_MODE,
         DOMAIN or "-",
         resolve_webapp_public_url() or "-",
@@ -9051,6 +9059,7 @@ def main() -> None:
         token_source,
     )
     db_init_settings()
+    logger.info("storage_mode=%s", "db" if DB_OK else "files")
     ensure_persistent_defaults()
     ensure_core_settings_defaults()
     raw_webapp_url = os.getenv("CLIENT_WEBAPP_URL") or os.getenv("WEBAPP_URL") or ""
@@ -9125,9 +9134,11 @@ def main() -> None:
         ok, message = ensure_channel_pin(storage, timezone, logger, force_new=False)
         logger.info("auto pin on start: %s", message)
     if RUN_MODE == "webhook":
-        logger.warning("webhook mode requested but polling remains active in this build; keep CLIENT_BOT_MODE=polling")
-    logger.info("client_bot mode=polling")
-    delete_webhook(token, logger, drop_pending_updates=False)
+        logger.info("client_bot mode=%s", RUN_MODE)
+    if RUN_MODE == "webhook":
+        logger.warning("webhook mode is not enabled in this build; switching to polling")
+
+    delete_webhook(token, logger, drop_pending_updates=True)
     poll_updates(token, logger)
 
 
@@ -9135,7 +9146,7 @@ def start_polling_background() -> threading.Thread | None:
     global RUN_MODE
     token_info = get_client_token()
     if not token_info:
-        raise RuntimeError("Client bot token is required: set CLIENT_TELEGRAM_BOT_TOKEN (fallbacks: TELEGRAM_BOT_TOKEN, BOT_API_TOKEN, API_TOKEN)")
+        raise RuntimeError("Client bot token is required: set CLIENT_TELEGRAM_BOT_TOKEN (fallbacks TELEGRAM_BOT_TOKEN/BOT_API_TOKEN/API_TOKEN require ALLOW_TOKEN_FALLBACK=1)")
     RUN_MODE = "polling"
     thread = threading.Thread(target=main, name="client_bot_polling", daemon=True)
     thread.start()

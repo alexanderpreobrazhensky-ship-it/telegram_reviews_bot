@@ -7,11 +7,17 @@ import bots.client_bot.main as client_main
 
 
 class BotHostContractTestCase(unittest.TestCase):
+    def test_dockerfile_runs_python_main(self) -> None:
+        with open("Dockerfile", "r", encoding="utf-8") as fh:
+            content = fh.read().lower()
+        self.assertIn('cmd ["python", "main.py"]', content)
+        self.assertNotIn("node", content)
+
     def test_entrypoint_imports_service_main(self) -> None:
         with open("main.py", "r", encoding="utf-8") as fh:
             content = fh.read()
         self.assertIn("from services.client_bot_service.app.main import main as client_main", content)
-        self.assertNotIn("window", content)
+        self.assertNotIn("node", content.lower())
 
     def test_port_resolution_port_has_priority(self) -> None:
         with patch.dict(os.environ, {"PORT": "9000", "CLIENT_SERVICE_PORT": "7000"}, clear=False):
@@ -21,10 +27,11 @@ class BotHostContractTestCase(unittest.TestCase):
         with patch.dict(os.environ, {"PORT": "", "CLIENT_SERVICE_PORT": "7000"}, clear=False):
             self.assertEqual(ClientBotConfig.resolve_port(), 7000)
 
-    def test_token_resolution_fallback_chain(self) -> None:
+    def test_token_resolution_fallback_chain_requires_opt_in(self) -> None:
         with patch.dict(
             os.environ,
             {
+                "ALLOW_TOKEN_FALLBACK": "1",
                 "CLIENT_TELEGRAM_BOT_TOKEN": "",
                 "TELEGRAM_BOT_TOKEN": "tg-token",
                 "BOT_API_TOKEN": "bot-token",
@@ -35,6 +42,21 @@ class BotHostContractTestCase(unittest.TestCase):
             token, source = ClientBotConfig.resolve_token()
         self.assertEqual(token, "tg-token")
         self.assertEqual(source, "TELEGRAM_BOT_TOKEN")
+
+    def test_token_fallback_disabled_by_default(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "ALLOW_TOKEN_FALLBACK": "0",
+                "CLIENT_TELEGRAM_BOT_TOKEN": "",
+                "TELEGRAM_BOT_TOKEN": "tg-token",
+                "BOT_API_TOKEN": "bot-token",
+                "API_TOKEN": "api-token",
+            },
+            clear=False,
+        ):
+            with self.assertRaises(RuntimeError):
+                ClientBotConfig.resolve_token()
 
     def test_domain_and_webapp_url_sanitization(self) -> None:
         with patch.dict(

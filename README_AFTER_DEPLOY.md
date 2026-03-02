@@ -1,193 +1,117 @@
 # README_AFTER_DEPLOY
 
-## BotHost: production entrypoint (client-bot only)
+## 1) BotHost production запуск (client-bot)
 
-### Единственный entrypoint
-- Корневой файл: `main.py`.
-- Содержимое: импорт `from services.client_bot_service.app.main import main as client_main` и вызов `client_main()`.
-- Никаких запусков legacy `reviews_bot`, никаких dual-service стартов.
+### Рекомендуемый вариант (обязательно): Dockerfile
+- В корне добавлен `Dockerfile` с **python-only** запуском: `CMD ["python", "main.py"]`.
+- В Dockerfile нет установки Node.js и нет node-команд.
+- На BotHost включите опцию **"Использовать собственный Dockerfile"** (если доступна).
 
-### Запуск
-- Основная команда: `python main.py`
-- Актуализированы launcher-файлы:
-  - `Procfile`: `web: python main.py`
-  - `railway.toml`: `startCommand = "python main.py"`
-  - `run_all.sh`: вызывает `python main.py` и печатает `client_bot_service starting …`
+### Entry point
+- Корневой entrypoint: `main.py`.
+- Команда запуска: `python main.py`.
+- `main.py` вызывает только `services.client_bot_service.app.main:main`.
 
----
+## 2) ENV переменные client-bot (алфавитно)
 
-## ENV для client-bot (алфавитно)
-
-> Ниже только переменные, влияющие на `client_bot` runtime.
-
-- `API_TOKEN` — fallback токена.
-- `AUTO_PIN_ON_DEPLOY` — alias auto pin.
-- `AUTO_PIN_ON_START` — alias auto pin.
-- `BOT_API_TOKEN` — fallback токена.
-- `BOT_PATH_SECRET` — fallback секрет для webapp session token.
-- `CLIENT_ACTIVE_TICKET_TTL_HOURS` — TTL активного тикета.
-- `CLIENT_AUTO_PIN_ON_DEPLOY` — auto pin.
-- `CLIENT_AUTO_PIN_ON_START` — auto pin.
-- `CLIENT_BOT_MODE` — `polling` (default).
-- `CLIENT_CHAT_ID` — legacy fallback chat id.
-- `CLIENT_DATA_DIR` — data directory для service config.
-- `CLIENT_MASTER_CHAT_ID` — legacy alias `CLIENT_MASTERS_CHAT_ID`.
-- `CLIENT_MASTER_IDS` — legacy alias `CLIENT_MASTER_USER_IDS`.
-- `CLIENT_MASTER_USER_IDS` — список master user id для DM.
-- `CLIENT_MASTERS_CHAT_ID` — master chat id (поддерживает `-100...`).
-- `CLIENT_NOTIFY_MODE` — `dm_then_chat` (default), `dm_only`, `chat_only`, `chat_then_dm`.
-- `CLIENT_RUN_MODE` — legacy alias `CLIENT_BOT_MODE`.
-- `CLIENT_SERVICE_HOST` — default `0.0.0.0`.
-- `CLIENT_SERVICE_PORT` — fallback порта.
-- `CLIENT_TELEGRAM_BOT_TOKEN` — приоритетный токен.
-- `CLIENT_WEBAPP_ENABLED` — включение WebApp routes.
-- `CLIENT_WEBAPP_INITDATA_MAX_AGE_SECONDS` — TTL initData/session.
-- `CLIENT_WEBAPP_SESSION_SECRET` — секрет подписи session token.
+- `ALLOW_TOKEN_FALLBACK` — `1` разрешает fallback токена на `TELEGRAM_BOT_TOKEN/BOT_API_TOKEN/API_TOKEN`. По умолчанию fallback выключен.
+- `API_TOKEN` — fallback токен (используется только при `ALLOW_TOKEN_FALLBACK=1`).
+- `BOT_API_TOKEN` — fallback токен (используется только при `ALLOW_TOKEN_FALLBACK=1`).
+- `BOT_PATH_SECRET` — fallback secret для WebApp session token.
+- `CLIENT_BOT_MODE` — режим бота (`polling` по умолчанию, `webhook` оставлен на будущее).
+- `CLIENT_DATA_DIR` — путь к данным сервиса (default `data`).
+- `CLIENT_SERVICE_HOST` — host Flask (default `0.0.0.0`).
+- `CLIENT_SERVICE_PORT` — fallback порт, если нет `PORT`.
+- `CLIENT_TELEGRAM_BOT_TOKEN` — основной токен client-bot (обязательный в нормальном режиме).
+- `CLIENT_WEBAPP_ENABLED` — включение WebApp (default включено).
+- `CLIENT_WEBAPP_INITDATA_MAX_AGE_SECONDS` — TTL initData для сессий WebApp.
+- `CLIENT_WEBAPP_SESSION_SECRET` — секрет подписи webapp session.
 - `CLIENT_WEBAPP_URL` — приоритетный публичный URL WebApp.
-- `CLIENTS_REGISTRY_PATH` — путь к `clients.jsonl` (default корень repo).
-- `DATABASE_URL` — postgres DSN.
-- `DOMAIN` — fallback хост для сборки webapp URL.
-- `LIRA_ADDRESS` — адрес в сообщениях.
-- `LIRA_MAP_URL` — ссылка на карту.
-- `LIRA_PHONE` — контактный телефон.
-- `PORT` — приоритетный порт.
-- `POSTGRESQL_URL` — fallback postgres DSN.
-- `POSTGRES_URL` — fallback postgres DSN.
-- `RUN_MODE` — legacy alias `CLIENT_BOT_MODE`.
-- `SHOW_REGLAMENT_PHRASE` — pin text toggle.
-- `SHOW_ROUTE_IMAGE` — media toggle.
-- `TELEGRAM_BOT_TOKEN` — fallback токена.
-- `TIMEZONE` — timezone (default Europe/Moscow).
+- `CLIENT_NOTIFY_MODE` — режим доставки в DM/мастер-чат.
+- `CLIENT_MASTER_USER_IDS` — id мастеров для DM.
+- `CLIENT_MASTERS_CHAT_ID` — id мастер-чата.
+- `DATABASE_URL` — Postgres DSN, включает DB режим.
+- `DOMAIN` — хост BotHost (например `bot_12345.bothost.ru`) для fallback сборки WebApp URL.
+- `LIRA_ADDRESS` — адрес в WebApp/боте.
+- `LIRA_PHONE` — телефон в WebApp/боте.
+- `PORT` — приоритетный порт (важно для BotHost).
+- `POSTGRESQL_URL` — fallback DSN.
+- `POSTGRES_URL` — fallback DSN.
+- `TELEGRAM_BOT_TOKEN` — fallback токен (только при `ALLOW_TOKEN_FALLBACK=1`).
+- `TIMEZONE` — таймзона.
 - `WEBAPP_ENABLED` — fallback флаг webapp.
-- `WEBAPP_PATH` — default `/WEBAPP`.
-- `WEBAPP_URL` — fallback публичного URL WebApp.
+- `WEBAPP_PATH` — путь webapp (default `/WEBAPP`).
+- `WEBAPP_URL` — fallback URL webapp.
 
----
+## 3) Контракт токенов
 
-## Token contract
+- По умолчанию читается **только** `CLIENT_TELEGRAM_BOT_TOKEN`.
+- Fallback токены (`TELEGRAM_BOT_TOKEN`, `BOT_API_TOKEN`, `API_TOKEN`) включаются **только** при `ALLOW_TOKEN_FALLBACK=1`.
+- В логах пишется `effective_bot=client` и `token_source=...` (без секрета).
 
-Приоритет токена строго такой:
-1. `CLIENT_TELEGRAM_BOT_TOKEN`
-2. `TELEGRAM_BOT_TOKEN`
-3. `BOT_API_TOKEN`
-4. `API_TOKEN`
+## 4) Контракт URL WebApp
 
-Если токен отсутствует — приложение аварийно завершается с `RuntimeError` (без тихого skip).
-В логах печатается только `token_source` (без значения токена).
-
----
-
-## Port/host/domain rules
-
-### Port
-1. `PORT`
-2. `CLIENT_SERVICE_PORT`
-3. `8000`
-
-### Host
-- `CLIENT_SERVICE_HOST`, default `0.0.0.0`
-
-### WebApp URL
+Приоритет URL:
 1. `CLIENT_WEBAPP_URL`
 2. `WEBAPP_URL`
-3. иначе: `https://{DOMAIN}{WEBAPP_PATH}`
+3. `https://{DOMAIN}{WEBAPP_PATH}`
 
-Нормализация URL:
-- trim пробелов;
-- удаление двойной схемы (`https://https://...`, `https://http://...`);
-- принудительный `https://`;
-- если URL невалидный, он отбрасывается (`None`), в логах warning и fallback к `DOMAIN + WEBAPP_PATH`.
+Нормализация:
+- очищается схема из `DOMAIN`, если случайно передана (`https://...`),
+- убираются двойные схемы (`https://HTTPS://...`, `https://http://...`),
+- финальный URL приводится к `https://`.
 
----
+## 5) WebApp маршруты
 
-## WebApp backend /WEBAPP
+Поддерживаются и новый путь, и обратная совместимость:
+- `GET /WEBAPP` → 200 (index)
+- `GET /webapp.js` → 200 (новый файл)
+- `GET /app.js` → 200 (алиас)
+- `GET /webapp.css` → 200 (новый файл)
+- `GET /app.css` → 200 (алиас)
+- `GET /WEBAPP/config.json` → 200
 
-Гарантированные маршруты:
-- `/WEBAPP`, `/WEBAPP/` → `index.html`
-- `/app.css` → 200
-- `/app.js` → 200
-- `/WEBAPP/config.json` → 200
+## 6) Polling/Webhook
 
-API:
-- `POST /api/webapp/session`
-  - принимает `initData`
-  - валидирует
-  - возвращает `session_token` + `ttl_seconds`
-  - подпись через `CLIENT_WEBAPP_SESSION_SECRET` (fallback `BOT_PATH_SECRET`)
-- `POST /api/webapp/submit`
-  - сначала `session_token`
-  - fallback: `initData`
-  - без телефона: `400 {ok:false,error:"phone_required"}`
-  - просроченная сессия: `401 {ok:false,error:"session_expired"}`
-  - невалидный initData: `401 {ok:false,error:"invalid_init_data"}`
-  - успех: `200 {ok:true,ticket_id:"..."}`
+- В `polling` режиме на старте вызывается `deleteWebhook(drop_pending_updates=True)`.
+- После этого запускается polling цикл.
+- В логах есть: mode, polling started, deleteWebhook, token_source.
 
-PII-safe logging:
-- initData полностью не логируется;
-- логируется только status/reason/age/ticket_id.
+## 7) Storage режим
 
----
+- Если задан `DATABASE_URL`/`POSTGRES_URL`/`POSTGRESQL_URL` и драйвер доступен → `storage_mode=db`.
+- Иначе → `storage_mode=files`:
+  - `clients.jsonl` (корень репо)
+  - `data/tickets.jsonl`
+  - `data/system.json`
+  - `data/posts_queue.json`
 
-## Notify modes + master chat filter
+## 8) Пример ENV для BotHost (без секретов)
 
-### Delivery rules
-- если `CLIENT_MASTERS_CHAT_ID` пустой → только DM мастерам;
-- если `CLIENT_MASTER_USER_IDS` пустой → только master-chat;
-- если оба заданы → по `CLIENT_NOTIFY_MODE`.
-
-DM ошибки (`400/403`) не останавливают рассылку остальным получателям.
-
-### Master chat filtering
-- В master chat plain text без команды/без ticket marker не создаёт тикет.
-- Разрешены команды (`/new`, `/tickets`, `/ticket <id>`, `/waiting`, `/inprogress`, `/queue`, callbacks).
-- `/new` и `/tickets` показывают `new + waiting_data`.
-
----
-
-## Ticket intake (private chat)
-
-Любое private сообщение пользователя (не команда):
-- upsert клиента в `clients.jsonl`;
-- создание/апдейт тикета;
-- если телефона нет — `status=waiting_data` и запрос телефона;
-- если телефон есть — `status=new`.
-
-Поля тикета:
-- `client_user_id`
-- `client_username` (без `@`)
-- `full_name`
-- `client_phone`
-- `original_message_text`
-- `source` = `telegram_chat` или `webapp`
-
----
-
-## Pin flow (anti-duplication)
-
-- `pinned_message_id` хранится как int в core/system storage.
-- При наличии id: сначала edit existing pin (`editMessageText`/`editMessageReplyMarkup`).
-- `message is not modified` считается успехом, новый pin не создаётся.
-- При `message to edit not found`/rights issue — fallback: создать новый pin и сохранить новый id.
-
----
-
-## Подключение мастеров
-
-1. Мастер обязан написать боту `/start` в ЛС.
-2. До этого Telegram API может отвечать `403`, и DM не доставится.
-3. После `/start` мастер добавляется в `CLIENT_MASTER_USER_IDS` либо через админ-поток.
-
----
-
-## Smoke test перед/после деплоя
-
-```bash
-python -m unittest discover -s tests -p 'test_*.py'
+```env
+CLIENT_TELEGRAM_BOT_TOKEN=123456:REDACTED
+CLIENT_BOT_MODE=polling
+PORT=8000
+DOMAIN=bot_123456.bothost.ru
+CLIENT_WEBAPP_URL=https://bot_123456.bothost.ru/WEBAPP
+CLIENT_WEBAPP_ENABLED=1
+CLIENT_WEBAPP_SESSION_SECRET=change-me
+CLIENT_NOTIFY_MODE=dm_then_chat
+CLIENT_MASTER_USER_IDS=111111111,222222222
+CLIENT_MASTERS_CHAT_ID=-1001234567890
+DATABASE_URL=postgresql://user:pass@host:5432/dbname
+ALLOW_TOKEN_FALLBACK=0
 ```
 
-## Разделение ответственности
+## 9) Чеклист "если бот не отвечает"
 
-- `client-bot` отвечает за intake заявок, мастер-чат, WebApp и тикеты.
-- Очередь постов (`data/posts_queue.json|jsonl`) исключена из runtime `client-bot`: worker больше не стартует в `bots/client_bot/main.py`.
-- `reviews-bot` владеет очередью постов: при запуске `services/reviews_bot_service/app/main.py` вызывается `ensure_posts_queue_storage()` с миграцией `data/posts_queue.jsonl -> data/posts_queue.json`.
-
+1. Проверить, что BotHost стартует через Dockerfile/`python main.py`, а не Node.
+2. Проверить `CLIENT_TELEGRAM_BOT_TOKEN`.
+3. Проверить логи: `effective_bot=client`, `mode=polling`, `polling started`, `deleteWebhook`.
+4. Проверить, что не включён случайный webhook и что `deleteWebhook` успешен.
+5. Проверить `PORT`/`CLIENT_SERVICE_PORT`.
+6. Проверить `CLIENT_MASTER_USER_IDS`/`CLIENT_MASTERS_CHAT_ID` (для уведомлений мастерам).
+7. Проверить доступность WebApp:
+   - `/WEBAPP`
+   - `/webapp.js` и `/app.js`
+   - `/WEBAPP/config.json`
