@@ -269,6 +269,17 @@ def sanitize_domain(value: str | None) -> str:
     return host
 
 
+def is_valid_webhook_url(value: str | None) -> bool:
+    candidate = (value or "").strip()
+    if not candidate:
+        return False
+    normalized = normalize_webapp_url(candidate)
+    if not normalized:
+        return False
+    parsed = urlparse(normalized)
+    return parsed.scheme == "https" and bool(parsed.netloc)
+
+
 DOMAIN = sanitize_domain(os.getenv("DOMAIN"))
 WEBAPP_PATH = (os.getenv("WEBAPP_PATH") or "/WEBAPP").strip() or "/WEBAPP"
 WEBAPP_ENABLED = (
@@ -3314,19 +3325,21 @@ def register_webapp_routes(app: Flask, token: str, logger: logging.Logger) -> Fl
             return webapp_disabled_response()
         return send_from_directory(WEBAPP_DIR, "index.html")
 
+    @app.get("/assets/webapp.bundle.css")
     @app.get("/webapp.css")
     @app.get("/app.css")
     def webapp_css() -> object:
         if not WEBAPP_ENABLED:
             return webapp_disabled_response()
-        return send_from_directory(WEBAPP_DIR, "webapp.css")
+        return send_from_directory(WEBAPP_DIR, "assets/webapp.bundle.css")
 
+    @app.get("/assets/webapp.bundle.js")
     @app.get("/webapp.js")
     @app.get("/app.js")
     def webapp_js() -> object:
         if not WEBAPP_ENABLED:
             return webapp_disabled_response()
-        return send_from_directory(WEBAPP_DIR, "webapp.js")
+        return send_from_directory(WEBAPP_DIR, "assets/webapp.bundle.js")
 
     @app.get("/favicon.ico")
     def webapp_favicon() -> object:
@@ -3366,7 +3379,7 @@ def register_webapp_routes(app: Flask, token: str, logger: logging.Logger) -> Fl
 
     @app.get("/api/webapp/health")
     def webapp_health() -> object:
-        static_files = ["index.html", "webapp.css", "webapp.js"]
+        static_files = ["index.html", "assets/webapp.bundle.css", "assets/webapp.bundle.js"]
         static_ok = WEBAPP_ENABLED and all(os.path.exists(os.path.join(WEBAPP_DIR, item)) for item in static_files)
         config_ok = False
         if WEBAPP_ENABLED:
@@ -9143,8 +9156,8 @@ def main() -> None:
         logger.info("auto pin on start: %s", message)
     if RUN_MODE == "webhook":
         webhook_url = (os.getenv("CLIENT_WEBHOOK_URL") or os.getenv("WEBHOOK_URL") or "").strip()
-        if not webhook_url:
-            logger.warning("mode=webhook requested but WEBHOOK_URL is missing; fallback to polling")
+        if not is_valid_webhook_url(webhook_url):
+            logger.warning("mode=webhook requested but WEBHOOK_URL is missing/invalid; fallback to polling")
         else:
             logger.info("mode=webhook configured (future-compatible), running polling fallback")
 
