@@ -6508,7 +6508,7 @@ def handle_admin_callback(
         elif last_error == "ConnectionError":
             results = [
                 f"/api/webapp/health: error (ConnectionError) after {len(retry_schedule)} retries → "
-                "проверьте доступность URL извне, DNS, Railway domain, SSL"
+                "проверьте доступность URL извне, DNS и SSL"
             ]
         else:
             results = [f"/api/webapp/health: error ({last_error}) after {len(retry_schedule)} retries"]

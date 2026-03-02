@@ -9,13 +9,13 @@
 - AI (DeepSeek) с автоfallback и safeguard: без цен, сроков, наличия, выдумок.
 - Админ-меню: самодиагностика, заявки, выгрузка, статистика, логи, админы, настройки.
 
-## Один Railway service, два бота
+## Разделение сервисов и переменных
 
-`client_bot` и `reviews_bot` могут работать в одном Railway service. Для разделения конфигурации используются переменные окружения с префиксом `CLIENT_`. Это позволяет держать **два токена** и разные настройки в одном сервисе без конфликтов.
+`client_bot` остаётся основным сервисом в репозитории. Для изоляции настроек используются переменные окружения с префиксом `CLIENT_`.
 
-- `client_bot` читает **только** `CLIENT_TELEGRAM_BOT_TOKEN` (или `TELEGRAM_BOT_TOKEN_CLIENT` как fallback).
-- `client_bot` всегда работает через polling и сам удаляет webhook.
-- `reviews_bot` может использовать webhook независимо.
+- `client_bot` читает `CLIENT_TELEGRAM_BOT_TOKEN` как основной токен.
+- Режим работы задаётся через `CLIENT_BOT_MODE` (`polling` или `webhook`).
+- URL WebApp и webhook задаются только через env-переменные.
 
 ## Переменные окружения
 
@@ -69,15 +69,6 @@ python main.py
 ```
 
 Перед запуском задайте переменные окружения (минимум `CLIENT_TELEGRAM_BOT_TOKEN`, `MASTER_USERNAMES`, `CLIENT_ADMIN_IDS`).
-
-## Railway деплой (общий порядок)
-
-1. В одном Railway service задайте **только `CLIENT_*` переменные** для `client_bot`.
-2. Убедитесь, что `CLIENT_TELEGRAM_BOT_TOKEN` — отдельный токен клиентского бота.
-3. Выполните redeploy сервиса.
-4. В логах проверьте строки:
-   - `client_bot token source: ...`
-   - `deleteWebhook ok` или предупреждение, что webhook уже удалён.
 
 ## Типовые проблемы и решения
 
