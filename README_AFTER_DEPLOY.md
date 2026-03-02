@@ -1,119 +1,68 @@
 # README_AFTER_DEPLOY
 
-## 1) BotHost production запуск (client-bot)
+## BotHost: как запускать client-bot без Node-ошибок
 
-### Рекомендуемый вариант (обязательно): Dockerfile
-- В корне добавлен `Dockerfile` с **python-only** запуском: `CMD ["python", "main.py"]`.
-- В Dockerfile нет установки Node.js и нет node-команд.
-- На BotHost включите опцию **"Использовать собственный Dockerfile"** (если доступна).
+### Рекомендованный вариант (Dockerfile)
+1. Включите в BotHost опцию **"Использовать собственный Dockerfile"**.
+2. Убедитесь, что главный процесс — `python main.py` (это уже зафиксировано в `Dockerfile`).
+3. Проверьте в логах, что нет `Node.js v...`.
 
-### Entry point
-- Корневой entrypoint: `main.py`.
-- Команда запуска: `python main.py`.
-- `main.py` вызывает только `services.client_bot_service.app.main:main`.
+### Fallback, если Dockerfile недоступен в тарифе
+1. В поле **Главный файл** укажите: `main.py`.
+2. В поле команды запуска (если есть): `bash start.sh` (или напрямую `python main.py`).
+3. Порт веб-приложения: `PORT` (BotHost системный), fallback `CLIENT_SERVICE_PORT`.
 
-## 2) ENV переменные client-bot (алфавитно)
+## Обязательные env для client-bot
+- `CLIENT_TELEGRAM_BOT_TOKEN` (обязательно)
+- `CLIENT_BOT_MODE=polling`
+- `PORT` (или `CLIENT_SERVICE_PORT`)
+- `DOMAIN` (например `bot_123456.bothost.ru`)
+- `CLIENT_WEBAPP_ENABLED=1`
+- `CLIENT_WEBAPP_SESSION_SECRET` (рекомендуется)
 
-- `ALLOW_TOKEN_FALLBACK` — `1` разрешает fallback токена на `TELEGRAM_BOT_TOKEN/BOT_API_TOKEN/API_TOKEN/BOT_TOKEN/TOKEN`. По умолчанию fallback выключен.
-- `API_TOKEN` — fallback токен (используется только при `ALLOW_TOKEN_FALLBACK=1`).
-- `BOT_TOKEN` — дополнительный fallback токен (используется только при `ALLOW_TOKEN_FALLBACK=1`).
-- `BOT_API_TOKEN` — fallback токен (используется только при `ALLOW_TOKEN_FALLBACK=1`).
-- `BOT_PATH_SECRET` — fallback secret для WebApp session token.
-- `CLIENT_BOT_MODE` — режим бота (`polling` по умолчанию, `webhook` оставлен на будущее).
-- `CLIENT_DATA_DIR` — путь к данным сервиса (default `data`).
-- `CLIENT_SERVICE_HOST` — host Flask (default `0.0.0.0`).
-- `CLIENT_SERVICE_PORT` — fallback порт, если нет `PORT`.
-- `CLIENT_TELEGRAM_BOT_TOKEN` — основной токен client-bot (обязательный в нормальном режиме).
-- `CLIENT_WEBAPP_ENABLED` — включение WebApp (default включено).
-- `CLIENT_WEBAPP_INITDATA_MAX_AGE_SECONDS` — TTL initData для сессий WebApp.
-- `CLIENT_WEBAPP_SESSION_SECRET` — секрет подписи webapp session.
-- `CLIENT_WEBAPP_URL` — приоритетный публичный URL WebApp.
-- `CLIENT_NOTIFY_MODE` — режим доставки в DM/мастер-чат.
-- `CLIENT_MASTER_USER_IDS` — id мастеров для DM.
-- `CLIENT_MASTERS_CHAT_ID` — id мастер-чата.
-- `DATABASE_URL` — Postgres DSN, включает DB режим.
-- `DOMAIN` — хост BotHost (например `bot_12345.bothost.ru`) для fallback сборки WebApp URL.
-- `LIRA_ADDRESS` — адрес в WebApp/боте.
-- `LIRA_PHONE` — телефон в WebApp/боте.
-- `PORT` — приоритетный порт (важно для BotHost).
-- `POSTGRESQL_URL` — fallback DSN.
-- `POSTGRES_URL` — fallback DSN.
-- `TELEGRAM_BOT_TOKEN` — fallback токен (только при `ALLOW_TOKEN_FALLBACK=1`).
-- `TOKEN` — дополнительный fallback токен (только при `ALLOW_TOKEN_FALLBACK=1`).
-- `TIMEZONE` — таймзона.
-- `WEBAPP_ENABLED` — fallback флаг webapp.
-- `WEBAPP_PATH` — путь webapp (default `/WEBAPP`).
-- `WEBAPP_URL` — fallback URL webapp.
+## Важные env (по фактическому использованию)
+- `ALLOW_TOKEN_FALLBACK=1` — разрешает fallback токенов (`TELEGRAM_BOT_TOKEN`, `BOT_API_TOKEN`, `API_TOKEN`, `BOT_TOKEN`, `TOKEN`).
+- `CLIENT_WEBAPP_URL` -> приоритетный публичный URL WebApp.
+- `WEBAPP_URL` -> fallback URL.
+- `WEBAPP_PATH` -> fallback путь (по умолчанию `/WEBAPP`).
+- `CLIENT_MASTERS_CHAT_ID`, `CLIENT_MASTER_USER_IDS`, `CLIENT_NOTIFY_MODE` -> маршрутизация уведомлений мастерам.
 
-## 3) Контракт токенов
-
-- По умолчанию читается **только** `CLIENT_TELEGRAM_BOT_TOKEN`.
-- Fallback токены (`TELEGRAM_BOT_TOKEN`, `BOT_API_TOKEN`, `API_TOKEN`, `BOT_TOKEN`, `TOKEN`) включаются **только** при `ALLOW_TOKEN_FALLBACK=1`.
-- В логах пишется `effective_bot=client` и `token_source=...` (без секрета); root `main.py` также логирует старт сервиса до инициализации Flask.
-
-## 4) Контракт URL WebApp
-
-Приоритет URL:
+## Контракт URL WebApp
+Приоритет:
 1. `CLIENT_WEBAPP_URL`
 2. `WEBAPP_URL`
 3. `https://{DOMAIN}{WEBAPP_PATH}`
 
-Нормализация:
-- очищается схема из `DOMAIN`, если случайно передана (`https://...`),
-- убираются двойные схемы (`https://HTTPS://...`, `https://http://...`),
-- финальный URL приводится к `https://`.
+Нормализация: удаляются лишние схемы/пробелы, URL приводится к `https://`.
 
-## 5) WebApp маршруты
+## Контракт статики WebApp
+Физические файлы (без entrypoint-имен):
+- `/assets/webapp.bundle.js`
+- `/assets/webapp.bundle.css`
 
-Поддерживаются и новый путь, и обратная совместимость:
-- `GET /WEBAPP` → 200 (index)
-- `GET /webapp.js` → 200 (новый файл)
-- `GET /app.js` → 200 (алиас)
-- `GET /webapp.css` → 200 (новый файл)
-- `GET /app.css` → 200 (алиас)
-- `GET /WEBAPP/config.json` → 200
+Алиасы совместимости оставлены:
+- `/app.js` -> bundle JS
+- `/app.css` -> bundle CSS
 
-## 6) Polling/Webhook
+## Health-check и smoke after deploy
+Проверить в браузере/HTTP:
+- `/health`
+- `/WEBAPP`
+- `/WEBAPP/config.json`
+- `/assets/webapp.bundle.js`
+- `/app.js`
+- `/app.css`
 
-- В `polling` режиме на старте вызывается `deleteWebhook(drop_pending_updates=True)`.
-- После этого запускается polling цикл.
-- В логах есть: mode, polling started, deleteWebhook, token_source.
+Проверить в логах старта:
+- `effective_bot=client`
+- `mode=polling`
+- `deleteWebhook ok`
+- `polling started`
+- `token_source=CLIENT_TELEGRAM_BOT_TOKEN` (или другой источник, без значения токена)
 
-## 7) Storage режим
-
-- Если задан `DATABASE_URL`/`POSTGRES_URL`/`POSTGRESQL_URL` и драйвер доступен → `storage_mode=db`.
-- Иначе → `storage_mode=files`:
-  - `clients.jsonl` (корень репо)
-  - `data/tickets.jsonl`
-  - `data/system.json`
-  - `data/posts_queue.json` (очередь постов client-bot)
-
-## 8) Пример ENV для BotHost (без секретов)
-
-```env
-CLIENT_TELEGRAM_BOT_TOKEN=123456:REDACTED
-CLIENT_BOT_MODE=polling
-PORT=8000
-DOMAIN=bot_123456.bothost.ru
-CLIENT_WEBAPP_URL=https://bot_123456.bothost.ru/WEBAPP
-CLIENT_WEBAPP_ENABLED=1
-CLIENT_WEBAPP_SESSION_SECRET=change-me
-CLIENT_NOTIFY_MODE=dm_then_chat
-CLIENT_MASTER_USER_IDS=111111111,222222222
-CLIENT_MASTERS_CHAT_ID=-1001234567890
-DATABASE_URL=postgresql://user:pass@host:5432/dbname
-ALLOW_TOKEN_FALLBACK=0
-```
-
-## 9) Чеклист "если бот не отвечает"
-
-1. Проверить, что BotHost стартует через Dockerfile/`python main.py`, а не Node.
-2. Проверить `CLIENT_TELEGRAM_BOT_TOKEN`.
-3. Проверить логи: `effective_bot=client`, `mode=polling`, `polling started`, `deleteWebhook`.
-4. Проверить, что не включён случайный webhook и что `deleteWebhook` успешен.
-5. Проверить `PORT`/`CLIENT_SERVICE_PORT`.
-6. Проверить `CLIENT_MASTER_USER_IDS`/`CLIENT_MASTERS_CHAT_ID` (для уведомлений мастерам).
-7. Проверить доступность WebApp:
-   - `/WEBAPP`
-   - `/webapp.js` и `/app.js`
-   - `/WEBAPP/config.json`
+## Если бот не отвечает
+1. Проверьте, что runtime Python, а не Node.
+2. Проверьте `CLIENT_TELEGRAM_BOT_TOKEN`.
+3. Проверьте `CLIENT_BOT_MODE=polling`.
+4. Проверьте `deleteWebhook(drop_pending_updates=True)` в логах.
+5. Проверьте доступность `/WEBAPP` и `/assets/webapp.bundle.js`.

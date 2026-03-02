@@ -13,6 +13,13 @@ class BotHostContractTestCase(unittest.TestCase):
         self.assertIn('cmd ["python", "main.py"]', content)
         self.assertNotIn("node", content)
 
+
+    def test_root_has_no_node_entrypoint_markers(self) -> None:
+        forbidden = ["package.json", "index.js", "app.js", "server.js", "run.js", "yarn.lock", "package-lock.json"]
+        root_files = set(os.listdir("."))
+        for name in forbidden:
+            self.assertNotIn(name, root_files)
+
     def test_entrypoint_imports_service_main(self) -> None:
         with open("main.py", "r", encoding="utf-8") as fh:
             content = fh.read()
