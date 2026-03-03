@@ -31,6 +31,7 @@ class WebhookModeContractTestCase(unittest.TestCase):
         env = {
             "CLIENT_TELEGRAM_BOT_TOKEN": "test-token",
             "CLIENT_BOT_MODE": "webhook",
+            "WEBHOOK_URL": "",
             "PUBLIC_BASE_URL": "https://bot.example.com",
             "BOT_PATH_SECRET": "secret123",
         }

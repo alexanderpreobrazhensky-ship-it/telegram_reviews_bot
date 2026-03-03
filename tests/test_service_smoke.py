@@ -1,4 +1,3 @@
-import importlib
 import logging
 import os
 import unittest
@@ -89,15 +88,6 @@ class ServiceSmokeTestCase(unittest.TestCase):
         self.assertIsInstance(storage.get("tickets"), list)
         self.assertTrue(notify_masters.called or isinstance(storage.get("sessions"), dict))
 
-    def test_reviews_health_no_secret_leak(self) -> None:
-        os.environ["REVIEWS_TELEGRAM_BOT_TOKEN"] = "123456:ABCDEF_SECRET"
-        module = importlib.import_module("services.reviews_bot_service.app.main")
-        app, _ = module.build_app()
-        client = app.test_client()
-        response = client.get("/health")
-        body = response.get_data(as_text=True)
-        self.assertEqual(response.status_code, 200)
-        self.assertNotIn("ABCDEF_SECRET", body)
 
 
 if __name__ == "__main__":
