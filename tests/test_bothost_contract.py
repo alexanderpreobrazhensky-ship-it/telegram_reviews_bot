@@ -93,6 +93,26 @@ class BotHostContractTestCase(unittest.TestCase):
             self.assertEqual(client_main.sanitize_domain(os.getenv("DOMAIN")), "bot_123.bothost.ru")
             self.assertEqual(client_main.resolve_webapp_public_url(), "https://bot_123.bothost.ru/WEBAPP")
 
+
+    def test_webhook_base_url_priority_webhook_url_overrides_others(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "WEBHOOK_URL": "https://one.example.com",
+                "PUBLIC_BASE_URL": "https://two.example.com",
+                "DOMAIN": "three.example.com",
+            },
+            clear=False,
+        ):
+            base, source = ClientBotConfig.resolve_public_base_url_with_source()
+        self.assertEqual(base, "https://one.example.com")
+        self.assertEqual(source, "WEBHOOK_URL")
+
+    def test_webhook_base_url_normalizes_domain_without_scheme(self) -> None:
+        with patch.dict(os.environ, {"WEBHOOK_URL": "", "PUBLIC_BASE_URL": "", "DOMAIN": "Bot_123.Bothost.ru/"}, clear=False):
+            base, source = ClientBotConfig.resolve_public_base_url_with_source()
+        self.assertEqual(base, "https://bot_123.bothost.ru")
+        self.assertEqual(source, "DOMAIN")
     def test_token_resolution_raises_without_any_token(self) -> None:
         with patch.dict(
             os.environ,

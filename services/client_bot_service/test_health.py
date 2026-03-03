@@ -13,6 +13,7 @@ from services.client_bot_service.app.main import build_app
 class ClientServiceHealthTest(unittest.TestCase):
     def setUp(self) -> None:
         os.environ['CLIENT_TELEGRAM_BOT_TOKEN'] = 'token'
+        os.environ['BOT_PATH_SECRET'] = 'secret'
 
     def test_health(self) -> None:
         app, _ = build_app()

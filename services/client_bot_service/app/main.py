@@ -30,6 +30,7 @@ def build_app():
             "service": "client-bot",
             "mode": cfg.mode,
             "token_source": app.config.get("CLIENT_TOKEN_SOURCE", "unknown"),
+            "port": cfg.port,
         }
 
     return app, cfg
@@ -41,12 +42,12 @@ def main() -> None:
     configure_telegram(cfg.token)
     storage_mode = "db" if cfg.database_url else "files"
     logger.info(
-        "client_bot_service startup effective_bot=client mode=%s token_source=%s public_base_url=%s webhook_url=%s port=%s storage_mode=%s webapp_url=%s",
+        "client_bot_service startup effective_runtime=node_bootstrap python_entrypoint=main.py mode=%s webhook_url=%s token_source=%s port=%s host=%s storage_mode=%s webapp_url=%s",
         cfg.mode,
-        token_source,
-        cfg.public_base_url or "-",
         mask_webhook_url(cfg.webhook_url),
+        token_source,
         cfg.port,
+        cfg.host,
         storage_mode,
         cfg.webapp_url or "-",
     )
@@ -56,8 +57,8 @@ def main() -> None:
         logger.info("webhook_base_source=%s", source)
         if not cfg.webhook_url:
             logger.warning("webhook mode requested but WEBHOOK_URL/PUBLIC_BASE_URL/DOMAIN is missing or invalid; falling back to polling")
-            start_polling_background()
             delete_webhook(cfg.token, logger, drop_pending_updates=True)
+            start_polling_background()
         else:
             logger.info("webhook_url=%s", mask_webhook_url(cfg.webhook_url))
             delete_webhook(cfg.token, logger, drop_pending_updates=True)
@@ -66,8 +67,8 @@ def main() -> None:
             logger.info("setWebhook ok")
     else:
         logger.info("mode=polling")
-        start_polling_background()
         delete_webhook(cfg.token, logger, drop_pending_updates=True)
+        start_polling_background()
     app.run(host=cfg.host, port=cfg.port)
 
 

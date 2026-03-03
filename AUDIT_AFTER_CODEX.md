@@ -1,144 +1,109 @@
-# AUDIT_AFTER_CODEX (подробный отчёт)
+# AUDIT_AFTER_CODEX.md
 
-## 1) Ключевая цель и итог
-Репозиторий приведён к стабильному запуску на BotHost через связку **Node bootstrap (`index.js`) → Python (`main.py`)**. Автодетект платформы больше не влияет на запуск python-процесса.
+## 1) Итог по задаче
+Репозиторий приведён к схеме запуска **BotHost Node bootstrap → Python**. BotHost запускает `index.js`, который запускает `python main.py`; Python поднимает Flask, webhook/polling логику и WebApp-статику.
 
-## 2) Ключевое дерево проекта (актуальное)
-- `index.js` — BotHost entrypoint (spawn python main.py)
-- `main.py` — root python entrypoint (только client-bot service)
-- `services/client_bot_service/app/main.py` — сервисный старт Flask + режим webhook/polling
-- `services/client_bot_service/app/config.py` — нормализация env, URL, токена, порта
-- `bots/client_bot/main.py` — Telegram логика, webhook endpoint, WebApp/static маршруты, workers
-- `bots/client_bot/webapp/`
-  - `index.html`
-  - `assets/webapp.bundle.js`
-  - `assets/webapp.bundle.css`
-  - `config.json`
-- `tests/` — контрактные и smoke-тесты
+## 2) Ключевое дерево
+- `index.js` — единый BotHost entrypoint
+- `main.py` — тонкий Python entrypoint
+- `services/client_bot_service/app/main.py` — orchestration startup
+- `services/client_bot_service/app/config.py` — централизованный env-resolve
+- `bots/client_bot/main.py` — Telegram/webhook/routes/runtime
+- `bots/client_bot/webapp/index.html`
+- `bots/client_bot/webapp/assets/webapp.bundle.js`
+- `bots/client_bot/webapp/assets/webapp.bundle.css`
+- `bots/client_bot/webapp/config.json`
 
-## 3) Entry points и bootstrap
-### `index.js`
-- запускает `python main.py`
-- наследует env
-- наследует stdio
-- пробрасывает SIGTERM/SIGINT
-- корректно завершает процесс при exit дочернего python
+## 3) Точный runtime pipeline
+1. `node index.js`
+2. `spawn("python", ["main.py"], {stdio:"inherit", env:process.env})`
+3. `main.py` → `services.client_bot_service.app.main.main()`
+4. Service startup (webhook-first):
+   - resolve env
+   - `deleteWebhook(drop_pending_updates=True)`
+   - `setWebhook(url=...)` (если собран URL)
+   - `app.run(host, port)`
+5. Если webhook URL не собран: warning + fallback в polling (после `deleteWebhook`)
 
-### `main.py`
-- логирует `client-bot starting (root main.py)`
-- запускает только `services.client_bot_service.app.main:main`
+## 4) Диагностические логи старта
+Добавлен startup-лог формата:
+- `effective_runtime=node_bootstrap`
+- `python_entrypoint=main.py`
+- `mode=webhook|polling`
+- `webhook_url=<masked>`
+- `token_source=...`
+- `port=...`
+- `host=...`
 
-## 4) Webhook-first и fallback
-### Default mode
-- `CLIENT_BOT_MODE` default: `webhook`
-
-### Base URL приоритет
+## 5) Webhook URL формирование
+Приоритет base:
 1. `WEBHOOK_URL`
 2. `PUBLIC_BASE_URL`
-3. `DOMAIN` (нормализуется к `https://...`)
+3. `DOMAIN` (приведение к `https://...`)
 
-### URL паттерн
-- `<base>/webhook/<BOT_PATH_SECRET>`
+Path: `/webhook/<BOT_PATH_SECRET>`.
 
-### Старт webhook
-- `BOT_PATH_SECRET` обязателен (иначе RuntimeError)
-- выполняется `deleteWebhook(drop_pending_updates=True)`
-- выполняется `setWebhook(url=...)`
-- Flask слушает `0.0.0.0:$PORT` (или `CLIENT_SERVICE_HOST`)
+Правила:
+- В webhook mode отсутствие `BOT_PATH_SECRET` → `RuntimeError`.
+- Если base URL невалиден/пуст — fallback в polling с предупреждением.
 
-### Fallback в polling
-Если base URL собрать нельзя в режиме webhook:
-- лог warning
-- переход в polling
-- перед polling обязательно `deleteWebhook(drop_pending_updates=True)`
+## 6) Маршруты WebApp и статики
+Поддерживаются:
+- `GET /WEBAPP`, `GET /WEBAPP/` → `index.html`
+- `GET /assets/webapp.bundle.js`
+- `GET /assets/webapp.bundle.css`
+- `GET /WEBAPP/config.json`
+- Алиасы: `GET /app.js`, `GET /app.css`
 
-## 5) Webhook handler
-- `POST /webhook/<BOT_PATH_SECRET>`
-- быстрый ответ `200 OK`
-- секрет сравнивается с `BOT_PATH_SECRET`
-- без полного дампа апдейта в логах (PII-safe)
+Для статики выставляется:
+- `Cache-Control: no-cache, no-store, must-revalidate, max-age=0`
 
-## 6) WebApp static hardening
-Каноническая runtime-папка:
-- `bots/client_bot/webapp/`
+## 7) Очистка от legacy-hosting / Node автодетекта
+- В root отсутствуют `package.json`, `app.js`, `server.js`, `main.js`, `Procfile`, `legacy-hosting.toml`.
+- Для запуска остаётся только `index.js` как Node bootstrap.
 
-Поддерживаемые URL:
-- `/WEBAPP`, `/WEBAPP/`
-- `/assets/webapp.bundle.js`
-- `/assets/webapp.bundle.css`
-- `/app.js` (alias)
-- `/app.css` (alias)
-- `/WEBAPP/config.json`
+## 8) ENV matrix (client-bot runtime)
+| ENV | Required | Где используется | Формат | Default | Алиасы / приоритет |
+|---|---|---|---|---|---|
+| CLIENT_TELEGRAM_BOT_TOKEN | required | `services/client_bot_service/app/config.py` | string | - | primary token |
+| TELEGRAM_BOT_TOKEN | optional | `.../config.py` | string | - | token fallback #1 |
+| BOT_API_TOKEN | optional | `.../config.py` | string | - | token fallback #2 |
+| API_TOKEN | optional | `.../config.py` | string | - | token fallback #3 |
+| BOT_TOKEN | optional | `.../config.py` | string | - | token fallback #4 |
+| TOKEN | optional | `.../config.py` | string | - | token fallback #5 |
+| CLIENT_BOT_MODE | recommended | `.../config.py` | enum(webhook/polling) | webhook | - |
+| BOT_PATH_SECRET | required for webhook | `.../config.py`, `bots/client_bot/main.py` | string | - | webhook path secret |
+| WEBHOOK_URL | recommended | `.../config.py`, `bots/client_bot/main.py` | URL | - | base #1 |
+| PUBLIC_BASE_URL | optional | `.../config.py`, `bots/client_bot/main.py` | URL | - | base #2 |
+| DOMAIN | optional | `.../config.py`, `bots/client_bot/main.py` | host/url | - | base #3 (normalized) |
+| PORT | recommended | `.../config.py`, `bots/client_bot/main.py` | int | 8000 | port #1 |
+| CLIENT_SERVICE_PORT | optional | `.../config.py`, `bots/client_bot/main.py` | int | 8000 | port #2 |
+| CLIENT_SERVICE_HOST | optional | `.../config.py` | host | 0.0.0.0 | - |
+| CLIENT_WEBAPP_URL | optional | `.../config.py`, `bots/client_bot/main.py` | URL | - | webapp explicit #1 |
+| WEBAPP_URL | optional | `.../config.py`, `bots/client_bot/main.py` | URL | - | webapp explicit #2 |
+| WEBAPP_PATH | optional | `.../config.py`, `bots/client_bot/main.py` | path | /WEBAPP | - |
+| DATABASE_URL | optional | `.../config.py`, `bots/client_bot/main.py` | URL | - | db #1 |
+| POSTGRES_URL | optional | `.../config.py`, `bots/client_bot/main.py` | URL | - | db #2 |
+| POSTGRESQL_URL | optional | `.../config.py`, `bots/client_bot/main.py` | URL | - | db #3 |
+| CLIENT_MASTER_USER_IDS | optional | `.../config.py`, `bots/client_bot/main.py` | csv<int> | "" | primary masters list |
+| CLIENT_MASTER_IDS | optional | `.../config.py`, `bots/client_bot/main.py` | csv<int> | "" | alias masters list |
+| CLIENT_MASTERS_CHAT_ID | optional | `.../config.py`, `bots/client_bot/main.py` | int | "" | primary masters chat |
+| CLIENT_MASTER_CHAT_ID | optional | `.../config.py`, `bots/client_bot/main.py` | int | "" | alias masters chat |
+| CLIENT_CHAT_ID | optional | `.../config.py`, `bots/client_bot/main.py` | int | "" | alias masters chat |
 
-Дополнительно:
-- `Cache-Control` для статики: `no-cache, no-store, must-revalidate, max-age=0`
-- `index.html` ссылается только на `/assets/webapp.bundle.js` и `/assets/webapp.bundle.css`
+## 9) Добавленные/обновлённые smoke/contract тесты
+- `tests/test_bothost_contract.py`
+  - наличие `index.js` и отсутствие node-entrypoint файлов
+  - root `main.py` импортирует service entrypoint
+  - приоритеты PORT
+  - приоритеты token
+  - приоритеты webhook base URL + нормализация DOMAIN
+- `tests/test_webapp_static_routes.py`
+  - `200 OK` на `/WEBAPP`, `/assets/webapp.bundle.js`, `/assets/webapp.bundle.css`, `/app.js`, `/app.css`
 
-## 7) Удаления и очистка
-- удалена дублирующая папка `services/client_bot_service/app/webapp/` (runtime источник теперь один)
-- в root не осталось конфликтных node-entrypoint файлов (`package.json`, `app.js`, `server.js`, `main.js` и т.д.)
-- оставлен только разрешённый bootstrap `index.js`
-
-## 8) ENV аудит: read / alias / ignored
-Ниже карта для аудита (что реально читается кодом).
-
-### Token resolution
-- Primary: `CLIENT_TELEGRAM_BOT_TOKEN`
-- Fallback (только если primary пуст):
-  - `TELEGRAM_BOT_TOKEN`
-  - `BOT_API_TOKEN`
-  - `API_TOKEN`
-  - `BOT_TOKEN`
-  - `TOKEN`
-- Логируется `token_source`.
-
-### Port/host
-- `PORT` → `CLIENT_SERVICE_PORT` → `8000`
-- host: `CLIENT_SERVICE_HOST` (default `0.0.0.0`)
-
-### Webhook URL
-- base: `WEBHOOK_URL` → `PUBLIC_BASE_URL` → `DOMAIN`
-- path: `/webhook/<BOT_PATH_SECRET>`
-
-### Masters/admin compatibility
-- primary chat: `CLIENT_MASTERS_CHAT_ID`
-- aliases: `CLIENT_CHAT_ID`, `CLIENT_MASTER_CHAT_ID`
-- primary users: `CLIENT_MASTER_USER_IDS`
-- alias: `CLIENT_MASTER_IDS`
-- совместимые списки: `CLIENT_ADMIN_IDS`, `SUPERADMIN_ID`, `REPORT_CHAT_IDS`
-
-### Ignored / неиспользуемые напрямую в текущем runtime
-- Любые env, не перечисленные в маппинге выше и не читаемые в `services/client_bot_service/app/config.py` или `bots/client_bot/main.py`, считаются ignored и безопасно игнорируются.
-
-## 9) Очередь постов (client-bot)
-- хранение: `data/posts_queue.json`
-- worker: стартует вместе с client-bot (`posts_queue_worker`)
-- инициализация файла: `ensure_posts_queue_file(...)`
-- функционал не зависит от внешних сервисов
-
-## 10) Чеклист «бот не отвечает»
-1. Проверить `CLIENT_TELEGRAM_BOT_TOKEN`.
-2. Проверить `CLIENT_BOT_MODE=webhook`.
-3. Проверить `BOT_PATH_SECRET`.
-4. Проверить `WEBHOOK_URL` или `PUBLIC_BASE_URL`/`DOMAIN`.
-5. Проверить, что сервис слушает `0.0.0.0:$PORT`.
-6. Проверить `/health` (200).
-7. Проверить логи: `mode=webhook`, `deleteWebhook ok`, `setWebhook ok`.
-
-## 11) Инструкция getWebhookInfo
-1. Выполнить:
-   - `https://api.telegram.org/bot<TOKEN>/getWebhookInfo`
-2. Проверить:
-   - `url` совпадает с `https://<base>/webhook/<secret>`
-   - `pending_update_count` не растёт
-   - `last_error_message` пустой
-
-## 12) Что изменено по файлам
-- Добавлен `index.js` bootstrap.
-- Упрощён root `main.py` для запуска только client-bot service.
-- Обновлён `services/client_bot_service/app/config.py` (token policy, URL source resolver).
-- Обновлён `services/client_bot_service/app/main.py` (webhook-first логирование, fallback).
-- Обновлён `bots/client_bot/main.py` (webhook URL source priority, static cache-control, polling fallback).
-- Обновлены тесты контрактов BotHost/webhook/static и no-node файлов.
-- Удалён дубликат webapp статики из service-папки.
-- Обновлены `README_AFTER_DEPLOY.md` и `requirements.txt`.
+## 10) Операционный checklist для BotHost
+1. Main file = `index.js`.
+2. Установить env: `CLIENT_TELEGRAM_BOT_TOKEN`, `BOT_PATH_SECRET`, `WEBHOOK_URL` (или `PUBLIC_BASE_URL`/`DOMAIN`).
+3. Проверить `GET /health` и `GET /service-health`.
+4. Проверить `getWebhookInfo`.
+5. В BotFather обновить Main App/Menu Button URL на `https://<bothost-domain>/WEBAPP`.
