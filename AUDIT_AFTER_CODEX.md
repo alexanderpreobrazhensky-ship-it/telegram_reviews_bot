@@ -1,31 +1,39 @@
 # AUDIT_AFTER_CODEX
 
-## 1. Краткий итог
-Репозиторий очищен от артефактов хостинга предыдущего провайдера и закреплён как BotHost-first с Python entrypoint (`main.py`) для client-bot.
+## Что изменено
+- Зафиксирован webhook-first контракт для client-bot: default mode=`webhook`, polling только вручную.
+- Добавлен единый конфиг-слой `services/client_bot_service/app/config.py` для аудита env и алиасов.
+- Добавлен жёсткий контракт webhook path: только `/webhook/<BOT_PATH_SECRET>`.
+- Унифицирован расчёт URL:
+  - `PUBLIC_BASE_URL` (primary)
+  - `DOMAIN` (fallback)
+  - принудительный `https://`
+- Root entrypoint (`main.py`) и service startup логируют эффективные параметры запуска без секретов.
+- WebApp статика закреплена через bundle-пути и алиасы:
+  - `/assets/webapp.bundle.js`, `/assets/webapp.bundle.css`
+  - `/app.js`, `/app.css`.
 
-## 2. Legacy hosting cleanup
-### Что удалено
-- Удалена директория `legacy/` вместе со служебными файлами старого деплоя.
+## Обязательные ENV (webhook)
+- `CLIENT_TELEGRAM_BOT_TOKEN`
+- `BOT_PATH_SECRET`
+- `PUBLIC_BASE_URL` (или `DOMAIN`)
+- `PORT`
 
-### Что заменено
-- Из документации удалены инструкции и термины старого провайдера.
-- В runtime-сообщении диагностики WebApp удалено упоминание старого доменного шаблона.
+## Рекомендуемые/опциональные
+- `CLIENT_WEBAPP_URL` / `WEBAPP_URL`
+- `WEBAPP_PATH`
+- `DATABASE_URL` (алиасы: `POSTGRES_URL`, `POSTGRESQL_URL`)
+- `CLIENT_MASTER_USER_IDS` (алиас: `CLIENT_MASTER_IDS`)
+- `CLIENT_MASTERS_CHAT_ID` (алиасы: `CLIENT_MASTER_CHAT_ID`, `CLIENT_CHAT_ID`)
 
-### Какие проверки выполнены
-- `git grep -i legacy_host_marker` (через шаблон без хранения запрещённого маркера в тексте)
-- `git grep -i legacy_host_domain` (через шаблон без хранения запрещённого домена в тексте)
-- `python -m unittest discover -s tests -p 'test_*.py'`
+## Как формируется webhook URL
+- Формула: `PUBLIC_BASE_URL + /webhook/<BOT_PATH_SECRET>`.
+- В логах URL маскируется (секрет не печатается).
 
-### Какие тесты добавлены
-- Регрессионный тест на отсутствие конфигов/строк старого деплоя и на сохранение BotHost запускового контракта.
-
-## 3. Контракт запуска (актуальный)
-- В корне сохранены `Dockerfile` и `main.py`.
-- Docker-контракт: `CMD ["python", "main.py"]`.
-- Node entrypoint-файлы в корне отсутствуют.
-
-## 4. Smoke-check после деплоя
-- Проверить `/health`.
-- Проверить `/WEBAPP` и `/WEBAPP/config.json`.
-- Проверить `/assets/webapp.bundle.js`, `/assets/webapp.bundle.css`.
-- Проверить алиасы `/app.js`, `/app.css`.
+## Как проверять после деплоя
+1. В логах старта есть `mode=webhook`.
+2. Есть `deleteWebhook ok` и `setWebhook ok`.
+3. `/health` отвечает `200`.
+4. `POST /webhook/<BOT_PATH_SECRET>` отвечает `200`.
+5. `/WEBAPP`, `/assets/webapp.bundle.js`, `/assets/webapp.bundle.css` отвечают `200`.
+6. `python -m unittest discover -s tests -p 'test_*.py'` проходит локально.

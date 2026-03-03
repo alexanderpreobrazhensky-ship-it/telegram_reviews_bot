@@ -9,9 +9,11 @@ if __name__ == "__main__":
     _, token_source = ClientBotConfig.resolve_token()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     logging.getLogger("entrypoint").info(
-        "starting service=client_bot_service mode=%s port=%s token_source=%s",
+        "starting effective_bot=client mode=%s port=%s token_source=%s public_base_url=%s webhook_url=%s",
         cfg.mode,
         cfg.port,
         token_source,
+        cfg.public_base_url or "-",
+        "set" if cfg.webhook_url else "-",
     )
     client_main()
