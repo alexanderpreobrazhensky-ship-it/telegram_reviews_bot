@@ -11,12 +11,11 @@ class BotHostContractTestCase(unittest.TestCase):
         with open("Dockerfile", "r", encoding="utf-8") as fh:
             content = fh.read().lower()
         self.assertIn('cmd ["python", "main.py"]', content)
-        self.assertNotIn("node", content)
 
-
-    def test_root_has_no_node_entrypoint_markers(self) -> None:
-        forbidden = ["package.json", "index.js", "app.js", "server.js", "run.js", "yarn.lock", "package-lock.json"]
+    def test_root_has_only_node_bootstrap_entrypoint(self) -> None:
+        forbidden = ["package.json", "app.js", "server.js", "main.js", "run.js", "yarn.lock", "package-lock.json"]
         root_files = set(os.listdir("."))
+        self.assertIn("index.js", root_files)
         for name in forbidden:
             self.assertNotIn(name, root_files)
 
@@ -24,7 +23,6 @@ class BotHostContractTestCase(unittest.TestCase):
         with open("main.py", "r", encoding="utf-8") as fh:
             content = fh.read()
         self.assertIn("from services.client_bot_service.app.main import main as client_main", content)
-        self.assertNotIn("node", content.lower())
 
     def test_port_resolution_port_has_priority(self) -> None:
         with patch.dict(os.environ, {"PORT": "9000", "CLIENT_SERVICE_PORT": "7000"}, clear=False):
@@ -34,11 +32,10 @@ class BotHostContractTestCase(unittest.TestCase):
         with patch.dict(os.environ, {"PORT": "", "CLIENT_SERVICE_PORT": "7000"}, clear=False):
             self.assertEqual(ClientBotConfig.resolve_port(), 7000)
 
-    def test_token_resolution_fallback_chain_requires_opt_in(self) -> None:
+    def test_token_resolution_fallback_chain_when_primary_empty(self) -> None:
         with patch.dict(
             os.environ,
             {
-                "ALLOW_TOKEN_FALLBACK": "1",
                 "CLIENT_TELEGRAM_BOT_TOKEN": "",
                 "TELEGRAM_BOT_TOKEN": "tg-token",
                 "BOT_API_TOKEN": "bot-token",
@@ -52,28 +49,23 @@ class BotHostContractTestCase(unittest.TestCase):
         self.assertEqual(token, "tg-token")
         self.assertEqual(source, "TELEGRAM_BOT_TOKEN")
 
-    def test_token_fallback_disabled_by_default(self) -> None:
+    def test_token_resolution_primary_has_priority(self) -> None:
         with patch.dict(
             os.environ,
             {
-                "ALLOW_TOKEN_FALLBACK": "0",
-                "CLIENT_TELEGRAM_BOT_TOKEN": "",
+                "CLIENT_TELEGRAM_BOT_TOKEN": "primary-token",
                 "TELEGRAM_BOT_TOKEN": "tg-token",
-                "BOT_API_TOKEN": "bot-token",
-                "API_TOKEN": "api-token",
-                "BOT_TOKEN": "bot-token2",
-                "TOKEN": "token3",
             },
             clear=False,
         ):
-            with self.assertRaises(RuntimeError):
-                ClientBotConfig.resolve_token()
+            token, source = ClientBotConfig.resolve_token()
+        self.assertEqual(token, "primary-token")
+        self.assertEqual(source, "CLIENT_TELEGRAM_BOT_TOKEN")
 
     def test_token_resolution_supports_bot_token_fallbacks(self) -> None:
         with patch.dict(
             os.environ,
             {
-                "ALLOW_TOKEN_FALLBACK": "1",
                 "CLIENT_TELEGRAM_BOT_TOKEN": "",
                 "TELEGRAM_BOT_TOKEN": "",
                 "BOT_API_TOKEN": "",
@@ -120,6 +112,7 @@ class BotHostContractTestCase(unittest.TestCase):
             client_main.normalize_webapp_url("https://HTTPS://example.com/WEBAPP/"),
             "https://example.com/WEBAPP",
         )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -3,17 +3,16 @@ import unittest
 
 
 class NoNodeAutodetectFilesTestCase(unittest.TestCase):
-    def test_no_node_entrypoint_files_in_repo_root(self) -> None:
-        forbidden = {"package.json", "index.js", "app.js", "server.js"}
+    def test_only_bootstrap_index_js_in_repo_root(self) -> None:
+        forbidden = {"package.json", "app.js", "server.js", "main.js"}
         root_files = set(os.listdir("."))
         self.assertTrue(forbidden.isdisjoint(root_files))
+        self.assertIn("index.js", root_files)
 
-    def test_dockerfile_python_only(self) -> None:
-        with open("Dockerfile", "r", encoding="utf-8") as fh:
-            content = fh.read().lower()
-        self.assertIn('cmd ["python", "main.py"]', content)
-        self.assertNotIn("npm", content)
-        self.assertNotIn("node", content)
+    def test_bootstrap_index_js_spawns_python_main(self) -> None:
+        with open("index.js", "r", encoding="utf-8") as fh:
+            content = fh.read()
+        self.assertIn('spawn("python", ["main.py"]', content)
 
 
 if __name__ == "__main__":

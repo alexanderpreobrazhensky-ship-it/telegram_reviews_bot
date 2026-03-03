@@ -64,7 +64,7 @@
 ## Локальный запуск
 
 ```bash
-cd /workspace/telegram_reviews_bot/bots/client_bot
+cd /workspace/<repo>/bots/client_bot
 python main.py
 ```
 

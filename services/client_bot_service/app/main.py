@@ -51,14 +51,21 @@ def main() -> None:
         cfg.webapp_url or "-",
     )
     if cfg.mode == "webhook":
+        logger.info("mode=webhook")
+        _, source = ClientBotConfig.resolve_public_base_url_with_source()
+        logger.info("webhook_base_source=%s", source)
         if not cfg.webhook_url:
-            logger.warning("webhook mode requested but WEBHOOK_URL/DOMAIN is missing or invalid; falling back to polling")
+            logger.warning("webhook mode requested but WEBHOOK_URL/PUBLIC_BASE_URL/DOMAIN is missing or invalid; falling back to polling")
             start_polling_background()
             delete_webhook(cfg.token, logger, drop_pending_updates=True)
         else:
+            logger.info("webhook_url=%s", mask_webhook_url(cfg.webhook_url))
             delete_webhook(cfg.token, logger, drop_pending_updates=True)
+            logger.info("deleteWebhook ok")
             set_webhook(cfg.token, logger, cfg.webhook_url)
+            logger.info("setWebhook ok")
     else:
+        logger.info("mode=polling")
         start_polling_background()
         delete_webhook(cfg.token, logger, drop_pending_updates=True)
     app.run(host=cfg.host, port=cfg.port)
