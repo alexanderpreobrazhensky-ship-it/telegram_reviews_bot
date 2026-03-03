@@ -9,7 +9,6 @@ class EnvAuditTestCase(unittest.TestCase):
         with patch.dict(
             "os.environ",
             {
-                "ALLOW_TOKEN_FALLBACK": "1",
                 "CLIENT_TELEGRAM_BOT_TOKEN": "",
                 "TELEGRAM_BOT_TOKEN": "fallback-token",
                 "DOMAIN": "HTTPS://bot_123.bothost.ru/",

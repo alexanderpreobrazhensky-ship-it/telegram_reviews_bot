@@ -647,14 +647,17 @@ def normalize_webapp_url(value: str | None) -> str | None:
     return url
 
 
-def resolve_public_base_url() -> str | None:
+def resolve_public_base_url() -> tuple[str | None, str]:
+    direct = normalize_webapp_url(os.getenv("WEBHOOK_URL"))
+    if direct:
+        return direct, "WEBHOOK_URL"
     direct = normalize_webapp_url(os.getenv("PUBLIC_BASE_URL"))
     if direct:
-        return direct
+        return direct, "PUBLIC_BASE_URL"
     domain = sanitize_domain(os.getenv("DOMAIN"))
     if not domain:
-        return None
-    return f"https://{domain}"
+        return None, "missing"
+    return f"https://{domain}", "DOMAIN"
 
 
 def resolve_webhook_path() -> str:
@@ -664,11 +667,12 @@ def resolve_webhook_path() -> str:
     return f"/webhook/{secret}"
 
 
-def resolve_webhook_url() -> str:
-    base = resolve_public_base_url()
+def resolve_webhook_url() -> tuple[str | None, str]:
+    base, source = resolve_public_base_url()
+    path = resolve_webhook_path()
     if not base:
-        raise RuntimeError("PUBLIC_BASE_URL (or DOMAIN) is required in webhook mode")
-    return f"{base}{resolve_webhook_path()}"
+        return None, source
+    return f"{base}{path}", source
 
 
 def mask_webhook_url(url: str | None) -> str:
@@ -689,7 +693,7 @@ def resolve_webapp_public_url() -> str | None:
     direct = normalize_webapp_url(os.getenv("CLIENT_WEBAPP_URL") or os.getenv("WEBAPP_URL"))
     if direct:
         return direct
-    base = resolve_public_base_url()
+    base, _ = resolve_public_base_url()
     if not base:
         return None
     return f"{base}{WEBAPP_PATH}"
@@ -3350,6 +3354,12 @@ def get_user_from_init_data(init_data: dict) -> dict | None:
     }
 
 
+def _send_webapp_file(filename: str):
+    response = send_from_directory(WEBAPP_DIR, filename)
+    response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate, max-age=0"
+    return response
+
+
 def register_webapp_routes(app: Flask, token: str, logger: logging.Logger) -> Flask:
     webapp_route = WEBAPP_PATH
 
@@ -3361,7 +3371,7 @@ def register_webapp_routes(app: Flask, token: str, logger: logging.Logger) -> Fl
     def webapp_alias() -> object:
         if not WEBAPP_ENABLED:
             return webapp_disabled_response()
-        return send_from_directory(WEBAPP_DIR, "index.html")
+        return _send_webapp_file("index.html")
 
     @app.get("/assets/webapp.bundle.css")
     @app.get("/webapp.css")
@@ -3369,7 +3379,7 @@ def register_webapp_routes(app: Flask, token: str, logger: logging.Logger) -> Fl
     def webapp_css() -> object:
         if not WEBAPP_ENABLED:
             return webapp_disabled_response()
-        return send_from_directory(WEBAPP_DIR, "assets/webapp.bundle.css")
+        return _send_webapp_file("assets/webapp.bundle.css")
 
     @app.get("/assets/webapp.bundle.js")
     @app.get("/webapp.js")
@@ -3377,7 +3387,7 @@ def register_webapp_routes(app: Flask, token: str, logger: logging.Logger) -> Fl
     def webapp_js() -> object:
         if not WEBAPP_ENABLED:
             return webapp_disabled_response()
-        return send_from_directory(WEBAPP_DIR, "assets/webapp.bundle.js")
+        return _send_webapp_file("assets/webapp.bundle.js")
 
     @app.get("/favicon.ico")
     def webapp_favicon() -> object:
@@ -3389,7 +3399,7 @@ def register_webapp_routes(app: Flask, token: str, logger: logging.Logger) -> Fl
         if not WEBAPP_ENABLED:
             return webapp_disabled_response()
         if WEBAPP_PATH == "/webapp":
-            return send_from_directory(WEBAPP_DIR, "index.html")
+            return _send_webapp_file("index.html")
         return redirect(webapp_route)
 
     @app.get(webapp_route)
@@ -3397,7 +3407,7 @@ def register_webapp_routes(app: Flask, token: str, logger: logging.Logger) -> Fl
     def webapp_index() -> object:
         if not WEBAPP_ENABLED:
             return webapp_disabled_response()
-        return send_from_directory(WEBAPP_DIR, "index.html")
+        return _send_webapp_file("index.html")
 
     @app.get(f"{webapp_route}/config.json")
     def webapp_config() -> object:
@@ -3409,7 +3419,7 @@ def register_webapp_routes(app: Flask, token: str, logger: logging.Logger) -> Fl
     def webapp_static(filename: str) -> object:
         if not WEBAPP_ENABLED:
             return webapp_disabled_response()
-        return send_from_directory(WEBAPP_DIR, filename)
+        return _send_webapp_file(filename)
 
     @app.get("/health")
     def service_health() -> object:
@@ -9222,12 +9232,17 @@ def main() -> None:
         logger.info("auto pin on start: %s", message)
 
     if RUN_MODE == "webhook":
-        delete_webhook(token, logger, drop_pending_updates=True)
-        webhook_url = resolve_webhook_url()
+        webhook_url, webhook_source = resolve_webhook_url()
         logger.info("mode=webhook")
-        set_webhook(token, logger, webhook_url)
-        logger.info("webhook ready url=%s", mask_webhook_url(webhook_url))
-        return
+        logger.info("webhook_base_source=%s", webhook_source)
+        if webhook_url:
+            delete_webhook(token, logger, drop_pending_updates=True)
+            logger.info("deleteWebhook ok")
+            set_webhook(token, logger, webhook_url)
+            logger.info("setWebhook ok")
+            logger.info("webhook ready url=%s", mask_webhook_url(webhook_url))
+            return
+        logger.warning("webhook mode requested but WEBHOOK_URL/PUBLIC_BASE_URL/DOMAIN is missing or invalid; fallback to polling")
 
     logger.info("mode=polling")
     delete_webhook(token, logger, drop_pending_updates=True)

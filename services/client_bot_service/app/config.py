@@ -22,9 +22,9 @@ class ClientBotConfig:
 
     @staticmethod
     def resolve_token() -> tuple[str, str]:
-        allow_fallback = (os.getenv("ALLOW_TOKEN_FALLBACK") or "0").strip() == "1"
         candidates = [("CLIENT_TELEGRAM_BOT_TOKEN", os.getenv("CLIENT_TELEGRAM_BOT_TOKEN"))]
-        if allow_fallback:
+        primary = (os.getenv("CLIENT_TELEGRAM_BOT_TOKEN") or "").strip()
+        if not primary:
             candidates.extend(
                 [
                     ("TELEGRAM_BOT_TOKEN", os.getenv("TELEGRAM_BOT_TOKEN")),
@@ -40,7 +40,7 @@ class ClientBotConfig:
                 return token, source
         raise RuntimeError(
             "Client bot token is required: set CLIENT_TELEGRAM_BOT_TOKEN "
-            "(fallbacks TELEGRAM_BOT_TOKEN/BOT_API_TOKEN/API_TOKEN/BOT_TOKEN/TOKEN require ALLOW_TOKEN_FALLBACK=1)"
+            "(fallbacks TELEGRAM_BOT_TOKEN/BOT_API_TOKEN/API_TOKEN/BOT_TOKEN/TOKEN are used only when CLIENT_TELEGRAM_BOT_TOKEN is empty)"
         )
 
     @staticmethod
@@ -70,19 +70,25 @@ class ClientBotConfig:
 
     @classmethod
     def resolve_public_base_url(cls) -> str | None:
+        base, _ = cls.resolve_public_base_url_with_source()
+        return base
+
+
+    @classmethod
+    def resolve_public_base_url_with_source(cls) -> tuple[str | None, str]:
         direct = cls._normalize_https_url(os.getenv("WEBHOOK_URL"))
         if direct:
-            return direct
+            return direct, "WEBHOOK_URL"
         direct = cls._normalize_https_url(os.getenv("PUBLIC_BASE_URL"))
         if direct:
-            return direct
+            return direct, "PUBLIC_BASE_URL"
         domain = (os.getenv("DOMAIN") or "").strip().lower().strip("/")
         if not domain:
-            return None
+            return None, "missing"
         domain = domain.replace("https://", "").replace("http://", "")
         if "/" in domain:
             domain = domain.split("/", 1)[0]
-        return f"https://{domain}" if domain else None
+        return (f"https://{domain}" if domain else None), "DOMAIN"
 
     @staticmethod
     def resolve_database_url() -> str | None:
