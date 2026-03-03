@@ -3413,7 +3413,7 @@ def register_webapp_routes(app: Flask, token: str, logger: logging.Logger) -> Fl
 
     @app.get("/health")
     def service_health() -> object:
-        return jsonify({"status": "ok", "service": "client_bot_service", "mode": RUN_MODE or "polling"})
+        return jsonify({"status": "ok", "service": "client-bot", "mode": RUN_MODE or "polling"})
 
     @app.get("/api/webapp/health")
     def webapp_health() -> object:

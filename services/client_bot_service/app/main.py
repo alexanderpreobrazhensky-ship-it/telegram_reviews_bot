@@ -27,7 +27,7 @@ def build_app():
     def health():
         return {
             "status": "ok",
-            "service": "client_bot_service",
+            "service": "client-bot",
             "mode": cfg.mode,
             "token_source": app.config.get("CLIENT_TOKEN_SOURCE", "unknown"),
         }
@@ -51,8 +51,12 @@ def main() -> None:
         cfg.webapp_url or "-",
     )
     if cfg.mode == "webhook":
-        delete_webhook(cfg.token, logger, drop_pending_updates=True)
-        if cfg.webhook_url:
+        if not cfg.webhook_url:
+            logger.warning("webhook mode requested but WEBHOOK_URL/DOMAIN is missing or invalid; falling back to polling")
+            start_polling_background()
+            delete_webhook(cfg.token, logger, drop_pending_updates=True)
+        else:
+            delete_webhook(cfg.token, logger, drop_pending_updates=True)
             set_webhook(cfg.token, logger, cfg.webhook_url)
     else:
         start_polling_background()

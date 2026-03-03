@@ -20,7 +20,6 @@ class ClientBotConfig:
     master_user_ids_raw: str
     masters_chat_id_raw: str
 
-
     @staticmethod
     def resolve_token() -> tuple[str, str]:
         allow_fallback = (os.getenv("ALLOW_TOKEN_FALLBACK") or "0").strip() == "1"
@@ -71,6 +70,9 @@ class ClientBotConfig:
 
     @classmethod
     def resolve_public_base_url(cls) -> str | None:
+        direct = cls._normalize_https_url(os.getenv("WEBHOOK_URL"))
+        if direct:
+            return direct
         direct = cls._normalize_https_url(os.getenv("PUBLIC_BASE_URL"))
         if direct:
             return direct
@@ -115,12 +117,12 @@ class ClientBotConfig:
         mode = (os.getenv("CLIENT_BOT_MODE") or "webhook").strip().lower()
         public_base_url = cls.resolve_public_base_url()
         webhook_path = cls.resolve_webhook_path()
-        if mode == "webhook":
-            if not public_base_url:
-                raise RuntimeError("PUBLIC_BASE_URL (or DOMAIN) is required in webhook mode")
-            if not webhook_path:
-                raise RuntimeError("BOT_PATH_SECRET is required in webhook mode")
+
+        if mode == "webhook" and not webhook_path:
+            raise RuntimeError("BOT_PATH_SECRET is required in webhook mode")
+
         webhook_url = f"{public_base_url}{webhook_path}" if public_base_url and webhook_path else None
+
         return cls(
             token=token,
             mode=mode,
