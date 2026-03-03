@@ -258,7 +258,7 @@ RUN_MODE = (
     os.getenv("CLIENT_BOT_MODE")
     or os.getenv("CLIENT_RUN_MODE")
     or os.getenv("RUN_MODE")
-    or "polling"
+    or "webhook"
 ).strip().lower()
 def sanitize_domain(value: str | None) -> str:
     raw = (value or "").strip()
@@ -647,14 +647,52 @@ def normalize_webapp_url(value: str | None) -> str | None:
     return url
 
 
-def resolve_webapp_public_url() -> str | None:
-    direct = normalize_webapp_url(os.getenv("CLIENT_WEBAPP_URL") or os.getenv("WEBAPP_URL"))
+def resolve_public_base_url() -> str | None:
+    direct = normalize_webapp_url(os.getenv("PUBLIC_BASE_URL"))
     if direct:
         return direct
     domain = sanitize_domain(os.getenv("DOMAIN"))
     if not domain:
         return None
-    return f"https://{domain}{WEBAPP_PATH}"
+    return f"https://{domain}"
+
+
+def resolve_webhook_path() -> str:
+    secret = (os.getenv("BOT_PATH_SECRET") or "").strip()
+    if not secret:
+        raise RuntimeError("BOT_PATH_SECRET is required")
+    return f"/webhook/{secret}"
+
+
+def resolve_webhook_url() -> str:
+    base = resolve_public_base_url()
+    if not base:
+        raise RuntimeError("PUBLIC_BASE_URL (or DOMAIN) is required in webhook mode")
+    return f"{base}{resolve_webhook_path()}"
+
+
+def mask_webhook_url(url: str | None) -> str:
+    if not url:
+        return "-"
+    try:
+        parsed = urlparse(url)
+        path = parsed.path
+        if "/webhook/" in path:
+            prefix = path.split('/webhook/', 1)[0]
+            path = f"{prefix}/webhook/***"
+        return f"{parsed.scheme}://{parsed.netloc}{path}"
+    except Exception:
+        return "-"
+
+
+def resolve_webapp_public_url() -> str | None:
+    direct = normalize_webapp_url(os.getenv("CLIENT_WEBAPP_URL") or os.getenv("WEBAPP_URL"))
+    if direct:
+        return direct
+    base = resolve_public_base_url()
+    if not base:
+        return None
+    return f"{base}{WEBAPP_PATH}"
 
 
 def get_webapp_public_url() -> str | None:
@@ -3475,6 +3513,18 @@ def register_webapp_routes(app: Flask, token: str, logger: logging.Logger) -> Fl
             return jsonify({"ok": False, "error": "phone_required"}), 400
         form["phone"] = phone
         return handle_webapp_submission(user, form, token, logger)
+
+    @app.post("/webhook/<path_secret>")
+    def telegram_webhook(path_secret: str) -> object:
+        try:
+            expected = (os.getenv("BOT_PATH_SECRET") or "").strip()
+            if not expected or path_secret != expected:
+                return "ok", 200
+            update = request.get_json(silent=True) or {}
+            handle_update(token, update, logger)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("webhook handler error: %s", exc)
+        return "ok", 200
 
     return app
 
@@ -9040,6 +9090,22 @@ def get_client_token() -> tuple[str, str] | None:
     return None
 
 
+def set_webhook(token: str, logger: logging.Logger, webhook_url: str) -> bool:
+    payload = {"url": webhook_url}
+    secret = (os.getenv("BOT_PATH_SECRET") or "").strip()
+    if secret:
+        payload["secret_token"] = secret
+    result = tg_request("setWebhook", payload)
+    if result.ok and result.response_json:
+        logger.info("client_bot setWebhook ok: result=%s", result.response_json.get("result"))
+        return True
+    if result.response_json:
+        logger.warning("client_bot setWebhook failed: %s", result.response_json)
+    else:
+        logger.warning("client_bot setWebhook error: %s", result.error)
+    return False
+
+
 def delete_webhook(
     token: str, logger: logging.Logger, drop_pending_updates: bool = False
 ) -> None:
@@ -9138,7 +9204,7 @@ def main() -> None:
         daemon=True,
     )
     posts_worker.start()
-    logger.info("posts queue worker started in client-bot")
+    logger.info("posts queue worker started in client-bot path=%s", get_posts_queue_file_path())
     settings = get_settings(storage)
     ai_service = AIService(logging.getLogger("ai"), settings=settings)
     ai_config_source = get_ai_config_source()
@@ -9154,12 +9220,14 @@ def main() -> None:
     if AUTO_PIN_ON_START:
         ok, message = ensure_channel_pin(storage, timezone, logger, force_new=False)
         logger.info("auto pin on start: %s", message)
+
     if RUN_MODE == "webhook":
-        webhook_url = (os.getenv("CLIENT_WEBHOOK_URL") or os.getenv("WEBHOOK_URL") or "").strip()
-        if not is_valid_webhook_url(webhook_url):
-            logger.warning("mode=webhook requested but WEBHOOK_URL is missing/invalid; fallback to polling")
-        else:
-            logger.info("mode=webhook configured (future-compatible), running polling fallback")
+        delete_webhook(token, logger, drop_pending_updates=True)
+        webhook_url = resolve_webhook_url()
+        logger.info("mode=webhook")
+        set_webhook(token, logger, webhook_url)
+        logger.info("webhook ready url=%s", mask_webhook_url(webhook_url))
+        return
 
     logger.info("mode=polling")
     delete_webhook(token, logger, drop_pending_updates=True)

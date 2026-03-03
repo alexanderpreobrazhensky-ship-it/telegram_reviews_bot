@@ -1,6 +1,13 @@
 from __future__ import annotations
 
-from bots.client_bot.main import create_flask_app, start_polling_background
+from bots.client_bot.main import (
+    configure_telegram,
+    create_flask_app,
+    delete_webhook,
+    mask_webhook_url,
+    set_webhook,
+    start_polling_background,
+)
 
 from .config import ClientBotConfig
 from .utils.logger import get_logger
@@ -29,21 +36,27 @@ def build_app():
 
 
 def main() -> None:
-    import os
-    from bots.client_bot.main import resolve_webapp_public_url
-
     app, cfg = build_app()
     _, token_source = ClientBotConfig.resolve_token()
+    configure_telegram(cfg.token)
+    storage_mode = "db" if cfg.database_url else "files"
     logger.info(
-        "client_bot_service startup: mode=%s domain=%s webapp_url=%s port=%s token_source=%s",
+        "client_bot_service startup effective_bot=client mode=%s token_source=%s public_base_url=%s webhook_url=%s port=%s storage_mode=%s webapp_url=%s",
         cfg.mode,
-        os.getenv("DOMAIN", "").strip() or "-",
-        resolve_webapp_public_url() or "-",
-        cfg.port,
         token_source,
+        cfg.public_base_url or "-",
+        mask_webhook_url(cfg.webhook_url),
+        cfg.port,
+        storage_mode,
+        cfg.webapp_url or "-",
     )
-    if cfg.mode == "polling":
+    if cfg.mode == "webhook":
+        delete_webhook(cfg.token, logger, drop_pending_updates=True)
+        if cfg.webhook_url:
+            set_webhook(cfg.token, logger, cfg.webhook_url)
+    else:
         start_polling_background()
+        delete_webhook(cfg.token, logger, drop_pending_updates=True)
     app.run(host=cfg.host, port=cfg.port)
 
 
