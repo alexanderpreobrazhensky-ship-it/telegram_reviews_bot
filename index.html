@@ -2,86 +2,107 @@
 <html lang="ru">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Автоцентр ЛИРА — оставить отзыв</title>
-  <meta name="description" content="Оставьте отзыв об Автоцентре ЛИРА на Яндекс Картах или 2ГИС" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>АЦ Лира — оставить отзыв</title>
+
+  <!--
+    ✅ Как использовать:
+    1) Назови файл: index.html и положи в корень репозитория (как у тебя сейчас).
+    2) Загрузите логотип в корень рядом с index.html с именем: logo.png
+       (или поменяй LOGO_SRC ниже).
+    3) GitHub Pages уже включен — страница откроется по адресу репозитория.
+  -->
+
   <style>
     :root{
-      --bg1:#0b1324;
-      --bg2:#0a2a66;
-      --card:#0f172aee;
-      --text:#e8eefc;
-      --muted:#b8c6ee;
-      --accent:#2f7dff;
-      --accent2:#6a5cff;
-      --btn:#1b2a4d;
-      --border:rgba(255,255,255,.12);
-      --shadow: 0 18px 60px rgba(0,0,0,.45);
+      --bg1:#050A18;
+      --bg2:#0B1F4A;
+      --card: rgba(255,255,255,.08);
+      --stroke: rgba(255,255,255,.16);
+      --text: rgba(255,255,255,.92);
+      --muted: rgba(255,255,255,.68);
+      --accent:#2F6BFF;
+      --accent2:#7A5CFF;
+      --shadow: 0 22px 60px rgba(0,0,0,.45);
+      --radius: 22px;
     }
+
     *{box-sizing:border-box}
+    html,body{height:100%}
     body{
       margin:0;
-      font-family: system-ui,-apple-system,Segoe UI,Roboto,Arial,"Noto Sans","Helvetica Neue",sans-serif;
       color:var(--text);
-      min-height:100svh;
-      display:grid;
-      place-items:center;
-      padding:24px;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
       background:
-        radial-gradient(1200px 600px at 20% 10%, rgba(106,92,255,.35), transparent 60%),
-        radial-gradient(900px 500px at 90% 20%, rgba(47,125,255,.28), transparent 55%),
-        linear-gradient(160deg, var(--bg1), var(--bg2));
-      overflow:hidden;
+        radial-gradient(1200px 800px at 20% 15%, rgba(47,107,255,.45), transparent 60%),
+        radial-gradient(900px 700px at 80% 20%, rgba(122,92,255,.35), transparent 60%),
+        radial-gradient(1000px 900px at 50% 90%, rgba(35,160,255,.20), transparent 65%),
+        linear-gradient(180deg, var(--bg1), var(--bg2));
+      overflow-x:hidden;
     }
-    /* subtle animated particles */
-    .glow{
-      position:fixed; inset:-40%;
-      background:
-        radial-gradient(circle at 30% 30%, rgba(47,125,255,.18), transparent 40%),
-        radial-gradient(circle at 70% 60%, rgba(106,92,255,.16), transparent 45%),
-        radial-gradient(circle at 40% 80%, rgba(255,255,255,.06), transparent 40%);
-      filter: blur(22px);
-      animation: float 10s ease-in-out infinite alternate;
+
+    /* animated “particles” */
+    .spark{
+      position:fixed;
+      inset:-20vh -20vw;
       pointer-events:none;
+      opacity:.75;
+      filter: blur(0px);
+      background-image:
+        radial-gradient(6px 6px at 12% 18%, rgba(255,255,255,.18), transparent 60%),
+        radial-gradient(5px 5px at 35% 22%, rgba(255,255,255,.10), transparent 60%),
+        radial-gradient(7px 7px at 68% 16%, rgba(255,255,255,.14), transparent 60%),
+        radial-gradient(6px 6px at 82% 38%, rgba(255,255,255,.10), transparent 60%),
+        radial-gradient(6px 6px at 22% 62%, rgba(255,255,255,.08), transparent 60%),
+        radial-gradient(7px 7px at 56% 72%, rgba(255,255,255,.10), transparent 60%),
+        radial-gradient(6px 6px at 78% 78%, rgba(255,255,255,.09), transparent 60%);
+      animation: drift 14s linear infinite;
     }
-    @keyframes float{
-      from{transform: translate3d(-10px,-10px,0) scale(1)}
-      to{transform: translate3d(10px,12px,0) scale(1.04)}
+    @keyframes drift{
+      0%{ transform: translate3d(0,0,0) scale(1); }
+      50%{ transform: translate3d(1.5vw, -1.2vh,0) scale(1.02); }
+      100%{ transform: translate3d(0,0,0) scale(1); }
     }
 
     .wrap{
-      width:min(820px, 100%);
-      display:grid;
-      gap:16px;
-      justify-items:center;
-      z-index:1;
+      min-height:100%;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      padding:28px 16px;
     }
 
     .card{
-      width:100%;
-      background: linear-gradient(180deg, rgba(255,255,255,.06), rgba(255,255,255,.03));
-      border:1px solid var(--border);
-      border-radius:22px;
+      width:min(940px, 100%);
+      background: var(--card);
+      border:1px solid var(--stroke);
+      border-radius: var(--radius);
       box-shadow: var(--shadow);
-      padding:22px;
-      position:relative;
       overflow:hidden;
+      position:relative;
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
     }
 
-    .brand{
+    .topbar{
       display:flex;
+      gap:16px;
       align-items:center;
-      gap:14px;
+      padding:22px 22px 18px;
+      border-bottom:1px solid rgba(255,255,255,.10);
+      background:
+        linear-gradient(90deg, rgba(47,107,255,.25), rgba(122,92,255,.12), rgba(255,255,255,0));
     }
+
     .logo{
       width:64px; height:64px;
       border-radius:16px;
-      background:#ffffff10;
-      border:1px solid var(--border);
+      background: rgba(255,255,255,.10);
+      border:1px solid rgba(255,255,255,.18);
+      display:grid; place-items:center;
       overflow:hidden;
-      display:grid;
-      place-items:center;
       flex:0 0 auto;
+      box-shadow: 0 12px 28px rgba(0,0,0,.25);
     }
     .logo img{
       width:100%;
@@ -89,140 +110,433 @@
       object-fit:cover;
       display:block;
     }
+
+    .titleblock{min-width:0}
     .title{
+      margin:0;
+      font-size: clamp(20px, 2.6vw, 30px);
+      letter-spacing:.3px;
       line-height:1.15;
     }
-    .title h1{
-      margin:0;
-      font-size: clamp(22px, 3.2vw, 30px);
-      letter-spacing:.2px;
-    }
-    .title p{
+    .subtitle{
       margin:6px 0 0;
-      color:var(--muted);
-      font-size: 14.5px;
+      color: var(--muted);
+      font-size: 14px;
+      line-height:1.4;
     }
 
-    .grid{
-      margin-top:16px;
+    .content{
       display:grid;
-      gap:14px;
-      grid-template-columns: 1fr;
+      grid-template-columns: 1.1fr .9fr;
+      gap:18px;
+      padding:22px;
     }
 
-    .btnRow{
+    @media (max-width: 820px){
+      .content{ grid-template-columns:1fr; }
+      .stats{ order: 2; }
+    }
+
+    .panel{
+      background: rgba(0,0,0,.18);
+      border:1px solid rgba(255,255,255,.10);
+      border-radius: 18px;
+      padding:18px;
+      position:relative;
+      overflow:hidden;
+    }
+
+    .panel:before{
+      content:"";
+      position:absolute;
+      inset:-2px;
+      background:
+        radial-gradient(420px 220px at 12% 0%, rgba(47,107,255,.22), transparent 60%),
+        radial-gradient(420px 220px at 88% 0%, rgba(122,92,255,.18), transparent 60%);
+      pointer-events:none;
+    }
+
+    .panel > *{ position:relative; z-index:1; }
+
+    .h{
+      margin:0 0 10px;
+      font-size: 16px;
+      letter-spacing:.25px;
+      color: rgba(255,255,255,.86);
+    }
+
+    .buttons{
       display:grid;
       gap:12px;
-      grid-template-columns: repeat(2, minmax(0,1fr));
-    }
-    @media (max-width: 560px){
-      .btnRow{grid-template-columns: 1fr;}
-      .logo{width:58px;height:58px;border-radius:14px}
+      margin-top:12px;
     }
 
     .btn{
+      appearance:none;
+      border:0;
+      border-radius: 16px;
+      padding:14px 14px;
+      cursor:pointer;
+      color: white;
+      font-weight: 700;
+      font-size: 15px;
+      letter-spacing:.2px;
       display:flex;
       align-items:center;
-      justify-content:center;
-      gap:10px;
-      padding:14px 14px;
-      border-radius:16px;
-      border:1px solid var(--border);
-      background: linear-gradient(180deg, rgba(255,255,255,.05), rgba(255,255,255,.02));
-      color:var(--text);
-      text-decoration:none;
-      font-weight:700;
-      letter-spacing:.2px;
-      transition: transform .12s ease, border-color .12s ease, background .12s ease;
+      justify-content:space-between;
+      gap:12px;
+      position:relative;
+      overflow:hidden;
+      transform: translateZ(0);
+      transition: transform .12s ease, filter .12s ease;
       user-select:none;
     }
-    .btn:hover{
-      transform: translateY(-1px);
-      border-color: rgba(255,255,255,.22);
-      background: linear-gradient(180deg, rgba(255,255,255,.08), rgba(255,255,255,.03));
+    .btn:active{ transform: scale(.99); }
+    .btn:hover{ filter: brightness(1.05); }
+
+    .btn .left{
+      display:flex;
+      align-items:center;
+      gap:12px;
+      min-width:0;
     }
-    .btn:active{transform: translateY(0)}
-    .btn .tag{
-      font-size:12px;
-      font-weight:700;
-      padding:4px 8px;
-      border-radius:999px;
-      background: rgba(47,125,255,.18);
-      border:1px solid rgba(47,125,255,.25);
-      color:#dbe8ff;
+
+    .badge{
+      width:42px; height:42px;
+      border-radius: 14px;
+      display:grid;
+      place-items:center;
+      background: rgba(255,255,255,.12);
+      border:1px solid rgba(255,255,255,.18);
+      flex:0 0 auto;
+    }
+
+    .btn .label{
+      display:flex;
+      flex-direction:column;
+      gap:2px;
+      min-width:0;
+    }
+    .btn .label b{
+      font-size: 15px;
+      white-space:nowrap;
+      overflow:hidden;
+      text-overflow:ellipsis;
+    }
+    .btn .label span{
+      font-size: 12px;
+      color: rgba(255,255,255,.80);
+      font-weight: 600;
+    }
+
+    .btn .count{
+      font-size: 12px;
+      color: rgba(255,255,255,.92);
+      background: rgba(0,0,0,.18);
+      border:1px solid rgba(255,255,255,.16);
+      padding:6px 10px;
+      border-radius: 999px;
+      white-space:nowrap;
+    }
+
+    .btn.yandex{
+      background: linear-gradient(135deg, #FF2A2A, #FF7B00);
+      box-shadow: 0 14px 36px rgba(255,82,0,.28);
+    }
+    .btn.gis{
+      background: linear-gradient(135deg, #00C853, #00A3FF);
+      box-shadow: 0 14px 36px rgba(0,200,83,.22);
+    }
+    .btn.tg{
+      background: linear-gradient(135deg, #2F6BFF, #7A5CFF);
+      box-shadow: 0 14px 36px rgba(47,107,255,.22);
     }
 
     .note{
-      margin-top:8px;
-      color:var(--muted);
-      font-size:13px;
+      margin:12px 0 0;
+      color: var(--muted);
+      font-size: 13px;
       line-height:1.45;
-      padding:12px 14px;
-      border-radius:16px;
-      border:1px dashed rgba(255,255,255,.16);
-      background: rgba(0,0,0,.12);
+    }
+
+    .statsGrid{
+      display:grid;
+      gap:10px;
+    }
+
+    .stat{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:12px;
+      padding:12px 12px;
+      border-radius: 14px;
+      background: rgba(255,255,255,.06);
+      border:1px solid rgba(255,255,255,.10);
+    }
+
+    .stat .k{
+      color: rgba(255,255,255,.78);
+      font-size: 13px;
+      font-weight: 650;
+    }
+    .stat .v{
+      font-size: 14px;
+      font-weight: 800;
     }
 
     .footer{
-      width:100%;
+      padding:14px 22px 20px;
+      border-top:1px solid rgba(255,255,255,.10);
+      color: rgba(255,255,255,.60);
+      font-size: 12px;
       display:flex;
-      flex-wrap:wrap;
       justify-content:space-between;
+      gap:12px;
+      flex-wrap:wrap;
+    }
+
+    .tiny{
+      color: rgba(255,255,255,.55);
+    }
+
+    .pill{
+      display:inline-flex;
       align-items:center;
-      gap:10px;
-      margin-top:10px;
-      color:var(--muted);
-      font-size:12.5px;
+      gap:8px;
+      padding:7px 10px;
+      border-radius:999px;
+      background: rgba(0,0,0,.18);
+      border:1px solid rgba(255,255,255,.12);
     }
-    .link{
-      color:#dbe8ff;
-      text-decoration:none;
-      border-bottom:1px solid rgba(219,232,255,.25);
+
+    .dot{
+      width:8px;height:8px;border-radius:50%;
+      background: #1BFF7A;
+      box-shadow:0 0 0 6px rgba(27,255,122,.12);
     }
-    .link:hover{border-bottom-color: rgba(219,232,255,.55)}
   </style>
 </head>
+
 <body>
-  <div class="glow"></div>
+  <div class="spark" aria-hidden="true"></div>
 
   <main class="wrap">
-    <section class="card" aria-label="Оставить отзыв">
-      <div class="brand">
-        <!-- ВАЖНО: положите файл логотипа в репозиторий рядом с этим html и назовите его logo.png -->
-        <div class="logo" aria-label="Логотип Автоцентра ЛИРА">
-          <img src="logo.png" alt="Автоцентр ЛИРА">
+    <section class="card" role="region" aria-label="Оставить отзыв">
+      <header class="topbar">
+        <div class="logo" title="Автоцентр Лира">
+          <img id="logoImg" alt="Логотип АЦ Лира" />
         </div>
-        <div class="title">
-          <h1>Спасибо, что выбираете Автоцентр ЛИРА</h1>
-          <p>Оставьте отзыв — это помогает нам держать высокий уровень сервиса.</p>
+
+        <div class="titleblock">
+          <h1 class="title">Оставьте отзыв об Автоцентре «Лира»</h1>
+          <p class="subtitle">Выберите площадку — Яндекс Карты или 2ГИС. Также можно подписаться на наш Telegram-канал.</p>
         </div>
+      </header>
+
+      <div class="content">
+        <section class="panel">
+          <h2 class="h">Куда оставить отзыв</h2>
+
+          <div class="buttons">
+            <button class="btn yandex" id="btnYandex" type="button">
+              <div class="left">
+                <div class="badge" aria-hidden="true">
+                  <!-- simple “Y” mark -->
+                  <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
+                    <path d="M8 3h3.2l2.4 5.2L16 3h3.2l-4.8 9v9H9.6v-9L8 3Z" fill="white" opacity=".95"/>
+                  </svg>
+                </div>
+                <div class="label">
+                  <b>Яндекс Карты</b>
+                  <span>Открыть страницу отзывов</span>
+                </div>
+              </div>
+              <span class="count" id="countYandex">…</span>
+            </button>
+
+            <button class="btn gis" id="btn2gis" type="button">
+              <div class="left">
+                <div class="badge" aria-hidden="true">
+                  <!-- map pin -->
+                  <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
+                    <path d="M12 22s7-5.4 7-12A7 7 0 1 0 5 10c0 6.6 7 12 7 12Z" fill="white" opacity=".92"/>
+                    <circle cx="12" cy="10" r="2.6" fill="#0B1F4A" opacity=".75"/>
+                  </svg>
+                </div>
+                <div class="label">
+                  <b>2ГИС</b>
+                  <span>Открыть страницу отзывов</span>
+                </div>
+              </div>
+              <span class="count" id="count2gis">…</span>
+            </button>
+
+            <button class="btn tg" id="btnTg" type="button">
+              <div class="left">
+                <div class="badge" aria-hidden="true">
+                  <!-- paper plane -->
+                  <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
+                    <path d="M21.8 4.6 3.3 11.8c-1 .4-1 .9-.2 1.2l4.7 1.5 1.8 5.3c.2.6.1.9.9.9.6 0 .9-.3 1.2-.6l2.3-2.2 4.8 3.5c.9.5 1.5.2 1.8-.9l3.1-14.6c.3-1.3-.5-1.9-1.9-1.3Z" fill="white" opacity=".93"/>
+                  </svg>
+                </div>
+                <div class="label">
+                  <b>Telegram @LIRA_NN</b>
+                  <span>Новости, акции, полезное</span>
+                </div>
+              </div>
+              <span class="count" id="countTg">…</span>
+            </button>
+          </div>
+
+          <p class="note">
+            Если кнопка не открылась — проверьте интернет или попробуйте ещё раз. Счётчик показывает количество переходов с этой страницы.
+          </p>
+        </section>
+
+        <aside class="panel stats">
+          <h2 class="h">Статистика переходов</h2>
+
+          <div class="statsGrid">
+            <div class="stat">
+              <span class="k">Всего переходов</span>
+              <span class="v" id="countTotal">…</span>
+            </div>
+            <div class="stat">
+              <span class="k">Яндекс Карты</span>
+              <span class="v" id="countYandex2">…</span>
+            </div>
+            <div class="stat">
+              <span class="k">2ГИС</span>
+              <span class="v" id="count2gis2">…</span>
+            </div>
+            <div class="stat">
+              <span class="k">Telegram</span>
+              <span class="v" id="countTg2">…</span>
+            </div>
+          </div>
+
+          <div style="height:10px"></div>
+
+          <div class="pill" title="Статус">
+            <span class="dot" aria-hidden="true"></span>
+            <span class="tiny">Страница работает на GitHub Pages</span>
+          </div>
+        </aside>
       </div>
 
-      <div class="grid">
-        <div class="btnRow">
-          <!-- Яндекс: ссылка из вашего QR -->
-          <a class="btn" href="https://ya.cc/t/x3sY-n3Q6gMx3d" target="_blank" rel="noopener">
-            <span>Оставить отзыв на Яндекс</span>
-            <span class="tag">Яндекс Карты</span>
-          </a>
-
-          <!-- 2ГИС: карточка компании (вкладка “Отзывы”) -->
-          <a class="btn" href="https://2gis.ru/n_novgorod/firm/70000001025710962/tab/reviews" target="_blank" rel="noopener">
-            <span>Оставить отзыв в 2ГИС</span>
-            <span class="tag">2ГИС</span>
-          </a>
-        </div>
-
-        <div class="note">
-          Вы можете оставить отзыв в <b>обоих</b> сервисах — мы внимательно читаем каждый и отвечаем.
-        </div>
-
-        <div class="footer">
-          <span>Подписывайтесь на наш Telegram:</span>
-          <a class="link" href="https://t.me/LIRA_NN" target="_blank" rel="noopener">t.me/LIRA_NN</a>
-        </div>
-      </div>
+      <footer class="footer">
+        <span class="tiny">Автоцентр «Лира»</span>
+        <span class="tiny">© <span id="year"></span></span>
+      </footer>
     </section>
   </main>
+
+  <script>
+    // ====== НАСТРОЙКИ (ссылки ты уже дал) ======
+    const LINKS = {
+      yandex: "https://yandex.ru/maps/org/lira/1014791361/reviews/?ll=43.889574%2C56.287187&tab=reviews&z=17",
+      gis:    "https://2gis.ru/n_novgorod/firm/2674540559836449/tab/reviews?m=43.889507%2C56.287218%2F16",
+      tg:     "https://t.me/LIRA_NN"
+    };
+
+    // логотип: положи logo.png рядом с index.html
+    const LOGO_SRC = "./logo.png";
+
+    // ====== СЧЁТЧИК (без настроек, через публичный CountAPI) ======
+    // Это даёт общий счётчик переходов для всех пользователей без сервера.
+    // Можно оставить как есть. Если сервис недоступен, будет локальный счётчик (в браузере).
+    const COUNT_NAMESPACE = "lira-nn-reviews";  // можешь поменять на любое уникальное
+    const KEYS = { total:"total", yandex:"yandex", gis:"2gis", tg:"telegram" };
+
+    const $ = (id)=>document.getElementById(id);
+
+    function localGet(key){
+      const k = "lira_local_" + key;
+      return Number(localStorage.getItem(k) || "0");
+    }
+    function localInc(key){
+      const k = "lira_local_" + key;
+      const v = localGet(key) + 1;
+      localStorage.setItem(k, String(v));
+      return v;
+    }
+
+    async function countGet(key){
+      // get value (creates if not exists)
+      const url = `https://api.countapi.xyz/get/${encodeURIComponent(COUNT_NAMESPACE)}/${encodeURIComponent(key)}`;
+      const r = await fetch(url, {cache:"no-store"});
+      if(!r.ok) throw new Error("countapi get failed");
+      const j = await r.json();
+      return Number(j.value || 0);
+    }
+
+    async function countInc(key){
+      const url = `https://api.countapi.xyz/hit/${encodeURIComponent(COUNT_NAMESPACE)}/${encodeURIComponent(key)}`;
+      const r = await fetch(url, {cache:"no-store"});
+      if(!r.ok) throw new Error("countapi hit failed");
+      const j = await r.json();
+      return Number(j.value || 0);
+    }
+
+    function setCountsUI({total,yandex,gis,tg}){
+      const fmt = (n)=> new Intl.NumberFormat("ru-RU").format(n);
+      $("countTotal").textContent = fmt(total);
+      $("countYandex").textContent = "Переходов: " + fmt(yandex);
+      $("count2gis").textContent   = "Переходов: " + fmt(gis);
+      $("countTg").textContent     = "Переходов: " + fmt(tg);
+
+      $("countYandex2").textContent = fmt(yandex);
+      $("count2gis2").textContent   = fmt(gis);
+      $("countTg2").textContent     = fmt(tg);
+    }
+
+    async function refreshCounts(){
+      // пробуем глобальные счётчики, если не вышло — локальные
+      try{
+        const [total,yandex,gis,tg] = await Promise.all([
+          countGet(KEYS.total),
+          countGet(KEYS.yandex),
+          countGet(KEYS.gis),
+          countGet(KEYS.tg),
+        ]);
+        setCountsUI({total,yandex,gis,tg});
+      }catch(e){
+        const yandex = localGet(KEYS.yandex);
+        const gis    = localGet(KEYS.gis);
+        const tg     = localGet(KEYS.tg);
+        const total  = localGet(KEYS.total);
+        setCountsUI({total,yandex,gis,tg});
+      }
+    }
+
+    async function trackAndGo(which, url){
+      // инкремент total + выбранный, затем редирект
+      try{
+        await Promise.all([
+          countInc(KEYS.total),
+          countInc(KEYS[which])
+        ]);
+      }catch(e){
+        localInc(KEYS.total);
+        localInc(KEYS[which]);
+      }finally{
+        // обновим цифры (не обязательно, но приятно)
+        refreshCounts();
+        // мягкий переход
+        setTimeout(()=>{ window.location.href = url; }, 120);
+      }
+    }
+
+    // ====== INIT ======
+    $("year").textContent = new Date().getFullYear();
+    $("logoImg").src = LOGO_SRC;
+
+    $("btnYandex").addEventListener("click", ()=> trackAndGo("yandex", LINKS.yandex));
+    $("btn2gis").addEventListener("click", ()=> trackAndGo("gis", LINKS.gis));
+    $("btnTg").addEventListener("click", ()=> trackAndGo("tg", LINKS.tg));
+
+    refreshCounts();
+  </script>
 </body>
 </html>
