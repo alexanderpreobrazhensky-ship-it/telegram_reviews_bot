@@ -1,5 +1,31 @@
 # LIRA client-bot (BotHost-safe, webhook-first)
 
+## Project status: client-bot only
+- This repository supports **only** the client bot service.
+- Reviews bot functionality was removed and is not supported.
+- Active entrypoints and runtime files:
+  - `index.js` (Node bootstrap for BotHost)
+  - `main.py` (Python entrypoint)
+  - `services/client_bot_service/` (client-bot backend)
+
+## CI
+GitHub Actions runs on:
+- `push` to `main`
+- `pull_request` to `main`
+
+Workflow commands:
+```bash
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+python -m unittest discover -s tests -p "test_*.py"
+```
+
+How to run the same checks locally:
+```bash
+pip install -r requirements.txt
+python -m unittest discover -s tests -p "test_*.py"
+```
+
 ## BotHost deploy
 - **Branch:** `main`
 - **Main file:** `index.js`
@@ -40,8 +66,3 @@
 ## BotFather
 Set Mini App URL to your **BotHost domain**:
 - `https://<bothost-domain>/WEBAPP`
-
-## Local checks
-```bash
-python -m unittest discover -s tests -p "test_*.py"
-```
