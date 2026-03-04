@@ -1,1 +1,228 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Автоцентр ЛИРА — оставить отзыв</title>
+  <meta name="description" content="Оставьте отзыв об Автоцентре ЛИРА на Яндекс Картах или 2ГИС" />
+  <style>
+    :root{
+      --bg1:#0b1324;
+      --bg2:#0a2a66;
+      --card:#0f172aee;
+      --text:#e8eefc;
+      --muted:#b8c6ee;
+      --accent:#2f7dff;
+      --accent2:#6a5cff;
+      --btn:#1b2a4d;
+      --border:rgba(255,255,255,.12);
+      --shadow: 0 18px 60px rgba(0,0,0,.45);
+    }
+    *{box-sizing:border-box}
+    body{
+      margin:0;
+      font-family: system-ui,-apple-system,Segoe UI,Roboto,Arial,"Noto Sans","Helvetica Neue",sans-serif;
+      color:var(--text);
+      min-height:100svh;
+      display:grid;
+      place-items:center;
+      padding:24px;
+      background:
+        radial-gradient(1200px 600px at 20% 10%, rgba(106,92,255,.35), transparent 60%),
+        radial-gradient(900px 500px at 90% 20%, rgba(47,125,255,.28), transparent 55%),
+        linear-gradient(160deg, var(--bg1), var(--bg2));
+      overflow:hidden;
+    }
+    /* subtle animated particles */
+    .glow{
+      position:fixed; inset:-40%;
+      background:
+        radial-gradient(circle at 30% 30%, rgba(47,125,255,.18), transparent 40%),
+        radial-gradient(circle at 70% 60%, rgba(106,92,255,.16), transparent 45%),
+        radial-gradient(circle at 40% 80%, rgba(255,255,255,.06), transparent 40%);
+      filter: blur(22px);
+      animation: float 10s ease-in-out infinite alternate;
+      pointer-events:none;
+    }
+    @keyframes float{
+      from{transform: translate3d(-10px,-10px,0) scale(1)}
+      to{transform: translate3d(10px,12px,0) scale(1.04)}
+    }
 
+    .wrap{
+      width:min(820px, 100%);
+      display:grid;
+      gap:16px;
+      justify-items:center;
+      z-index:1;
+    }
+
+    .card{
+      width:100%;
+      background: linear-gradient(180deg, rgba(255,255,255,.06), rgba(255,255,255,.03));
+      border:1px solid var(--border);
+      border-radius:22px;
+      box-shadow: var(--shadow);
+      padding:22px;
+      position:relative;
+      overflow:hidden;
+    }
+
+    .brand{
+      display:flex;
+      align-items:center;
+      gap:14px;
+    }
+    .logo{
+      width:64px; height:64px;
+      border-radius:16px;
+      background:#ffffff10;
+      border:1px solid var(--border);
+      overflow:hidden;
+      display:grid;
+      place-items:center;
+      flex:0 0 auto;
+    }
+    .logo img{
+      width:100%;
+      height:100%;
+      object-fit:cover;
+      display:block;
+    }
+    .title{
+      line-height:1.15;
+    }
+    .title h1{
+      margin:0;
+      font-size: clamp(22px, 3.2vw, 30px);
+      letter-spacing:.2px;
+    }
+    .title p{
+      margin:6px 0 0;
+      color:var(--muted);
+      font-size: 14.5px;
+    }
+
+    .grid{
+      margin-top:16px;
+      display:grid;
+      gap:14px;
+      grid-template-columns: 1fr;
+    }
+
+    .btnRow{
+      display:grid;
+      gap:12px;
+      grid-template-columns: repeat(2, minmax(0,1fr));
+    }
+    @media (max-width: 560px){
+      .btnRow{grid-template-columns: 1fr;}
+      .logo{width:58px;height:58px;border-radius:14px}
+    }
+
+    .btn{
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      gap:10px;
+      padding:14px 14px;
+      border-radius:16px;
+      border:1px solid var(--border);
+      background: linear-gradient(180deg, rgba(255,255,255,.05), rgba(255,255,255,.02));
+      color:var(--text);
+      text-decoration:none;
+      font-weight:700;
+      letter-spacing:.2px;
+      transition: transform .12s ease, border-color .12s ease, background .12s ease;
+      user-select:none;
+    }
+    .btn:hover{
+      transform: translateY(-1px);
+      border-color: rgba(255,255,255,.22);
+      background: linear-gradient(180deg, rgba(255,255,255,.08), rgba(255,255,255,.03));
+    }
+    .btn:active{transform: translateY(0)}
+    .btn .tag{
+      font-size:12px;
+      font-weight:700;
+      padding:4px 8px;
+      border-radius:999px;
+      background: rgba(47,125,255,.18);
+      border:1px solid rgba(47,125,255,.25);
+      color:#dbe8ff;
+    }
+
+    .note{
+      margin-top:8px;
+      color:var(--muted);
+      font-size:13px;
+      line-height:1.45;
+      padding:12px 14px;
+      border-radius:16px;
+      border:1px dashed rgba(255,255,255,.16);
+      background: rgba(0,0,0,.12);
+    }
+
+    .footer{
+      width:100%;
+      display:flex;
+      flex-wrap:wrap;
+      justify-content:space-between;
+      align-items:center;
+      gap:10px;
+      margin-top:10px;
+      color:var(--muted);
+      font-size:12.5px;
+    }
+    .link{
+      color:#dbe8ff;
+      text-decoration:none;
+      border-bottom:1px solid rgba(219,232,255,.25);
+    }
+    .link:hover{border-bottom-color: rgba(219,232,255,.55)}
+  </style>
+</head>
+<body>
+  <div class="glow"></div>
+
+  <main class="wrap">
+    <section class="card" aria-label="Оставить отзыв">
+      <div class="brand">
+        <!-- ВАЖНО: положите файл логотипа в репозиторий рядом с этим html и назовите его logo.png -->
+        <div class="logo" aria-label="Логотип Автоцентра ЛИРА">
+          <img src="logo.png" alt="Автоцентр ЛИРА">
+        </div>
+        <div class="title">
+          <h1>Спасибо, что выбираете Автоцентр ЛИРА</h1>
+          <p>Оставьте отзыв — это помогает нам держать высокий уровень сервиса.</p>
+        </div>
+      </div>
+
+      <div class="grid">
+        <div class="btnRow">
+          <!-- Яндекс: ссылка из вашего QR -->
+          <a class="btn" href="https://ya.cc/t/x3sY-n3Q6gMx3d" target="_blank" rel="noopener">
+            <span>Оставить отзыв на Яндекс</span>
+            <span class="tag">Яндекс Карты</span>
+          </a>
+
+          <!-- 2ГИС: карточка компании (вкладка “Отзывы”) -->
+          <a class="btn" href="https://2gis.ru/n_novgorod/firm/70000001025710962/tab/reviews" target="_blank" rel="noopener">
+            <span>Оставить отзыв в 2ГИС</span>
+            <span class="tag">2ГИС</span>
+          </a>
+        </div>
+
+        <div class="note">
+          Вы можете оставить отзыв в <b>обоих</b> сервисах — мы внимательно читаем каждый и отвечаем.
+        </div>
+
+        <div class="footer">
+          <span>Подписывайтесь на наш Telegram:</span>
+          <a class="link" href="https://t.me/LIRA_NN" target="_blank" rel="noopener">t.me/LIRA_NN</a>
+        </div>
+      </div>
+    </section>
+  </main>
+</body>
+</html>
