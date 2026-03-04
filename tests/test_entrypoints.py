@@ -2,7 +2,7 @@ from pathlib import Path
 import unittest
 
 
-class BotHostEntrypointTests(unittest.TestCase):
+class EntrypointTests(unittest.TestCase):
     def test_index_js_runs_python_main(self):
         content = Path("index.js").read_text(encoding="utf-8")
         self.assertIn("spawn('python'", content)
