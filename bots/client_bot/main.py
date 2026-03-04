@@ -9146,7 +9146,8 @@ def main() -> None:
     logger.info("port=%s", runtime.port)
     logger.info("base_url_source=%s", runtime.base_url_source)
     logger.info("token_source=%s", token_source)
-    logger.info("env_ignored_count=%s ignored_env_keys=%s", len(runtime.ignored_env_keys), runtime.ignored_env_keys)
+    logger.info("env_used_count=%s", runtime.env_used_count)
+    logger.info("env_ignored_count=%s", runtime.env_ignored_count)
     logger.info(
         "client_bot startup effective_bot=client mode=%s domain=%s webapp_url=%s port=%s token_source=%s",
         runtime.run_mode,
