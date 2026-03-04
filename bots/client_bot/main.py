@@ -20,6 +20,8 @@ from zoneinfo import ZoneInfo
 import requests
 from flask import Flask, jsonify, redirect, request, send_from_directory
 
+from services.client_bot_service.app.config import load_runtime_config
+
 PSYCOPG_AVAILABLE = True
 try:
     import psycopg
@@ -3422,6 +3424,7 @@ def register_webapp_routes(app: Flask, token: str, logger: logging.Logger) -> Fl
         return _send_webapp_file(filename)
 
     @app.get("/health")
+    @app.get("/service-health")
     def service_health() -> object:
         return jsonify({"status": "ok", "service": "client-bot", "mode": RUN_MODE or "polling"})
 
@@ -9081,18 +9084,14 @@ def poll_updates(token: str, logger: logging.Logger) -> None:
 
 
 def get_client_token() -> tuple[str, str] | None:
-    allow_fallback = (os.getenv("ALLOW_TOKEN_FALLBACK") or "0").strip() == "1"
-    candidates = [("CLIENT_TELEGRAM_BOT_TOKEN", os.getenv("CLIENT_TELEGRAM_BOT_TOKEN"))]
-    if allow_fallback:
-        candidates.extend(
-            [
-                ("TELEGRAM_BOT_TOKEN", os.getenv("TELEGRAM_BOT_TOKEN")),
-                ("BOT_API_TOKEN", os.getenv("BOT_API_TOKEN")),
-                ("API_TOKEN", os.getenv("API_TOKEN")),
-                ("BOT_TOKEN", os.getenv("BOT_TOKEN")),
-                ("TOKEN", os.getenv("TOKEN")),
-            ]
-        )
+    candidates = [
+        ("CLIENT_TELEGRAM_BOT_TOKEN", os.getenv("CLIENT_TELEGRAM_BOT_TOKEN")),
+        ("TELEGRAM_BOT_TOKEN", os.getenv("TELEGRAM_BOT_TOKEN")),
+        ("BOT_API_TOKEN", os.getenv("BOT_API_TOKEN")),
+        ("API_TOKEN", os.getenv("API_TOKEN")),
+        ("BOT_TOKEN", os.getenv("BOT_TOKEN")),
+        ("TOKEN", os.getenv("TOKEN")),
+    ]
     for source, raw in candidates:
         token = (raw or "").strip()
         if token:
@@ -9133,20 +9132,27 @@ def delete_webhook(
 
 
 def main() -> None:
+    global RUN_MODE
     timezone = os.getenv("TIMEZONE", "Europe/Moscow")
     logger = build_logger(timezone)
     logger.info("[client_bot] openpyxl available: %s", is_openpyxl_available())
-    token_info = get_client_token()
-    if not token_info:
-        raise RuntimeError("Client bot token is required: set CLIENT_TELEGRAM_BOT_TOKEN (fallbacks TELEGRAM_BOT_TOKEN/BOT_API_TOKEN/API_TOKEN/BOT_TOKEN/TOKEN require ALLOW_TOKEN_FALLBACK=1)")
-    token, token_source = token_info
+    runtime = load_runtime_config()
+    RUN_MODE = runtime.run_mode
+    token = runtime.token
+    token_source = runtime.token_source
     configure_telegram(token)
+    logger.info("effective_bot=client")
+    logger.info("mode=%s", runtime.run_mode)
+    logger.info("port=%s", runtime.port)
+    logger.info("base_url_source=%s", runtime.base_url_source)
+    logger.info("token_source=%s", token_source)
+    logger.info("env_ignored_count=%s ignored_env_keys=%s", len(runtime.ignored_env_keys), runtime.ignored_env_keys)
     logger.info(
         "client_bot startup effective_bot=client mode=%s domain=%s webapp_url=%s port=%s token_source=%s",
-        RUN_MODE,
+        runtime.run_mode,
         DOMAIN or "-",
         resolve_webapp_public_url() or "-",
-        os.getenv("PORT") or os.getenv("CLIENT_SERVICE_PORT") or "8000",
+        runtime.port,
         token_source,
     )
     db_init_settings()
@@ -9231,7 +9237,7 @@ def main() -> None:
         ok, message = ensure_channel_pin(storage, timezone, logger, force_new=False)
         logger.info("auto pin on start: %s", message)
 
-    if RUN_MODE == "webhook":
+    if runtime.run_mode == "webhook":
         webhook_url, webhook_source = resolve_webhook_url()
         logger.info("mode=webhook")
         logger.info("webhook_base_source=%s", webhook_source)
@@ -9241,6 +9247,9 @@ def main() -> None:
             set_webhook(token, logger, webhook_url)
             logger.info("setWebhook ok")
             logger.info("webhook ready url=%s", mask_webhook_url(webhook_url))
+            app = create_flask_app(token, logger)
+            logger.info("http server started host=%s port=%s", runtime.host, runtime.port)
+            app.run(host=runtime.host, port=runtime.port)
             return
         logger.warning("webhook mode requested but WEBHOOK_URL/PUBLIC_BASE_URL/DOMAIN is missing or invalid; fallback to polling")
 
@@ -9254,7 +9263,7 @@ def start_polling_background() -> threading.Thread | None:
     global RUN_MODE
     token_info = get_client_token()
     if not token_info:
-        raise RuntimeError("Client bot token is required: set CLIENT_TELEGRAM_BOT_TOKEN (fallbacks TELEGRAM_BOT_TOKEN/BOT_API_TOKEN/API_TOKEN/BOT_TOKEN/TOKEN require ALLOW_TOKEN_FALLBACK=1)")
+        raise RuntimeError("Client bot token is required: set one of CLIENT_TELEGRAM_BOT_TOKEN/TELEGRAM_BOT_TOKEN/BOT_API_TOKEN/API_TOKEN/BOT_TOKEN/TOKEN")
     RUN_MODE = "polling"
     thread = threading.Thread(target=main, name="client_bot_polling", daemon=True)
     thread.start()
