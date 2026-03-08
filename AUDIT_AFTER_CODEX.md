@@ -1,27 +1,37 @@
 # AUDIT_AFTER_CODEX
 
-## Что изменено
-- Синхронизирован production-контракт в документации: `main` как production branch, Python + Dockerfile + `main.py` как единый путь запуска.
-- Обновлён `bots/client_bot/README.md` и устранён drift с корневым `README.md`.
-- Обновлены аудит-файлы `audit/MASTER_AUDIT_FOR_EXTERNAL_AI.md`, `audit/MASTER_AUDIT_FOR_EXTERNAL_AI.json`, `audit/REPO_MANIFEST.txt`.
-- Добавлен тест fail-fast кейса: webhook-mode без `BOT_PATH_SECRET` должен падать с явной ошибкой.
+## Выполнено
+1. Выполнена синхронизация `work -> main`: создана/зафиксирована production-ветка `main` и подтверждено, что состояние `work` полностью влито (`Already up to date`).
+2. `main` закреплена как единственная production-ветка для деплоя.
+3. Повторно проверен и зафиксирован production-контракт:
+   - runtime: Python
+   - deploy path: Dockerfile-first
+   - entrypoint: `main.py`
+   - default mode: webhook-first
+4. Полностью обновлены audit-артефакты под финальное состояние `main`.
 
-## Какие риски устранены
-- Противоречие README vs service README по polling/webhook.
-- Неоднозначность production-контракта запуска.
-- Недостаточная тестовая фиксация webhook prerequisite `BOT_PATH_SECRET`.
+## Изменённые/затронутые файлы
+- `README.md`
+- `AUDIT_AFTER_CODEX.md`
+- `audit/MASTER_AUDIT_FOR_EXTERNAL_AI.md`
+- `audit/MASTER_AUDIT_FOR_EXTERNAL_AI.json`
+- `audit/REPO_MANIFEST.txt`
 
-## Production-контракт (итог)
-- Branch для деплоя: `main`.
-- Runtime: Python.
-- Deploy path: Dockerfile-first.
-- Entrypoint: `main.py`.
-- Default mode: webhook-first с fallback в polling при невалидном/пустом base URL.
+## Проверки
+- `python -m unittest discover -s tests -p "test_*.py"`
+- Проверка контрактных артефактов вручную:
+  - `Dockerfile` (`CMD ["python", "main.py"]`)
+  - root `main.py`
+  - compatibility-only `index.js`
+  - `.bothost/entrypoint.conf`
+  - `.github/workflows/tests.yml`
 
-## Выполненные проверки
-- Unit tests: `python -m unittest discover -s tests -p "test_*.py"`.
-- Точечные проверки: entrypoint contract, webhook URL builder, runtime behavior, static/health routes.
+## Remaining risks
+- Широкая поверхность env-алиасов усложняет эксплуатацию и диагностику.
+- Fallback webhook -> polling может скрыть неверную base URL конфигурацию.
+- Наличие compatibility-entrypoints (`index.js`, `.bothost/entrypoint.conf`) требует строгого следования README.
 
-## Ограничения / known limitations
-- Текущая рабочая ветка в локальном репо — `work`; для фактического прод-деплоя нужно держать `main` синхронизированной с этим состоянием.
-- Локальный smoke-run с реальным Telegram webhook не выполнялся без внешнего публичного домена/токена.
+## Итог
+- Аудит после merge пересобран.
+- `main` является production branch.
+- Репозиторий готов к BotHost deploy по Dockerfile-first пути.

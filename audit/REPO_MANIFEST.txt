@@ -1,4 +1,4 @@
-# manifest_generated_for_branch=work production_branch=main
+# manifest_generated_for_branch=main production_branch=main
 .bothost/entrypoint.conf
 .github/workflows/tests.yml
 .gitignore
@@ -16,7 +16,6 @@ bots/client_bot/README.md
 bots/client_bot/__init__.py
 bots/client_bot/config/dictionary_rules.json
 bots/client_bot/config/example.env
-bots/client_bot/logs/.gitkeep
 bots/client_bot/main.py
 bots/client_bot/requirements.txt
 bots/client_bot/services/__init__.py
@@ -25,7 +24,6 @@ bots/client_bot/services/dictionary_rules.py
 bots/client_bot/services/outgoing_queue.py
 bots/client_bot/services/telegram_api.py
 bots/client_bot/storage.py
-bots/client_bot/webapp/assets/.gitkeep
 bots/client_bot/webapp/assets/webapp.bundle.css
 bots/client_bot/webapp/assets/webapp.bundle.js
 bots/client_bot/webapp/config.json

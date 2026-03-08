@@ -1,10 +1,12 @@
 {
-  "meta": {
-    "title": "MASTER AUDIT FOR EXTERNAL AI",
-    "working_branch": "work",
-    "production_branch": "main",
-    "generated_scope": "post-stabilization production contract audit"
+  "audit_version": 2,
+  "snapshot": {
+    "branch": "main",
+    "snapshot_commit": "175d2e0",
+    "manifest": "audit/REPO_MANIFEST.txt"
   },
+  "production_branch": "main",
+  "working_branch": "main",
   "production_contract": {
     "runtime": "python",
     "deploy_path": "dockerfile-first",
@@ -51,9 +53,9 @@
     "/app.css"
   ],
   "risks_remaining": [
-    "working branch is work; production requires sync to main",
     "wide env alias surface increases maintenance complexity",
-    "webhook fallback may hide base-url misconfiguration"
+    "webhook fallback may hide base-url misconfiguration",
+    "compatibility-only entrypoints may confuse deployment operators"
   ],
   "bothost_recommendations": {
     "branch": "main",
