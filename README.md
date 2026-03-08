@@ -11,7 +11,8 @@
 1. Repository branch: `main`.
 2. Enable **Use custom Dockerfile**.
 3. Build and run from root `Dockerfile`.
-4. Do not use Node entrypoint as primary production path.
+4. If BotHost requires “Main file”, set `main.py` (compatibility hint only; real runtime is Dockerfile).
+5. Do not use Node entrypoint as primary production path.
 
 `.bothost/entrypoint.conf` is kept only for compatibility and points to `main.py`, but production should run via Dockerfile.
 
