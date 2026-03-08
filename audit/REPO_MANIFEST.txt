@@ -1,3 +1,4 @@
+# manifest_generated_for_branch=work production_branch=main
 .bothost/entrypoint.conf
 .github/workflows/tests.yml
 .gitignore

@@ -1,90 +1,40 @@
 # client_bot
 
-`client_bot` — клиентский Telegram-бот автосервиса «Автоцентр Лира». Общается по-русски, вежливо и без лишних эмодзи, помогает оформить обращение и передать его мастерам. В BotHost-режиме бот работает через **polling** и при старте делает `deleteWebhook`, чтобы исключить конфликты с webhook.
+`client_bot` — клиентский Telegram-бот автосервиса «Автоцентр Лира».
 
-## Возможности
+## Production contract (единый)
+- Production branch: `main`.
+- Production runtime: **Python**.
+- Production deploy path: **Dockerfile-first**.
+- Entrypoint: корневой `main.py` (цепочка `main.py` → `services/client_bot_service/app/main.py` → `bots/client_bot/main.py`).
+- Режим по умолчанию: `webhook`.
+- `index.js` сохранён только как compatibility/legacy wrapper и не является production-путём.
 
-- Диалоги по сценариям: запись, ремонт, запчасти, прошлый визит, другое.
-- Передача заявок мастерам, статусы, напоминания, обработка медиа (клиенту вложения запрещены, мастерам передаются).
-- AI (DeepSeek) с автоfallback и safeguard: без цен, сроков, наличия, выдумок.
-- Админ-меню: самодиагностика, заявки, выгрузка, статистика, логи, админы, настройки.
+## Минимальный env для первого запуска
+### Webhook-first (рекомендуется)
+- `CLIENT_TELEGRAM_BOT_TOKEN` (или alias токена)
+- `BOT_PATH_SECRET`
+- один из: `WEBHOOK_URL` / `PUBLIC_BASE_URL` / `DOMAIN`
 
-## Разделение сервисов и переменных
+### Polling (fallback/forced)
+- `CLIENT_TELEGRAM_BOT_TOKEN`
+- `CLIENT_BOT_MODE=polling`
 
-`client_bot` остаётся основным сервисом в репозитории. Для изоляции настроек используются переменные окружения с префиксом `CLIENT_`.
+## Поддерживаемые alias-группы
+- Token: `CLIENT_TELEGRAM_BOT_TOKEN`, `TELEGRAM_BOT_TOKEN`, `BOT_API_TOKEN`, `API_TOKEN`, `BOT_TOKEN`, `TOKEN`
+- Mode: `CLIENT_BOT_MODE`, `CLIENT_RUN_MODE`, `RUN_MODE`
+- Port: `PORT`, `CLIENT_SERVICE_PORT`
+- Base URL: `WEBHOOK_URL`, `PUBLIC_BASE_URL`, `DOMAIN`
+- WebApp URL/path: `CLIENT_WEBAPP_URL`, `WEBAPP_URL`, `WEBAPP_PATH`
+- WebApp enabled: `CLIENT_WEBAPP_ENABLED`, `WEBAPP_ENABLED`
+- Masters: `CLIENT_MASTERS_CHAT_ID`, `CLIENT_CHAT_ID`, `CLIENT_MASTER_CHAT_ID`, `CLIENT_MASTER_USER_IDS`, `CLIENT_MASTER_IDS`
 
-- `client_bot` читает `CLIENT_TELEGRAM_BOT_TOKEN` как основной токен.
-- Режим работы задаётся через `CLIENT_BOT_MODE` (`polling` или `webhook`).
-- URL WebApp и webhook задаются только через env-переменные.
+## Проверки после деплоя
+- `GET /health`
+- `GET /service-health`
+- `GET /WEBAPP`
+- `getWebhookInfo` через Telegram Bot API
 
-## Переменные окружения
-
-### Токен и таймзона
-
-- `CLIENT_TELEGRAM_BOT_TOKEN` — токен BotFather для клиентского бота (основной).
-- `TELEGRAM_BOT_TOKEN_CLIENT` — fallback токена, если основной не задан.
-- `TIMEZONE` — часовой пояс, по умолчанию `Europe/Moscow`.
-
-### Мастера
-
-- `MASTER_USERNAMES` — список Telegram-юзернеймов мастеров через запятую (обязательно, используется в UI).
-- `CLIENT_MASTER_CHAT_IDS` — опционально, список chat_id мастеров (для диагностики количества).
-- `MASTER_CHAT_IDS` — в `client_bot` не используется; не требуется.
-
-### AI (DeepSeek)
-
-- `CLIENT_DEEPSEEK_API_KEY` (fallback: `DEEPSEEK_API_KEY`).
-- `CLIENT_DEEPSEEK_BASE_URL` (fallback: `DEEPSEEK_BASE_URL`).
-- `CLIENT_DEEPSEEK_MODEL` (fallback: `DEEPSEEK_MODEL`).
-- `CLIENT_AI_TIMEOUT_SECONDS` (fallback: `AI_TIMEOUT_SECONDS`, по умолчанию `10`).
-- `CLIENT_FORCE_FALLBACK` (fallback: `FORCE_FALLBACK`, `1` — всегда fallback).
-
-### Админ
-
-- `CLIENT_ADMIN_IDS` — список tg_id администраторов через запятую.
-
-### Напоминания
-
-- `CLIENT_REMINDER_MINUTES` (fallback: `REMINDER_MINUTES`, по умолчанию `30`).
-  Для теста можно поставить `CLIENT_REMINDER_MINUTES=1`.
-
-### Storage и логи
-
-- Storage: `bots/client_bot/storage.json`.
-- Логи: `bots/client_bot/logs/client_bot.log` (префиксы `[client_bot]`, `[ai]`, `[polling]`, `[admin]`, `[storage]`).
-
-### WebApp (Mini App)
-
-- `WEBAPP_URL` — публичный URL на `/webapp`, используется для кнопки «✨ Открыть меню (WebApp)`.
-- `LIRA_PHONE` — телефон для кнопки «Позвонить» (опционально).
-- `LIRA_ADDRESS` — адрес, по умолчанию `Удмуртская 10`.
-- `LIRA_MAP_URL` — ссылка на карту (опционально; если не задана, строится по адресу).
-- `CLIENT_WEBAPP_PORT` — порт для локальной раздачи WebApp (опционально, если `PORT` не задан).
-
-## Локальный запуск
-
-```bash
-cd /workspace/<repo>/bots/client_bot
-python main.py
-```
-
-Перед запуском задайте переменные окружения (минимум `CLIENT_TELEGRAM_BOT_TOKEN`, `MASTER_USERNAMES`, `CLIENT_ADMIN_IDS`).
-
-## Типовые проблемы и решения
-
-- **409 Conflict (webhook vs polling)**
-  `client_bot` сам вызывает `deleteWebhook` при старте и при 409. Проверьте логи `[polling]`.
-
-- **Мастер не получает сообщения**
-  Мастер должен **написать боту первым**. Убедитесь в корректности `MASTER_USERNAMES` или `CLIENT_MASTER_CHAT_IDS`.
-
-- **400 Bad Request (reply_markup)**
-  Обычно связано с некорректной клавиатурой. Ищите подробности в `client_bot.log` по префиксу `[client_bot]`.
-
-- **AI упал → автоfallback**
-  Если DeepSeek недоступен, бот автоматически переключится на fallback. Проверка: установите `CLIENT_FORCE_FALLBACK=1`.
-
-## Безопасность
-
-- Не храните токены и ключи в репозитории.
-- Не логируйте секреты (токены/ключи) вручную.
+## Важно
+- BotFather Main App/Menu Button влияет только на открытие WebApp.
+- BotFather не определяет runtime и не заменяет Dockerfile + `main.py` контракт.

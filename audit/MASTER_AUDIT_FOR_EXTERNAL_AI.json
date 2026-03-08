@@ -1,147 +1,68 @@
 {
   "meta": {
     "title": "MASTER AUDIT FOR EXTERNAL AI",
-    "branch": "work",
-    "commit": "fa6d084739097b1b146faeec7b331604fdb66724",
-    "generated_scope": "full repository audit without runtime code changes"
+    "working_branch": "work",
+    "production_branch": "main",
+    "generated_scope": "post-stabilization production contract audit"
   },
-  "repo_snapshot": {
-    "key_paths": [
+  "production_contract": {
+    "runtime": "python",
+    "deploy_path": "dockerfile-first",
+    "entrypoint": "main.py",
+    "default_mode": "webhook",
+    "runtime_chain": [
       "main.py",
       "services/client_bot_service/app/main.py",
-      "services/client_bot_service/app/config.py",
-      "bots/client_bot/main.py",
-      "bots/client_bot/services",
-      "bots/client_bot/storage.py",
-      "shared/clients_registry.py",
-      "bots/client_bot/webapp",
-      "Dockerfile",
-      "index.js",
-      ".bothost/entrypoint.conf",
-      ".github/workflows/tests.yml"
+      "bots/client_bot/main.py"
     ],
-    "manifest_file": "audit/REPO_MANIFEST.txt"
-  },
-  "entrypoints": [
-    {"path": "main.py", "type": "python", "role": "primary"},
-    {"path": "services/client_bot_service/app/main.py", "type": "python", "role": "shim"},
-    {"path": "bots/client_bot/main.py", "type": "python", "role": "runtime_core"},
-    {"path": "index.js", "type": "node", "role": "compat_wrapper"},
-    {"path": "Dockerfile", "type": "docker", "role": "container_entry", "cmd": "python main.py"},
-    {"path": ".bothost/entrypoint.conf", "type": "platform_config", "role": "bothost_entry", "main_file": "main.py"}
-  ],
-  "runtime_model": {
-    "python": "primary",
-    "node": "wrapper_only",
-    "docker": "python:3.11-slim + pip install + python main.py",
-    "mode_default": "webhook",
-    "webhook_fallback": "fallback to polling if base URL invalid/missing",
-    "ambiguities": [
-      "node wrapper may be autodetected by some platforms",
-      "docs differ between root README and bots/client_bot/README"
+    "compatibility_only": [
+      "index.js",
+      ".bothost/entrypoint.conf"
     ]
   },
-  "env": [
-    {"name": "CLIENT_TELEGRAM_BOT_TOKEN", "required": "required", "default": null, "type": "secret", "aliases": ["TELEGRAM_BOT_TOKEN", "BOT_API_TOKEN", "API_TOKEN", "BOT_TOKEN", "TOKEN"], "status": "runtime_used", "used_in": ["services/client_bot_service/app/config.py:5-12", "services/client_bot_service/app/config.py:65-69", "bots/client_bot/main.py:9088-9093"], "purpose": "telegram token"},
-    {"name": "CLIENT_BOT_MODE", "required": "optional", "default": "webhook", "type": "string", "aliases": ["CLIENT_RUN_MODE", "RUN_MODE"], "status": "runtime_used", "used_in": ["services/client_bot_service/app/config.py:14", "bots/client_bot/main.py:259-264"], "purpose": "run mode"},
-    {"name": "PORT", "required": "optional", "default": "8000", "type": "int", "aliases": ["CLIENT_SERVICE_PORT"], "status": "runtime_used", "used_in": ["services/client_bot_service/app/config.py:15", "services/client_bot_service/app/config.py:75-77"], "purpose": "http port"},
-    {"name": "CLIENT_SERVICE_HOST", "required": "optional", "default": "0.0.0.0", "type": "string", "aliases": [], "status": "runtime_used", "used_in": ["services/client_bot_service/app/config.py:71-74"], "purpose": "bind host"},
-    {"name": "WEBHOOK_URL", "required": "conditional", "default": null, "type": "url", "aliases": ["PUBLIC_BASE_URL", "DOMAIN"], "status": "runtime_used", "used_in": ["services/client_bot_service/app/config.py:16", "bots/client_bot/main.py:653-678"], "purpose": "webhook base"},
-    {"name": "PUBLIC_BASE_URL", "required": "conditional", "default": null, "type": "url", "aliases": ["WEBHOOK_URL", "DOMAIN"], "status": "runtime_used", "used_in": ["services/client_bot_service/app/config.py:16", "bots/client_bot/main.py:656-678"], "purpose": "webhook base fallback"},
-    {"name": "DOMAIN", "required": "conditional", "default": null, "type": "url", "aliases": ["WEBHOOK_URL", "PUBLIC_BASE_URL"], "status": "runtime_used", "used_in": ["services/client_bot_service/app/config.py:16", "services/client_bot_service/app/config.py:84-90", "bots/client_bot/main.py:285", "bots/client_bot/main.py:659-678"], "purpose": "base domain fallback"},
-    {"name": "BOT_PATH_SECRET", "required": "conditional", "default": null, "type": "secret", "aliases": [], "status": "runtime_used", "used_in": ["bots/client_bot/main.py:666", "bots/client_bot/main.py:3278", "bots/client_bot/main.py:3533", "bots/client_bot/main.py:9104"], "purpose": "webhook path secret and session fallback"},
-    {"name": "CLIENT_WEBAPP_URL", "required": "optional", "default": null, "type": "url", "aliases": ["WEBAPP_URL"], "status": "runtime_used", "used_in": ["services/client_bot_service/app/config.py:17", "bots/client_bot/main.py:300", "bots/client_bot/main.py:695", "bots/client_bot/main.py:9163"], "purpose": "public webapp URL"},
-    {"name": "WEBAPP_PATH", "required": "optional", "default": "/WEBAPP", "type": "path", "aliases": [], "status": "runtime_used", "used_in": ["services/client_bot_service/app/config.py:18", "bots/client_bot/main.py:286", "bots/client_bot/main.py:310-312"], "purpose": "webapp route base"},
-    {"name": "CLIENT_WEBAPP_ENABLED", "required": "optional", "default": "1", "type": "bool", "aliases": ["WEBAPP_ENABLED"], "status": "runtime_used", "used_in": ["bots/client_bot/main.py:287-292"], "purpose": "enable webapp routes"},
-    {"name": "CLIENT_WEBAPP_INITDATA_MAX_AGE_SECONDS", "required": "optional", "default": "86400", "type": "int", "aliases": [], "status": "runtime_used", "used_in": ["bots/client_bot/main.py:299", "bots/client_bot/main.py:3468-3479"], "purpose": "initData ttl"},
-    {"name": "CLIENT_WEBAPP_SESSION_SECRET", "required": "optional", "default": "BOT_PATH_SECRET", "type": "secret", "aliases": ["BOT_PATH_SECRET"], "status": "runtime_used", "used_in": ["bots/client_bot/main.py:3278"], "purpose": "session signature secret"},
-    {"name": "TIMEZONE", "required": "optional", "default": "Europe/Moscow", "type": "string", "aliases": [], "status": "runtime_used", "used_in": ["bots/client_bot/main.py", "bots/client_bot/storage.py"], "purpose": "timezone"},
-    {"name": "DATABASE_URL", "required": "optional", "default": null, "type": "url", "aliases": ["POSTGRES_URL", "POSTGRESQL_URL"], "status": "runtime_used", "used_in": ["bots/client_bot/main.py:346-355"], "purpose": "database url"},
-    {"name": "CLIENTS_REGISTRY_PATH", "required": "optional", "default": "<repo>/clients.jsonl", "type": "path", "aliases": [], "status": "runtime_used", "used_in": ["bots/client_bot/main.py:320", "shared/clients_registry.py:23"], "purpose": "client registry path"},
-    {"name": "CLIENT_GITHUB_TOKEN", "required": "optional", "default": null, "type": "secret", "aliases": ["GITHUB_TOKEN"], "status": "runtime_used", "used_in": ["bots/client_bot/main.py:4699", "bots/client_bot/storage.py:59"], "purpose": "github sync token"},
-    {"name": "CLIENT_GITHUB_REPO", "required": "optional", "default": null, "type": "string", "aliases": ["GITHUB_REPO"], "status": "runtime_used", "used_in": ["bots/client_bot/main.py:4700", "bots/client_bot/storage.py:60"], "purpose": "github target repo"},
-    {"name": "CLIENT_GITHUB_BRANCH", "required": "optional", "default": "main", "type": "string", "aliases": ["GITHUB_BRANCH"], "status": "runtime_used", "used_in": ["bots/client_bot/storage.py:61"], "purpose": "github branch"},
-    {"name": "CLIENT_TG_TIMEOUT_SECONDS", "required": "optional", "default": "30", "type": "int", "aliases": [], "status": "runtime_used", "used_in": ["bots/client_bot/services/telegram_api.py:25"], "purpose": "telegram timeout"},
-    {"name": "CLIENT_TG_RETRY_MAX", "required": "optional", "default": "3", "type": "int", "aliases": [], "status": "runtime_used", "used_in": ["bots/client_bot/services/telegram_api.py:32"], "purpose": "telegram retry count"},
-    {"name": "CLIENT_TG_RETRY_BASE_SLEEP_SECONDS", "required": "optional", "default": "1.0", "type": "float", "aliases": [], "status": "runtime_used", "used_in": ["bots/client_bot/services/telegram_api.py:39"], "purpose": "telegram retry backoff"},
-    {"name": "CLIENT_TG_QUEUE_ENABLED", "required": "optional", "default": "1", "type": "bool", "aliases": [], "status": "runtime_used", "used_in": ["bots/client_bot/services/outgoing_queue.py:70"], "purpose": "queue enable/disable"},
-    {"name": "CLIENT_DEEPSEEK_API_KEY", "required": "optional", "default": null, "type": "secret", "aliases": ["DEEPSEEK_API_KEY"], "status": "runtime_used", "used_in": ["bots/client_bot/services/ai_service.py:54"], "purpose": "ai key", "notes": "docs mention fallback not implemented in code"},
-    {"name": "CLIENT_DEEPSEEK_BASE_URL", "required": "optional", "default": null, "type": "url", "aliases": ["DEEPSEEK_BASE_URL"], "status": "runtime_used", "used_in": ["bots/client_bot/services/ai_service.py:55"], "purpose": "ai base url", "notes": "docs mention fallback not implemented in code"},
-    {"name": "CLIENT_DEEPSEEK_MODEL", "required": "optional", "default": null, "type": "string", "aliases": ["DEEPSEEK_MODEL"], "status": "runtime_used", "used_in": ["bots/client_bot/services/ai_service.py:56"], "purpose": "ai model", "notes": "docs mention fallback not implemented in code"},
-    {"name": "CLIENT_AI_TIMEOUT_SECONDS", "required": "optional", "default": "10", "type": "int", "aliases": ["AI_TIMEOUT_SECONDS"], "status": "runtime_used", "used_in": ["bots/client_bot/services/ai_service.py:82-88"], "purpose": "ai timeout", "notes": "docs mention fallback not implemented in code"},
-    {"name": "CLIENT_FORCE_FALLBACK", "required": "optional", "default": "0", "type": "bool", "aliases": ["FORCE_FALLBACK"], "status": "runtime_used", "used_in": ["bots/client_bot/services/ai_service.py:58-60"], "purpose": "force ai fallback"},
-    {"name": "MASTER_USERNAMES", "required": "optional", "default": null, "type": "list", "aliases": [], "status": "runtime_used", "used_in": ["bots/client_bot/main.py:1086", "bots/client_bot/main.py:1100"], "purpose": "masters mapping"},
-    {"name": "CLIENT_ADMIN_IDS", "required": "optional", "default": null, "type": "list", "aliases": [], "status": "runtime_used", "used_in": ["bots/client_bot/main.py:1506"], "purpose": "admin ids"},
-    {"name": "CLIENT_REMINDER_MINUTES", "required": "optional", "default": "30", "type": "int", "aliases": ["REMINDER_MINUTES"], "status": "documented_only", "used_in": ["bots/client_bot/README.md:48-49", "bots/client_bot/config/example.env:16"], "purpose": "reminder interval (docs)"},
-    {"name": "TELEGRAM_BOT_TOKEN_CLIENT", "required": "optional", "default": null, "type": "secret", "aliases": ["CLIENT_TELEGRAM_BOT_TOKEN"], "status": "documented_only", "used_in": ["bots/client_bot/config/example.env:23"], "purpose": "docs-only token fallback"},
-    {"name": "CLIENT_MASTER_CHAT_IDS", "required": "optional", "default": null, "type": "list", "aliases": [], "status": "documented_only", "used_in": ["bots/client_bot/README.md:31", "bots/client_bot/config/example.env:20"], "purpose": "docs-only master chat ids"}
-  ],
-  "routes": [
-    {"method": "GET", "path": "/", "purpose": "root liveness", "declared_in": "bots/client_bot/main.py:3548-3551"},
-    {"method": "POST", "path": "/webhook/<path_secret>", "purpose": "telegram webhook", "declared_in": "bots/client_bot/main.py:3530-3542"},
-    {"method": "GET", "path": "/health", "purpose": "health", "declared_in": "bots/client_bot/main.py:3426-3429"},
-    {"method": "GET", "path": "/service-health", "purpose": "health alias", "declared_in": "bots/client_bot/main.py:3427-3429"},
-    {"method": "GET", "path": "/api/webapp/health", "purpose": "webapp health", "declared_in": "bots/client_bot/main.py:3431-3442"},
-    {"method": "GET", "path": "/api/webapp/lookup", "purpose": "lookup API", "declared_in": "bots/client_bot/main.py:3444-3456"},
-    {"method": "POST", "path": "/api/webapp/session", "purpose": "session token", "declared_in": "bots/client_bot/main.py:3458-3480"},
-    {"method": "POST", "path": "/api/webapp/submit", "purpose": "webapp submit", "declared_in": "bots/client_bot/main.py:3482-3528"},
-    {"method": "GET", "path": "/WEBAPP, /WEBAPP/", "purpose": "webapp index", "declared_in": "bots/client_bot/main.py:3371-3376"},
-    {"method": "GET", "path": "/assets/webapp.bundle.css, /webapp.css, /app.css", "purpose": "css static", "declared_in": "bots/client_bot/main.py:3378-3384"},
-    {"method": "GET", "path": "/assets/webapp.bundle.js, /webapp.js, /app.js", "purpose": "js static", "declared_in": "bots/client_bot/main.py:3386-3392"},
-    {"method": "GET", "path": "/webapp, /webapp/", "purpose": "alias/redirect", "declared_in": "bots/client_bot/main.py:3398-3405"},
-    {"method": "GET", "path": "${WEBAPP_PATH}, ${WEBAPP_PATH}/", "purpose": "dynamic webapp index", "declared_in": "bots/client_bot/main.py:3407-3412"},
-    {"method": "GET", "path": "${WEBAPP_PATH}/config.json", "purpose": "dynamic config", "declared_in": "bots/client_bot/main.py:3414-3418"},
-    {"method": "GET", "path": "${WEBAPP_PATH}/<path:filename>", "purpose": "dynamic static passthrough", "declared_in": "bots/client_bot/main.py:3420-3424"}
-  ],
-  "dependencies": {
-    "python": {
-      "requirements_root": ["requests==2.32.3", "openai==1.54.3", "openpyxl>=3.1", "Pillow>=10.4.0", "Flask==3.0.3", "psycopg[binary]==3.2.3"],
-      "requirements_bots_client_bot": "identical to root requirements",
-      "critical_for_boot": ["Flask", "requests"]
-    },
-    "node": {
-      "package_json": "absent",
-      "usage": "index.js wrapper only"
-    }
+  "webhook": {
+    "base_url_priority": [
+      "WEBHOOK_URL",
+      "PUBLIC_BASE_URL",
+      "DOMAIN"
+    ],
+    "path_secret_required": true,
+    "fallback_to_polling_when_base_missing": true
   },
-  "deploy_files": [
-    {"path": "Dockerfile", "effect": "runtime-critical"},
-    {"path": ".bothost/entrypoint.conf", "effect": "platform-start hint"},
-    {"path": ".github/workflows/tests.yml", "effect": "ci-only"},
-    {"path": "README.md", "effect": "deployment guidance"},
-    {"path": "bots/client_bot/README.md", "effect": "operational guidance with drift risk"}
-  ],
-  "risks": [
-    "multiple entrypoints and runtime selection ambiguity",
-    "docs/code drift for mode assumptions",
-    "broad env alias chains and legacy keys",
-    "webhook-to-polling fallback may hide misconfiguration",
-    "duplicate requirements files",
-    "mixed storage model (filesystem + optional DB + optional github sync)"
-  ],
-  "minimal_required_env": {
-    "webhook": ["CLIENT_TELEGRAM_BOT_TOKEN", "BOT_PATH_SECRET", "WEBHOOK_URL|PUBLIC_BASE_URL|DOMAIN"],
-    "polling": ["CLIENT_TELEGRAM_BOT_TOKEN", "CLIENT_BOT_MODE=polling"]
+  "required_env": {
+    "webhook": [
+      "CLIENT_TELEGRAM_BOT_TOKEN|TELEGRAM_BOT_TOKEN|BOT_API_TOKEN|API_TOKEN|BOT_TOKEN|TOKEN",
+      "BOT_PATH_SECRET",
+      "WEBHOOK_URL|PUBLIC_BASE_URL|DOMAIN"
+    ],
+    "polling": [
+      "CLIENT_TELEGRAM_BOT_TOKEN|TELEGRAM_BOT_TOKEN|BOT_API_TOKEN|API_TOKEN|BOT_TOKEN|TOKEN"
+    ]
   },
-  "source_references": [
-    "main.py:1-9",
-    "services/client_bot_service/app/main.py:1-5",
-    "services/client_bot_service/app/config.py:5-126",
-    "bots/client_bot/main.py:259-320",
-    "bots/client_bot/main.py:626-678",
-    "bots/client_bot/main.py:3371-3551",
-    "bots/client_bot/main.py:9102-9268",
-    "bots/client_bot/services/ai_service.py:54-88",
-    "bots/client_bot/services/telegram_api.py:25-47",
-    "bots/client_bot/services/outgoing_queue.py:70",
-    "bots/client_bot/storage.py:59-61",
-    "shared/clients_registry.py:14-28",
-    "Dockerfile:1-13",
-    "index.js:1-31",
-    ".bothost/entrypoint.conf:1-2",
-    ".github/workflows/tests.yml:1-22",
-    "README.md:1-118",
-    "bots/client_bot/README.md:1-90",
-    "bots/client_bot/config/example.env:1-48"
-  ]
+  "http_routes_verified": [
+    "/health",
+    "/service-health",
+    "/WEBAPP",
+    "/WEBAPP/",
+    "/WEBAPP/config.json",
+    "/assets/webapp.bundle.js",
+    "/assets/webapp.bundle.css",
+    "/app.js",
+    "/app.css"
+  ],
+  "risks_remaining": [
+    "working branch is work; production requires sync to main",
+    "wide env alias surface increases maintenance complexity",
+    "webhook fallback may hide base-url misconfiguration"
+  ],
+  "bothost_recommendations": {
+    "branch": "main",
+    "use_custom_dockerfile": true,
+    "main_file_if_required": "main.py",
+    "post_deploy_checks": [
+      "/health",
+      "/WEBAPP",
+      "getWebhookInfo"
+    ]
+  }
 }

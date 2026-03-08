@@ -82,6 +82,21 @@ class RuntimeBehaviorTests(unittest.TestCase):
         delete_webhook.assert_called_with("tkn", ANY, drop_pending_updates=True)
         set_webhook.assert_called_with("tkn", ANY, "https://bot.example/webhook/secret")
 
+
+    @patch.dict(
+        os.environ,
+        {
+            "CLIENT_TELEGRAM_BOT_TOKEN": "tkn",
+            "CLIENT_BOT_MODE": "webhook",
+            "WEBHOOK_URL": "https://bot.example",
+        },
+        clear=True,
+    )
+    def test_webhook_mode_without_path_secret_fails_fast(self):
+        with self._patch_main_bootstrap():
+            with self.assertRaisesRegex(RuntimeError, "BOT_PATH_SECRET is required"):
+                client_main.main()
+
     @patch.dict(
         os.environ,
         {
