@@ -8,7 +8,7 @@
 - Polling is used only as fallback when base webhook URL cannot be built.
 
 ## BotHost setup
-1. Repository branch: `main`.
+1. Repository branch: `main` (single production branch).
 2. Enable **Use custom Dockerfile**.
 3. Build and run from root `Dockerfile`.
 4. If BotHost requires “Main file”, set `main.py` (compatibility hint only; real runtime is Dockerfile).
@@ -80,6 +80,17 @@ Webhook startup sequence:
 
 Fallback:
 - if mode is `webhook` but base URL is missing/invalid, bot logs warning and switches to polling after `deleteWebhook(drop_pending_updates=True)`.
+
+
+## Minimal env for first successful launch
+### Webhook-first (default)
+- `CLIENT_TELEGRAM_BOT_TOKEN`
+- `BOT_PATH_SECRET`
+- one of: `WEBHOOK_URL` / `PUBLIC_BASE_URL` / `DOMAIN`
+
+### Polling compatibility mode
+- `CLIENT_TELEGRAM_BOT_TOKEN`
+- `CLIENT_BOT_MODE=polling`
 
 ## HTTP checks
 - `GET /health`
