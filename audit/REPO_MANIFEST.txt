@@ -1,5 +1,7 @@
 .bothost/entrypoint.conf
 .github/workflows/tests.yml
+AUDIT_AFTER_CODEX.md
+Dockerfile
 README.md
 audit/AUDIT_FOR_AI.md
 audit/ENV_REPORT.json
@@ -40,5 +42,6 @@ services/client_bot_service/app/main.py
 shared/clients_registry.py
 tests/test_entrypoints.py
 tests/test_health.py
+tests/test_runtime_behavior.py
 tests/test_static_routes.py
 tests/test_webhook_url_build.py
