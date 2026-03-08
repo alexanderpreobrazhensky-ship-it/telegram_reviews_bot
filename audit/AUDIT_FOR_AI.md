@@ -1,13 +1,13 @@
 # Repository Audit for AI (read-only analysis)
 
 ## 1) Краткое описание проекта
-- Репозиторий реализует **client-bot** для Telegram на Python (Flask + polling/webhook), с Node bootstrap для BotHost (`index.js` запускает `python main.py`).
-- Основной исполняемый путь: `index.js` -> `main.py` -> `services/client_bot_service/app/main.py` -> `bots/client_bot/main.py`.
+- Репозиторий реализует **client-bot** для Telegram на Python (Flask + polling/webhook), с Dockerfile-first запуском на Python (`python main.py`).
+- Основной исполняемый путь: `main.py` -> `services/client_bot_service/app/main.py` -> `bots/client_bot/main.py`.
 - В коде зафиксировано, что поддерживается только client-bot сервис. См. `README.md` и root-entrypoints.
 
 ## 2) Snapshot структуры репозитория
 - `main.py` — root Python entrypoint.
-- `index.js` — Node bootstrap (под BotHost).
+- `index.js` — legacy bootstrap (не production-путь).
 - `services/client_bot_service/app/` — thin wrapper-конфиг/entrypoint сервиса.
 - `bots/client_bot/` — основная бизнес-логика бота, Flask routes, webhook/polling, storage, telegram API, AI-интеграция, webapp static.
 - `shared/clients_registry.py` — общий реестр клиентов (jsonl + file lock).
@@ -28,7 +28,7 @@
 ### CI/CD, Docker, workflow
 - Обнаружен GitHub Actions workflow: `.github/workflows/tests.yml` (push/pull_request на `main`, setup Python 3.11, `pip install -r requirements.txt`, `unittest`).
 - Обнаружен platform-specific конфиг `.bothost/entrypoint.conf` (`main_file=index.js`, `branch=main`).
-- `Dockerfile`/`docker-compose` в репозитории не обнаружены.
+- В репозитории добавлен root `Dockerfile` с python-only контрактом запуска.
 
 ## 4) Фактическая схема запуска
 ### Local Python

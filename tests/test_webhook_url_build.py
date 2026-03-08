@@ -2,7 +2,7 @@ import os
 import unittest
 from unittest.mock import patch
 
-from bots.client_bot.main import resolve_webhook_url
+from bots.client_bot.main import normalize_webapp_url, resolve_webhook_url
 
 
 class WebhookUrlBuildTests(unittest.TestCase):
@@ -23,6 +23,13 @@ class WebhookUrlBuildTests(unittest.TestCase):
         url, source = resolve_webhook_url()
         self.assertEqual(url, "https://c.example/webhook/s")
         self.assertEqual(source, "DOMAIN")
+
+    def test_url_normalization_fixes_double_protocol_and_trailing_slash(self):
+        self.assertEqual(normalize_webapp_url(" https://https://A.EXAMPLE/path/ "), "https://a.example/path")
+        self.assertEqual(normalize_webapp_url("https://http://b.example"), "https://b.example")
+
+    def test_invalid_url_returns_none(self):
+        self.assertIsNone(normalize_webapp_url("https:///"))
 
 
 if __name__ == "__main__":
