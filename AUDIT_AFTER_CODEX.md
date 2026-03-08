@@ -22,11 +22,14 @@
 - Rewrote `README.md` to Dockerfile-first / Python-only deploy contract and env grouping.
 
 ## Removed / retained
-- Removed: none (no active reviews-bot or Railway files were present in current tree).
+- Removed:
+  - runtime data artifacts from VCS (`data/*.jsonl`, `data/system.json`)
+  - legacy `review.html` not used by client-bot runtime/tests/deploy.
 - Retained intentionally:
   - `bots/client_bot/webapp/index.html`
   - `logo.png`
   - `index.js` as legacy compatibility artifact (not production-recommended path)
+  - `data/.gitkeep` to preserve runtime data directory in clean repository.
 
 ## Current deploy contract
 - BotHost: enable custom Dockerfile.
