@@ -1,68 +1,117 @@
-# LIRA client-bot (BotHost-safe, webhook-first)
+# LIRA client-bot (BotHost, Dockerfile-first, Python-only)
 
-## Project status: client-bot only
-- This repository supports **only** the client bot service.
-- Reviews bot functionality was removed and is not supported.
-- Active entrypoints and runtime files:
-  - `index.js` (Node bootstrap for BotHost)
-  - `main.py` (Python entrypoint)
-  - `services/client_bot_service/` (client-bot backend)
+## Production contract
+- Runtime: **Python only**.
+- Deploy path: **Use custom Dockerfile** on BotHost.
+- Entrypoint: `python main.py`.
+- Default mode: `webhook`.
+- Polling is used only as fallback when base webhook URL cannot be built.
 
-## CI
-GitHub Actions runs on:
-- `push` to `main`
-- `pull_request` to `main`
+## BotHost setup
+1. Repository branch: `main`.
+2. Enable **Use custom Dockerfile**.
+3. Build and run from root `Dockerfile`.
+4. Do not use Node entrypoint as primary production path.
 
-Workflow commands:
-```bash
-python -m pip install --upgrade pip
-pip install -r requirements.txt
-python -m unittest discover -s tests -p "test_*.py"
-```
+`.bothost/entrypoint.conf` is kept only for compatibility and points to `main.py`, but production should run via Dockerfile.
 
-How to run the same checks locally:
-```bash
-pip install -r requirements.txt
-python -m unittest discover -s tests -p "test_*.py"
-```
+## Runtime flow
+`main.py` → `services/client_bot_service/app/main.py` → `bots/client_bot/main.py`.
 
-## BotHost deploy
-- **Branch:** `main`
-- **Main file:** `index.js`
-- `index.js` is a Node bootstrap that starts `python main.py` and forwards signals/stdout/stderr.
+Startup logs include:
+- mode
+- token source (name only)
+- base URL source (name only)
+- port
+- storage mode
+- env used/ignored counters
 
-## Runtime mode
-- Default mode: `webhook` (when `CLIENT_BOT_MODE` is not set).
-- Webhook URL is built as: `<base>/webhook/<BOT_PATH_SECRET>`.
-- Base URL priority:
-  1. `WEBHOOK_URL`
-  2. `PUBLIC_BASE_URL`
-  3. `DOMAIN` (normalized to `https://<domain>`)
-- If base URL cannot be formed, service logs a warning and falls back to polling.
+Secrets are never logged.
 
-## Required ENV
-- `CLIENT_TELEGRAM_BOT_TOKEN`
-- `BOT_PATH_SECRET`
-- One of: `WEBHOOK_URL` or `PUBLIC_BASE_URL` or `DOMAIN`
+## ENV
+
+### Required
+- `CLIENT_TELEGRAM_BOT_TOKEN` (or token alias from fallback chain).
+- `BOT_PATH_SECRET` (required for webhook mode).
+- One base URL source:
+  - `WEBHOOK_URL`, or
+  - `PUBLIC_BASE_URL`, or
+  - `DOMAIN`
+
+### Recommended
 - `CLIENT_WEBAPP_SESSION_SECRET`
-- `PORT` (if provided by BotHost, keep as-is)
+- `PORT` (set by platform)
+- `TIMEZONE`
+- `CLIENT_MASTERS_CHAT_ID` (or alias)
 
-## Supported ENV aliases
-- Token fallback chain: `TELEGRAM_BOT_TOKEN`, `BOT_API_TOKEN`, `API_TOKEN`, `BOT_TOKEN`, `TOKEN`
-- Masters chat: `CLIENT_MASTERS_CHAT_ID` with aliases `CLIENT_CHAT_ID`, `CLIENT_MASTER_CHAT_ID`
-- Master ids: `CLIENT_MASTER_USER_IDS` with alias `CLIENT_MASTER_IDS`
-- Legacy tolerated variables: `REPORT_CHAT_IDS`, `SUPERADMIN_ID`, `CLIENT_ADMIN_IDS`, `MASTER_USERNAMES`, `REMINDER_USERNAMES`
+### Optional / legacy aliases (supported for compatibility)
+- Token aliases: `TELEGRAM_BOT_TOKEN`, `BOT_API_TOKEN`, `API_TOKEN`, `BOT_TOKEN`, `TOKEN`
+- Mode aliases: `CLIENT_RUN_MODE`, `RUN_MODE`
+- Port alias: `CLIENT_SERVICE_PORT`
+- Base URL aliases: `PUBLIC_BASE_URL`, `DOMAIN`
+- WebApp URL/path aliases: `CLIENT_WEBAPP_URL`, `WEBAPP_URL`, `WEBAPP_PATH`
+- WebApp toggle aliases: `CLIENT_WEBAPP_ENABLED`, `WEBAPP_ENABLED`
+- Masters chat aliases: `CLIENT_CHAT_ID`, `CLIENT_MASTER_CHAT_ID`
+- Master ids aliases: `CLIENT_MASTER_USER_IDS`, `CLIENT_MASTER_IDS`
+- Notify mode: `CLIENT_NOTIFY_MODE`
+- Storage/db aliases: `DATABASE_URL`, `POSTGRES_URL`, `POSTGRESQL_URL`, `CLIENTS_REGISTRY_PATH`, `CLIENT_DATA_DIR`
 
-## HTTP endpoints
+## Webhook-first behavior
+Base URL priority:
+1. `WEBHOOK_URL`
+2. `PUBLIC_BASE_URL`
+3. `DOMAIN`
+
+Normalization:
+- trims spaces
+- removes trailing slash
+- fixes malformed prefixes (`https://https://...`, `https://http://...`)
+- forces `https://`
+- treats invalid URL as missing
+
+Webhook URL format:
+- `<base>/webhook/<BOT_PATH_SECRET>`
+
+Webhook startup sequence:
+1. `deleteWebhook(drop_pending_updates=True)`
+2. `setWebhook(url=...)`
+3. Flask server on `0.0.0.0:$PORT`
+
+Fallback:
+- if mode is `webhook` but base URL is missing/invalid, bot logs warning and switches to polling after `deleteWebhook(drop_pending_updates=True)`.
+
+## HTTP checks
 - `GET /health`
-- `GET /WEBAPP` and `GET /WEBAPP/`
+- `GET /service-health`
+- `GET /WEBAPP`, `GET /WEBAPP/`
 - `GET /assets/webapp.bundle.js`
 - `GET /assets/webapp.bundle.css`
-- `GET /app.js` (alias)
-- `GET /app.css` (alias)
+- `GET /app.js`, `GET /app.css`
 - `GET /WEBAPP/config.json`
-- `POST /webhook/<BOT_PATH_SECRET>`
 
-## BotFather
-Set Mini App URL to your **BotHost domain**:
-- `https://<bothost-domain>/WEBAPP`
+WebApp API:
+- `POST /api/webapp/session`
+- `POST /api/webapp/submit`
+- `GET /api/webapp/lookup`
+
+Expected API errors include:
+- `phone_required`
+- `invalid_init_data`
+- `session_expired`
+
+## BotFather note
+BotFather WebApp URL affects only the client-side WebApp open link.
+It does not define runtime mode or deployment contract.
+
+## Verify webhook after deploy
+1. Check service health:
+   - `curl -fsS https://<your-domain>/health`
+2. Check Telegram webhook info:
+   - `https://api.telegram.org/bot<TOKEN>/getWebhookInfo`
+
+## Tests / CI
+Commands used in CI:
+```bash
+pip install -r requirements.txt
+python -m unittest discover -s tests -p "test_*.py"
+```
