@@ -8,11 +8,17 @@
 - Ключевые риски: множественные entrypoints (Python + Node wrapper), широкие env-алиасы, webhook/polling конфликтный контур, legacy-переменные в документации, неоднозначности around BotHost runtime selection.
 
 ## 2. Repository snapshot
-- Branch: `work`
+- Current working branch (local): `work`
+- Production deployment branch target: `main`
 - Commit: `2cafd4b28b71500c98cb7c750bda679bdc44f840`
 - Tracked files manifest: `audit/REPO_MANIFEST.txt`
 
 ### Ключевое дерево
+
+### Repository cleanliness updates
+- Removed legacy non-runtime artifact: `review.html`.
+- Removed tracked runtime data snapshots (`data/clients.jsonl`, `data/tickets.jsonl`, `data/system.json`).
+- Added `.gitignore` rules to keep runtime-generated data out of VCS and retained only `data/.gitkeep`.
 - `main.py` — root Python entrypoint.
 - `index.js` — Node bootstrap, запускающий Python.
 - `services/client_bot_service/app/main.py` — сервисный shim entrypoint.

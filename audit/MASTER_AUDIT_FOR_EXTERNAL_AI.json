@@ -15,6 +15,14 @@
       "Dockerfile",
       ".bothost/entrypoint.conf",
       ".github/workflows/tests.yml"
+    ],
+    "current_branch": "work",
+    "production_branch": "main",
+    "excluded_from_repo": [
+      "review.html",
+      "data/clients.jsonl",
+      "data/tickets.jsonl",
+      "data/system.json"
     ]
   },
   "entrypoints": [
@@ -1537,14 +1545,16 @@
     "Dockerfile",
     ".bothost/entrypoint.conf",
     ".github/workflows/tests.yml",
-    "index.js"
+    "index.js",
+    ".gitignore"
   ],
   "risks": [
     "Runtime selection ambiguity across Docker/BotHost/Node wrapper",
     "Env alias sprawl and legacy keys",
     "Webhook requires secret+public base url; otherwise silent fallback to polling",
     "Docs mention variables that code does not consume",
-    "Polling/webhook conflict handling may hide deployment misconfiguration"
+    "Polling/webhook conflict handling may hide deployment misconfiguration",
+    "Repository noise from runtime artifacts in VCS"
   ],
   "minimal_required_env": [
     "CLIENT_TELEGRAM_BOT_TOKEN (or alias)",

@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# runtime generated data
+/data/*.json
+/data/*.jsonl
+/data/posts_queue.json
+/data/clients.jsonl
+/data/tickets.jsonl
+/data/system.json
+!/data/.gitkeep

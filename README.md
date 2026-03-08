@@ -115,3 +115,8 @@ Commands used in CI:
 pip install -r requirements.txt
 python -m unittest discover -s tests -p "test_*.py"
 ```
+
+
+## Repository cleanliness
+- Runtime data files are not versioned (`data/*.jsonl`, `data/system.json`, queue snapshots).
+- Keep only `data/.gitkeep` in Git; actual bot data is generated at runtime in `/app/data`.
