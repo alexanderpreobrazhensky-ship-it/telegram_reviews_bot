@@ -8,7 +8,7 @@
 - Production deploy path: **Dockerfile-first**.
 - Entrypoint: корневой `main.py` (цепочка `main.py` → `services/client_bot_service/app/main.py` → `bots/client_bot/main.py`).
 - Режим по умолчанию: `webhook`.
-- `index.js` сохранён только как compatibility/legacy wrapper и не является production-путём.
+- Node bootstrap не используется в production; корень репозитория Python-only для платформы.
 
 ## Минимальный env для первого запуска
 ### Webhook-first (рекомендуется)
