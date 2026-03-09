@@ -12,9 +12,11 @@
 2. Enable **Use custom Dockerfile**.
 3. Build and run from root `Dockerfile`.
 4. If BotHost requires “Main file”, set `main.py` (compatibility hint only; real runtime is Dockerfile).
-5. Do not use Node entrypoint as primary production path.
+5. Do not use Node entrypoints (`index.js`, `app.js`, etc.) in production.
 
 `.bothost/entrypoint.conf` is kept only for compatibility and points to `main.py`, but production should run via Dockerfile.
+
+Root repository is intentionally Python-only for BotHost runtime detection.
 
 ## Runtime flow
 `main.py` → `services/client_bot_service/app/main.py` → `bots/client_bot/main.py`.

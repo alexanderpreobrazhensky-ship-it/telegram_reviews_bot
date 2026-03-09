@@ -1,12 +1,6 @@
 {
-  "audit_version": 2,
-  "snapshot": {
-    "branch": "main",
-    "snapshot_commit": "175d2e0",
-    "manifest": "audit/REPO_MANIFEST.txt"
-  },
+  "audit_version": 3,
   "production_branch": "main",
-  "working_branch": "main",
   "production_contract": {
     "runtime": "python",
     "deploy_path": "dockerfile-first",
@@ -16,13 +10,23 @@
       "main.py",
       "services/client_bot_service/app/main.py",
       "bots/client_bot/main.py"
-    ],
-    "compatibility_only": [
-      "index.js",
-      ".bothost/entrypoint.conf"
     ]
   },
-  "webhook": {
+  "bot_host_safety": {
+    "root_node_markers_absent": [
+      "index.js",
+      "app.js",
+      "server.js",
+      "main.js",
+      "package.json"
+    ],
+    "legacy_node_wrapper": "legacy/index.js",
+    "entrypoint_conf": {
+      "main_file": "main.py",
+      "branch": "main"
+    }
+  },
+  "webhook_contract": {
     "base_url_priority": [
       "WEBHOOK_URL",
       "PUBLIC_BASE_URL",
@@ -31,40 +35,7 @@
     "path_secret_required": true,
     "fallback_to_polling_when_base_missing": true
   },
-  "required_env": {
-    "webhook": [
-      "CLIENT_TELEGRAM_BOT_TOKEN|TELEGRAM_BOT_TOKEN|BOT_API_TOKEN|API_TOKEN|BOT_TOKEN|TOKEN",
-      "BOT_PATH_SECRET",
-      "WEBHOOK_URL|PUBLIC_BASE_URL|DOMAIN"
-    ],
-    "polling": [
-      "CLIENT_TELEGRAM_BOT_TOKEN|TELEGRAM_BOT_TOKEN|BOT_API_TOKEN|API_TOKEN|BOT_TOKEN|TOKEN"
-    ]
-  },
-  "http_routes_verified": [
-    "/health",
-    "/service-health",
-    "/WEBAPP",
-    "/WEBAPP/",
-    "/WEBAPP/config.json",
-    "/assets/webapp.bundle.js",
-    "/assets/webapp.bundle.css",
-    "/app.js",
-    "/app.css"
-  ],
-  "risks_remaining": [
-    "wide env alias surface increases maintenance complexity",
-    "webhook fallback may hide base-url misconfiguration",
-    "compatibility-only entrypoints may confuse deployment operators"
-  ],
-  "bothost_recommendations": {
-    "branch": "main",
-    "use_custom_dockerfile": true,
-    "main_file_if_required": "main.py",
-    "post_deploy_checks": [
-      "/health",
-      "/WEBAPP",
-      "getWebhookInfo"
-    ]
-  }
+  "checks": [
+    "python -m unittest discover -s tests -p \"test_*.py\""
+  ]
 }
