@@ -3,6 +3,7 @@
 ## 1) Статус этапов
 - Skeleton-этап: завершён.
 - Этап 2 (client_bot + WebApp MVP): реализован.
+- Этап 3 (master_bot MVP): реализован.
 
 ## 2) Production contract (BotHost-safe)
 - Runtime: Node.js.
@@ -11,87 +12,119 @@
 - Ветка деплоя: `main`.
 - Node-first запуск сохранён, Python как production path не используется.
 
-## 3) Реализованный client_bot MVP
-- `POST /telegram/client_bot/webhook` обрабатывает `/start`.
-- `/start` отправляет приветствие и WebApp launch кнопку (`web_app.url` через `WEBAPP_URL`).
-- Реализованы быстрые сценарии в чате:
-  - нужна запись/сервис → `service_request`
-  - нужны запчасти → `parts_request`
-  - вопрос мастеру → `consultation_request`
-  - гарантийное обращение → `warranty_request`
-  - свяжитесь со мной → `callback_request`
-- Для быстрого обращения бот последовательно запрашивает ФИО и телефон.
-- После сбора данных создаётся `Request` со статусом `new` и `sourceChannel=telegram_chat`.
+## 3) Реализованный master_bot MVP
+Webhook:
+- `POST /telegram/master_bot/webhook`.
 
-## 4) Реализованный WebApp MVP
-### Страницы
-- `GET /`
-- `GET /requests`
-- `GET /recommendations`
-- `GET /forms/service-request`
-- `GET /forms/parts-request`
-- `GET /forms/consultation`
-- `GET /forms/warranty-request`
-- `GET /forms/data-change-request`
+Рабочие сценарии:
+- `/start` + главное меню.
+- Просмотр новых заявок (`new`).
+- Просмотр заявок в работе (`in_progress`).
+- Поиск по клиенту: ФИО, телефон, VIN, госномер.
+- Карточка клиента.
+- Карточка заявки.
+- Изменение статуса заявки по разрешённому workflow.
+- Добавление внутреннего комментария к заявке.
+- Добавление служебной заметки по клиенту (skeleton).
+- Просмотр quality cases / карточки quality case / смена статуса / комментарий.
+- Инициирование запроса клиенту (intent/event + безопасная отправка шаблона при доступном Telegram token).
 
-### Формы
-- Service request → `service_request`
-- Parts request → `parts_request`
-- Consultation → `consultation_request`
-- Warranty request → `warranty_request`
-- Data change request → `data_change_request`
+Роли (структура заложена):
+- `master`
+- `manager`
+- `admin`
 
-### Клиентские разделы
-- “Мои обращения” (список типа/статуса/даты/краткого описания).
-- “Актуальные рекомендации” (фильтр `status=actual`) + отметка интереса к устранению.
+## 4) Статусы и workflow заявок
+Поддерживаемые статусы:
+- `new`
+- `waiting_data`
+- `in_progress`
+- `processed`
+- `lost`
+- `archived`
 
-## 5) API слой
-- `GET /health`
-- `POST /api/client/requests/service`
-- `POST /api/client/requests/parts`
-- `POST /api/client/requests/consultation`
-- `POST /api/client/requests/warranty`
-- `POST /api/client/requests/data-change`
-- `GET /api/client/requests`
-- `GET /api/client/recommendations`
-- `POST /api/client/recommendations/:id/interest`
-- Telegram webhook сохранён: `POST /telegram/client_bot/webhook`
+Реализованные переходы:
+- `new -> waiting_data`
+- `new -> in_progress`
+- `waiting_data -> in_progress`
+- `in_progress -> processed`
+- `in_progress -> lost` (обязателен `lostReason`)
+- `processed -> archived`
+- `lost -> archived`
 
-## 6) Реальное сохранение данных в MVP
-Хранилище: `data/db.json` (файловая БД для MVP).
+Каждая смена статуса:
+- пишется в БД,
+- добавляется в `requestStatusHistory`,
+- фиксирует кто/когда/из какого статуса в какой,
+- создаёт event в `communicationEvents`,
+- создаёт action в `masterActions`.
 
-Сохраняются сущности:
-- **Client**: ФИО, телефон, telegramId, preferredChannel.
-- **Vehicle**: clientId, brand/model/year/vin/plateNumber.
-- **Request**: requestType, status=`new`, sourceChannel, description, clientId, vehicleId.
-- **CommunicationEvent**: события действий клиента/создания обращения с источником `bot`/`webapp`.
+## 5) Что теперь сохраняется в `data/db.json`
+Сохранена совместимость с этапом 2 (Client/Vehicle/Request/CommunicationEvent/Recommendation), добавлены:
+- `staffUsers` — сотрудники и роли.
+- `requestStatusHistory` — история статусов заявки.
+- `requestInternalComments` — внутренние комментарии мастеров.
+- `clientInternalNotes` — служебные заметки по клиенту.
+- `masterActions` — журнал действий сотрудников.
+- `qualityCases` — skeleton сущности quality.
+- `qualityCaseComments` — комментарии к quality cases.
 
-Реализованы связи:
-- Client ↔ Vehicle.
-- Client ↔ Request.
-- Vehicle ↔ Request (когда есть авто-данные).
+В заявке дополнительно используются:
+- `assignedMasterId`
+- `lostReason`
+- `updatedAt`
 
-## 7) Реально работающие request types в этапе 2
-- `service_request`
-- `parts_request`
-- `warranty_request`
-- `consultation_request`
-- `callback_request`
-- `data_change_request`
+## 6) Карточки CRM
+### Карточка клиента (минимум)
+- ФИО
+- телефон
+- preferred channel
+- telegram binding
+- список автомобилей
+- список обращений
+- список рекомендаций
+- внутренние заметки
 
-## 8) Тестовое покрытие этапа
-Добавлены/актуализированы node-тесты:
-- доступность `/health` и webapp-страниц,
-- создание 5 обязательных типов обращений через API,
-- bot flow (`/start` + быстрое обращение),
-- persistence-проверки: client + vehicle + request + communication event.
+### Карточка заявки (минимум)
+- id
+- тип
+- статус
+- источник
+- дата/описание
+- клиент
+- авто
+- ответственный мастер
+- история статусов
+- внутренние комментарии
 
-## 9) Ограничения, остающиеся после этапа 2
-- Нет 1С интеграции и синхронизации мастер-данных.
-- Нет подтверждённой идентификации (SMS/OTP).
-- Нет расширенного CRM workflow и сложной карточки обращения.
-- Нет каналов VK/MAX.
-- Нет production-grade SQL persistence (в MVP используется файловое хранилище).
+## 7) Quality case skeleton
+Поддержаны статусы quality case:
+- `new`, `assigned`, `in_progress`, `resolved`, `unresolved`, `archived`.
 
-## 10) Итоговая готовность
-Проект готов к следующему шагу: расширение мастерского контура и интеграционных сценариев поверх уже работающего intake-потока client_bot + WebApp.
+Реализовано:
+- список cases,
+- карточка case,
+- изменение статуса,
+- комментарий по разбору.
+
+## 8) Сохранность этапа 2
+Не сломаны:
+- `client_bot` webhook,
+- WebApp страницы и API,
+- `/health`.
+
+## 9) Тестовое покрытие этапа 3
+Добавлены поведенческие node-тесты для master_bot MVP:
+- `/start`, главное меню,
+- получение списка новых заявок,
+- поиск по ФИО/телефону/VIN/госномеру,
+- статусные переходы (`new -> waiting_data`, `new -> in_progress`, `in_progress -> processed`, `in_progress -> lost`),
+- обязательность lost reason,
+- persistence проверки (status history, internal comment, assignment мастера),
+- карточка клиента,
+- карточка заявки,
+- наличие рекомендаций,
+- quality case skeleton проверки.
+
+## 10) Текущая готовность платформы
+Платформа готова к следующему шагу: расширение CRM-функций сотрудника, усложнение quality flow и подготовка интеграций (включая 1С), при сохранении BotHost-safe Node.js production contract.
