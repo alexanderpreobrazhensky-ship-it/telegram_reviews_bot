@@ -1,136 +1,69 @@
-# LIRA client-bot (BotHost, Dockerfile-first, Python-only)
+# Единая платформа автосервиса (Node.js / BotHost)
 
-## Production contract
-- Runtime: **Python only**.
-- Deploy path: **Use custom Dockerfile** on BotHost.
-- Entrypoint: `python main.py`.
-- Default mode: `webhook`.
-- Polling is used only as fallback when base webhook URL cannot be built.
+## Что это
+Репозиторий переведён на **Node.js-first production path** и содержит архитектурный skeleton платформы с тремя сервисными контурами:
+- `client_bot`
+- `master_bot`
+- `integration_bot`
 
-## BotHost setup
-1. Repository branch: `main` (single production branch).
-2. Enable **Use custom Dockerfile**.
-3. Build and run from root `Dockerfile`.
-4. If BotHost requires “Main file”, set `main.py` (compatibility hint only; real runtime is Dockerfile).
-5. Do not use Node entrypoints (`index.js`, `app.js`, etc.) in production.
+Также добавлен skeleton клиентского **WebApp/Mini App** как основного UX-канала.
 
-`.bothost/entrypoint.conf` is kept only for compatibility and points to `main.py`, but production should run via Dockerfile.
+## BotHost production contract
+- runtime: Node.js
+- branch: `main`
+- main entrypoint: `app.js`
+- package manifest: `package.json`
+- Python-файлы считаются legacy и не участвуют в production startup contract
 
-Root repository is intentionally Python-only for BotHost runtime detection.
+## Архитектура
+- `src/core` — доменная модель, типы, use-cases
+- `src/interfaces` — Telegram интерфейсы ботов + webapp routing/state skeleton
+- `src/integrations` — заготовки email и one_c адаптеров
+- `src/infrastructure` — config, db schema, logging, queue, scheduler, repositories
+- `src/server` — HTTP entrypoint/роутинг для BotHost
+- `public` — статические файлы WebApp
+- `tests/node` — structural тесты skeleton-этапа
 
-## Runtime flow
-`main.py` → `services/client_bot_service/app/main.py` → `bots/client_bot/main.py`.
+## MVP на текущем этапе
+Включено:
+- Node-safe каркас платформы
+- согласованные типы обращений и статусы в коде
+- заготовка доменных сущностей и связей
+- skeleton persistence/queue/scheduler/integration pipelines
+- базовая страница WebApp с маршрутами и местом под формы/списки
 
-Startup logs include:
-- mode
-- token source (name only)
-- base URL source (name only)
-- port
-- storage mode
-- env used/ignored counters
+Не включено (будет на следующих этапах):
+- полная бизнес-логика всех ботов
+- production-интеграция с 1C
+- каналы VK/MAX
+- AI/advanced analytics
 
-Secrets are never logged.
-
-## ENV
-
-### Required
-- `CLIENT_TELEGRAM_BOT_TOKEN` (or token alias from fallback chain).
-- `BOT_PATH_SECRET` (required for webhook mode).
-- One base URL source:
-  - `WEBHOOK_URL`, or
-  - `PUBLIC_BASE_URL`, or
-  - `DOMAIN`
-
-### Recommended
-- `CLIENT_WEBAPP_SESSION_SECRET`
-- `PORT` (set by platform)
-- `TIMEZONE`
-- `CLIENT_MASTERS_CHAT_ID` (or alias)
-
-### Optional / legacy aliases (supported for compatibility)
-- Token aliases: `TELEGRAM_BOT_TOKEN`, `BOT_API_TOKEN`, `API_TOKEN`, `BOT_TOKEN`, `TOKEN`
-- Mode aliases: `CLIENT_RUN_MODE`, `RUN_MODE`
-- Port alias: `CLIENT_SERVICE_PORT`
-- Base URL aliases: `PUBLIC_BASE_URL`, `DOMAIN`
-- WebApp URL/path aliases: `CLIENT_WEBAPP_URL`, `WEBAPP_URL`, `WEBAPP_PATH`
-- WebApp toggle aliases: `CLIENT_WEBAPP_ENABLED`, `WEBAPP_ENABLED`
-- Masters chat aliases: `CLIENT_CHAT_ID`, `CLIENT_MASTER_CHAT_ID`
-- Master ids aliases: `CLIENT_MASTER_USER_IDS`, `CLIENT_MASTER_IDS`
-- Notify mode: `CLIENT_NOTIFY_MODE`
-- Storage/db aliases: `DATABASE_URL`, `POSTGRES_URL`, `POSTGRESQL_URL`, `CLIENTS_REGISTRY_PATH`, `CLIENT_DATA_DIR`
-
-## Webhook-first behavior
-Base URL priority:
-1. `WEBHOOK_URL`
-2. `PUBLIC_BASE_URL`
-3. `DOMAIN`
-
-Normalization:
-- trims spaces
-- removes trailing slash
-- fixes malformed prefixes (`https://https://...`, `https://http://...`)
-- forces `https://`
-- treats invalid URL as missing
-
-Webhook URL format:
-- `<base>/webhook/<BOT_PATH_SECRET>`
-
-Webhook startup sequence:
-1. `deleteWebhook(drop_pending_updates=True)`
-2. `setWebhook(url=...)`
-3. Flask server on `0.0.0.0:$PORT`
-
-Fallback:
-- if mode is `webhook` but base URL is missing/invalid, bot logs warning and switches to polling after `deleteWebhook(drop_pending_updates=True)`.
-
-
-## Minimal env for first successful launch
-### Webhook-first (default)
-- `CLIENT_TELEGRAM_BOT_TOKEN`
-- `BOT_PATH_SECRET`
-- one of: `WEBHOOK_URL` / `PUBLIC_BASE_URL` / `DOMAIN`
-
-### Polling compatibility mode
-- `CLIENT_TELEGRAM_BOT_TOKEN`
-- `CLIENT_BOT_MODE=polling`
-
-## HTTP checks
-- `GET /health`
-- `GET /service-health`
-- `GET /WEBAPP`, `GET /WEBAPP/`
-- `GET /assets/webapp.bundle.js`
-- `GET /assets/webapp.bundle.css`
-- `GET /app.js`, `GET /app.css`
-- `GET /WEBAPP/config.json`
-
-WebApp API:
-- `POST /api/webapp/session`
-- `POST /api/webapp/submit`
-- `GET /api/webapp/lookup`
-
-Expected API errors include:
-- `phone_required`
-- `invalid_init_data`
-- `session_expired`
-
-## BotFather note
-BotFather WebApp URL affects only the client-side WebApp open link.
-It does not define runtime mode or deployment contract.
-
-## Verify webhook after deploy
-1. Check service health:
-   - `curl -fsS https://<your-domain>/health`
-2. Check Telegram webhook info:
-   - `https://api.telegram.org/bot<TOKEN>/getWebhookInfo`
-
-## Tests / CI
-Commands used in CI:
+## Запуск локально
 ```bash
-pip install -r requirements.txt
-python -m unittest discover -s tests -p "test_*.py"
+npm start
 ```
 
+## Тесты
+```bash
+npm test
+```
 
-## Repository cleanliness
-- Runtime data files are not versioned (`data/*.jsonl`, `data/system.json`, queue snapshots).
-- Keep only `data/.gitkeep` in Git; actual bot data is generated at runtime in `/app/data`.
+## ENV переменные
+- `PORT`
+- `NODE_ENV`
+- `DB_URL`
+- `QUEUE_DRIVER`
+- `TELEGRAM_CLIENT_BOT_TOKEN`
+- `TELEGRAM_MASTER_BOT_TOKEN`
+- `TELEGRAM_INTEGRATION_BOT_TOKEN`
+- `ONE_C_WEBHOOK_SECRET`
+
+## Порты / домен / HTTPS
+- По умолчанию сервер слушает `PORT=3000`
+- На BotHost ожидается проксирование через HTTPS-домен платформы
+- Webhook и WebApp маршруты обслуживаются тем же Node entrypoint
+
+## Future roadmap
+- 1C bi-directional sync через `src/integrations/one_c`
+- Подключение VK/MAX как новых channel adapters
+- Отдельный analytics/AI контур поверх event/task моделей
