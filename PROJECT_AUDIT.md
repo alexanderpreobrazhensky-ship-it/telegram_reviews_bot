@@ -1,140 +1,97 @@
 # PROJECT_AUDIT
 
-## 1) Краткое описание проекта
-Единая Node.js-платформа автосервиса с разделением на клиентский, мастерский и интеграционный контуры и WebApp как основной UX слой.
+## 1) Статус этапов
+- Skeleton-этап: завершён.
+- Этап 2 (client_bot + WebApp MVP): реализован.
 
-## 2) Production contract
-- Runtime: Node.js (BotHost-safe)
-- Main branch: `main`
-- Root entrypoint: `app.js`
-- Package manifest: `package.json`
-- Legacy Python path исключён из production startup contract
+## 2) Production contract (BotHost-safe)
+- Runtime: Node.js.
+- Entrypoint: `app.js`.
+- Manifest: `package.json`.
+- Ветка деплоя: `main`.
+- Node-first запуск сохранён, Python как production path не используется.
 
-## 3) Текущая архитектура
-- `core`: domain + application + shared
-- `interfaces`: client_bot, master_bot, integration_bot, webapp
-- `integrations`: email, one_c placeholders
-- `infrastructure`: config, logging, db, queue, scheduler, repositories
-- `server`: HTTP shell for health/webhooks/webapp delivery
+## 3) Реализованный client_bot MVP
+- `POST /telegram/client_bot/webhook` обрабатывает `/start`.
+- `/start` отправляет приветствие и WebApp launch кнопку (`web_app.url` через `WEBAPP_URL`).
+- Реализованы быстрые сценарии в чате:
+  - нужна запись/сервис → `service_request`
+  - нужны запчасти → `parts_request`
+  - вопрос мастеру → `consultation_request`
+  - гарантийное обращение → `warranty_request`
+  - свяжитесь со мной → `callback_request`
+- Для быстрого обращения бот последовательно запрашивает ФИО и телефон.
+- После сбора данных создаётся `Request` со статусом `new` и `sourceChannel=telegram_chat`.
 
-## 4) Структура репозитория (актуальная)
-- `app.js`
-- `package.json`
-- `README.md`
-- `PROJECT_AUDIT.md`
-- `src/`
-- `public/`
-- `tests/node/`
+## 4) Реализованный WebApp MVP
+### Страницы
+- `GET /`
+- `GET /requests`
+- `GET /recommendations`
+- `GET /forms/service-request`
+- `GET /forms/parts-request`
+- `GET /forms/consultation`
+- `GET /forms/warranty-request`
+- `GET /forms/data-change-request`
 
-## 5) Список сервисов
-- `client_bot`: клиентский Telegram интерфейс + связка с WebApp
-- `master_bot`: рабочий Telegram интерфейс мастера/приёмщика
-- `integration_bot`: integration-facing контур и pipeline hooks
+### Формы
+- Service request → `service_request`
+- Parts request → `parts_request`
+- Consultation → `consultation_request`
+- Warranty request → `warranty_request`
+- Data change request → `data_change_request`
 
-## 6) Список сущностей
-- Client
-- ChannelAccount
-- Vehicle
-- Request
-- Visit
-- Recommendation
-- PartRequest
-- Feedback
-- QualityCase
-- CommunicationEvent
-- Task
-- IntegrationEvent
+### Клиентские разделы
+- “Мои обращения” (список типа/статуса/даты/краткого описания).
+- “Актуальные рекомендации” (фильтр `status=actual`) + отметка интереса к устранению.
 
-## 7) Согласованные типы и статусы
-### Request types
+## 5) API слой
+- `GET /health`
+- `POST /api/client/requests/service`
+- `POST /api/client/requests/parts`
+- `POST /api/client/requests/consultation`
+- `POST /api/client/requests/warranty`
+- `POST /api/client/requests/data-change`
+- `GET /api/client/requests`
+- `GET /api/client/recommendations`
+- `POST /api/client/recommendations/:id/interest`
+- Telegram webhook сохранён: `POST /telegram/client_bot/webhook`
+
+## 6) Реальное сохранение данных в MVP
+Хранилище: `data/db.json` (файловая БД для MVP).
+
+Сохраняются сущности:
+- **Client**: ФИО, телефон, telegramId, preferredChannel.
+- **Vehicle**: clientId, brand/model/year/vin/plateNumber.
+- **Request**: requestType, status=`new`, sourceChannel, description, clientId, vehicleId.
+- **CommunicationEvent**: события действий клиента/создания обращения с источником `bot`/`webapp`.
+
+Реализованы связи:
+- Client ↔ Vehicle.
+- Client ↔ Request.
+- Vehicle ↔ Request (когда есть авто-данные).
+
+## 7) Реально работающие request types в этапе 2
 - `service_request`
 - `parts_request`
 - `warranty_request`
-- `complaint_request`
-- `feedback_request`
 - `consultation_request`
 - `callback_request`
 - `data_change_request`
-- `other_request`
 
-### Request statuses
-- `new`
-- `waiting_data`
-- `in_progress`
-- `processed`
-- `lost`
-- `archived`
+## 8) Тестовое покрытие этапа
+Добавлены/актуализированы node-тесты:
+- доступность `/health` и webapp-страниц,
+- создание 5 обязательных типов обращений через API,
+- bot flow (`/start` + быстрое обращение),
+- persistence-проверки: client + vehicle + request + communication event.
 
-### Visit statuses
-- `scheduled`
-- `in_service`
-- `completed`
-- `cancelled`
-- `no_show`
-- `closed`
+## 9) Ограничения, остающиеся после этапа 2
+- Нет 1С интеграции и синхронизации мастер-данных.
+- Нет подтверждённой идентификации (SMS/OTP).
+- Нет расширенного CRM workflow и сложной карточки обращения.
+- Нет каналов VK/MAX.
+- Нет production-grade SQL persistence (в MVP используется файловое хранилище).
 
-Visit flags:
-- `is_repeat`
-- `is_warranty`
-- `is_promo`
-
-### Recommendation statuses
-- `actual`
-- `completed`
-- `declined`
-- `expired`
-- `deleted`
-
-Recommendation severity:
-- `normal`
-- `critical`
-
-### Quality case statuses
-- `new`
-- `assigned`
-- `in_progress`
-- `resolved`
-- `unresolved`
-- `archived`
-
-## 8) Текущие ENV переменные
-- PORT
-- NODE_ENV
-- DB_URL
-- QUEUE_DRIVER
-- TELEGRAM_CLIENT_BOT_TOKEN
-- TELEGRAM_MASTER_BOT_TOKEN
-- TELEGRAM_INTEGRATION_BOT_TOKEN
-- ONE_C_WEBHOOK_SECRET
-
-## 9) Текущие маршруты / entrypoints
-Entrypoint:
-- `app.js`
-
-Health:
-- `GET /health`
-
-Webhooks:
-- `POST /telegram/client_bot/webhook`
-- `POST /telegram/master_bot/webhook`
-- `POST /telegram/integration_bot/webhook`
-
-WebApp routes:
-- `/`
-- `/requests`
-- `/recommendations`
-- `/forms/service-request`
-- `/forms/parts-request`
-- `/forms/consultation`
-- `/forms/warranty-request`
-- `/forms/data-change-request`
-
-## 10) Текущий статус реализации
-Skeleton-этап завершён: зафиксирована архитектура, доменные типы и инфраструктурные каркасы. Реализация бизнес-процессов отложена на следующие этапы.
-
-## 11) Change history (последняя задача)
-- Добавлен Node.js root entrypoint и package contract для BotHost.
-- Создана модульная структура `core/interfaces/integrations/infrastructure/server`.
-- Зафиксированы сущности, связи, source-of-truth поля и integration hooks.
-- Добавлен WebApp skeleton в `public` и routing/state заготовки.
-- Добавлены structural tests для архитектурного каркаса.
+## 10) Итоговая готовность
+Проект готов к следующему шагу: расширение мастерского контура и интеграционных сценариев поверх уже работающего intake-потока client_bot + WebApp.

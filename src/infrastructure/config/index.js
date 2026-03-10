@@ -7,7 +7,8 @@ function loadConfig() {
     telegramIntegrationBotToken: process.env.TELEGRAM_INTEGRATION_BOT_TOKEN || '',
     dbUrl: process.env.DB_URL || 'postgres://localhost:5432/telegram_reviews',
     queueDriver: process.env.QUEUE_DRIVER || 'memory',
-    oneCWebhookSecret: process.env.ONE_C_WEBHOOK_SECRET || ''
+    oneCWebhookSecret: process.env.ONE_C_WEBHOOK_SECRET || '',
+    webAppUrl: process.env.WEBAPP_URL || 'https://example.com'
   };
 }
 
