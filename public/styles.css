@@ -1,3 +1,8 @@
-body { font-family: Arial, sans-serif; margin: 0; padding: 24px; }
-nav { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 16px; }
-a { color: #1155cc; text-decoration: none; }
+body { font-family: Arial, sans-serif; margin: 0; padding: 24px; background: #f5f7fb; }
+main { max-width: 900px; margin: 0 auto; background: #fff; padding: 20px; border-radius: 10px; }
+nav { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 16px; }
+a { color: #1155cc; text-decoration: none; background: #eef3ff; padding: 6px 10px; border-radius: 6px; }
+label { display: block; margin-bottom: 10px; }
+input, textarea, button { width: 100%; padding: 8px; margin-top: 4px; box-sizing: border-box; }
+button { cursor: pointer; background: #1155cc; color: #fff; border: 0; border-radius: 6px; }
+.ok { color: #1f7a1f; }
