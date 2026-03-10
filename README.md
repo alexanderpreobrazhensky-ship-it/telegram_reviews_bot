@@ -1,11 +1,12 @@
 # Единая платформа автосервиса (Node.js / BotHost)
 
-## Этап 2: client_bot + WebApp MVP
-Реализован рабочий пользовательский контур:
-- Telegram `client_bot` с `/start`, кнопкой запуска WebApp и быстрыми обращениями в чате.
-- WebApp MVP (dashboard, формы обращений, список обращений, актуальные рекомендации).
-- Реальное сохранение данных в локальную БД-файл `data/db.json`.
-- Связка Client ↔ Vehicle ↔ Request + фиксация `CommunicationEvent`.
+## Этап 3: master_bot MVP + client_bot/WebApp continuity
+Реализован рабочий контур сотрудника без слома intake-потока:
+- Telegram `master_bot` (`POST /telegram/master_bot/webhook`) с `/start`, главным меню и обработкой заявок.
+- Сценарии сотрудника: новые заявки, заявки в работе, поиск, карточки клиента/заявки, смена статуса, внутренние комментарии, служебные заметки по клиенту.
+- Базовая CRM-персистентность в `data/db.json`: assignment мастера, история статусов, lost reason, internal comments, master actions/events.
+- Skeleton quality layer: список/карточка quality case, смена статуса, комментарии по разбору.
+- Сохранена работа `client_bot` + WebApp MVP из этапа 2.
 
 ## BotHost production contract
 - Runtime: Node.js
@@ -61,18 +62,31 @@ npm start
 - `POST /telegram/master_bot/webhook`
 - `POST /telegram/integration_bot/webhook`
 
-## Что уже работает
-- Создание обращений по типам: `service_request`, `parts_request`, `consultation_request`, `warranty_request`, `data_change_request`, `callback_request` (через быстрый сценарий в боте).
-- Для новых обращений статус по умолчанию: `new`.
-- Быстрые обращения в Telegram запрашивают ФИО и телефон, сохраняются с `sourceChannel=telegram_chat`.
-- WebApp формирует обращения с `sourceChannel=webapp`.
-- Клиент может просматривать список своих обращений и актуальные рекомендации.
+## Master bot MVP: рабочие сценарии
+- `/start` + главное меню.
+- Просмотр списков заявок: `new`, `in_progress` (базово), поддержка статусов `waiting_data`, `processed`, `lost`, `archived` в service/storage.
+- Поиск по ФИО/телефону/VIN/госномеру.
+- Карточка клиента: ФИО, телефон, preferred channel, telegram binding, авто, обращения, рекомендации, внутренние заметки.
+- Карточка заявки: id, тип, статус, источник, описание, клиент, авто, ответственный мастер, история статусов, внутренние комментарии.
+- Изменение статусов с валидным workflow:
+  - `new -> waiting_data`
+  - `new -> in_progress`
+  - `waiting_data -> in_progress`
+  - `in_progress -> processed`
+  - `in_progress -> lost` (обязательный lost reason)
+  - `processed -> archived`
+  - `lost -> archived`
+- Внутренние комментарии по заявке (не отправляются клиенту).
+- Служебные заметки по клиенту (skeleton).
+- Запрос уточнения у клиента: фиксация intent/action/event, при доступном Telegram — попытка шаблонной отправки.
+- Quality skeleton: просмотр cases, карточка, смена статуса, комментарий.
 
-## Ограничения MVP
-- Нет авторизации/SMS-подтверждения.
-- Нет интеграции с 1С и внешними каналами VK/MAX.
-- Нет сложного workflow статусов, таймлайнов и кабинетного редактирования master-данных.
-- Хранилище MVP — json-файл, подготовлено к замене на полноценную БД.
+## Что пока не реализовано
+- Интеграция 1С, VK, MAX.
+- Полный quality workflow с автоматическим созданием кейсов.
+- Полноценный чат-движок мастер-клиент.
+- Продвинутая аналитика/AI.
+- Production-grade SQL storage (используется файловое хранилище MVP).
 
 ## Тесты
 ```bash
