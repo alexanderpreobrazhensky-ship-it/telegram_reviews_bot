@@ -388,14 +388,15 @@ Skeleton/ограничения:
 - `WEBAPP_URL` должен указывать на рабочий HTTPS домен.
 
 ### 15.2 Спец-проверки из ТЗ (подтверждение)
-1. `package-lock.json` корректен: lockfile v3, имя совпадает, `npm ci` проходит.
-2. `npm ci` работает в текущем состоянии.
-3. `npm-shrinkwrap.json` отсутствует и не мешает.
-4. Runtime слушает `process.env.PORT` (через config), не хардкодит 8000.
-5. `Dockerfile` соответствует Node-first (`node app.js`, `npm ci`).
-6. `.bothost/entrypoint.conf` соответствует Node-first (`main_file=app.js`, `branch=main`).
-7. `README.md` в целом согласован с кодом (с оговоркой по documented-only env).
-8. WebApp готов к базовому запуску как Mini App URL, но без глубокой Telegram theme/init-data интеграции.
+1. `package-lock.json` корректен: lockfile v3, имя/версия совпадают с `package.json`, `npm ci` проходит.
+2. `npm-shrinkwrap.json` отсутствует в репозитории и не перехватывает install контракт.
+3. Install step однозначный: `Dockerfile` использует `RUN npm ci --omit=dev` (без склейки с `npm install`).
+4. Runtime-порт берётся из `process.env.PORT` через `loadConfig()` (`src/infrastructure/config/index.js`), fallback только `3000`.
+5. Node startup-path слушает `config.port` в `app.js`; хардкода `8000` в Node production path нет.
+6. Лог `Platform skeleton server listening on port ...` формируется в `app.js` и печатает фактический `server.address().port`.
+7. Источник `8000` найден только в legacy Python-контуре (`services/client_bot_service/app/config.py`), вне Node-first deploy path.
+8. `.bothost/entrypoint.conf` соответствует Node-first (`main_file=app.js`, `branch=main`).
+9. `Dockerfile` соответствует Node-first runtime (`node app.js`) и install-контракту (`npm ci --omit=dev`).
 
 ### 15.3 Что проверить вручную после деплоя
 - `/health`, `/`, `/styles.css`, `/webapp.js`.
@@ -451,7 +452,7 @@ Skeleton/ограничения:
 - HTTPS сертификат валиден.
 - Запуск в single-instance режиме (или без конкурентной записи в одну file DB).
 
-### Что блокирует полноценный production-scale deploy
+### Что блокирует полноценный production-scale deploy (после снятия точечных deploy-блокеров PORT/install)
 - Отсутствие промышленной БД и очереди.
 - one_c не завершён как полноценный sync path.
 - Отсутствие e2e инфраструктурного контроля Telegram/SSL/BotHost runtime.
