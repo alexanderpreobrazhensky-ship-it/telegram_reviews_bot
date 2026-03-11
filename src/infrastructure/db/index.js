@@ -8,6 +8,14 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+function safeReadStoreRaw() {
+  try {
+    return JSON.parse(fs.readFileSync(DB_PATH, 'utf8'));
+  } catch {
+    return makeInitialStore();
+  }
+}
+
 function makeInitialStore() {
   const now = nowIso();
   return {
@@ -45,12 +53,24 @@ function ensureStore() {
     return;
   }
 
-  const store = JSON.parse(fs.readFileSync(DB_PATH, 'utf8'));
+  const store = safeReadStoreRaw();
   const initial = makeInitialStore();
   let changed = false;
   for (const [key, value] of Object.entries(initial)) {
     if (!Object.hasOwn(store, key)) {
       store[key] = value;
+      changed = true;
+    }
+  }
+
+
+  for (const task of store.tasks || []) {
+    if (!Object.hasOwn(task, 'processingStartedAt')) {
+      task.processingStartedAt = null;
+      changed = true;
+    }
+    if (!Object.hasOwn(task, 'updatedAt')) {
+      task.updatedAt = task.createdAt || nowIso();
       changed = true;
     }
   }
@@ -92,11 +112,13 @@ function ensureStore() {
 
 function readStore() {
   ensureStore();
-  return JSON.parse(fs.readFileSync(DB_PATH, 'utf8'));
+  return safeReadStoreRaw();
 }
 
 function writeStore(store) {
-  fs.writeFileSync(DB_PATH, JSON.stringify(store, null, 2));
+  const tempPath = `${DB_PATH}.tmp`;
+  fs.writeFileSync(tempPath, JSON.stringify(store, null, 2));
+  fs.renameSync(tempPath, DB_PATH);
 }
 
 function upsertClient({ fullName, phone, telegramId }) {
@@ -321,6 +343,8 @@ function updateRequestStatus({ requestId, toStatus, actorId, actorRole, lostReas
         processedAt: null,
         attemptCount: 0,
         lastError: null,
+        processingStartedAt: null,
+        updatedAt: nowIso(),
         payload: {
           clientId: request.clientId,
           requestId,
@@ -536,6 +560,8 @@ function createTask({ taskType, dueAt, payload = {} }) {
     processedAt: null,
     attemptCount: 0,
     lastError: null,
+    processingStartedAt: null,
+    updatedAt: nowIso(),
     payload
   };
   store.tasks.push(task);
@@ -548,8 +574,21 @@ function listTasks(statuses = []) {
   return statuses.length ? store.tasks.filter((item) => statuses.includes(item.status)) : store.tasks;
 }
 
-function claimDueTasks({ now = new Date().toISOString(), limit = 10 } = {}) {
+function claimDueTasks({ now = new Date().toISOString(), limit = 10, stuckTimeoutMs = 300000 } = {}) {
   const store = readStore();
+  const nowMs = Date.parse(now);
+  for (const task of store.tasks) {
+    if (task.status !== 'processing') continue;
+    const startedAtMs = Date.parse(task.processingStartedAt || task.updatedAt || task.createdAt || now);
+    if (!Number.isFinite(startedAtMs)) continue;
+    if (nowMs - startedAtMs >= Math.max(1000, Number(stuckTimeoutMs) || 300000)) {
+      task.status = 'scheduled';
+      task.lastError = task.lastError || 'PROCESSING_RECOVERED_AS_STUCK';
+      task.processingStartedAt = null;
+      task.updatedAt = nowIso();
+    }
+  }
+
   const due = store.tasks
     .filter((task) => task.status === 'scheduled' && task.dueAt <= now)
     .sort((a, b) => String(a.dueAt).localeCompare(String(b.dueAt)))
@@ -559,6 +598,8 @@ function claimDueTasks({ now = new Date().toISOString(), limit = 10 } = {}) {
     task.status = 'processing';
     task.attemptCount += 1;
     task.lastError = null;
+    task.processingStartedAt = nowIso();
+    task.updatedAt = nowIso();
   });
   if (due.length) writeStore(store);
   return due;
@@ -570,6 +611,8 @@ function completeTask(taskId) {
   if (!task) return null;
   task.status = 'completed';
   task.processedAt = nowIso();
+  task.processingStartedAt = null;
+  task.updatedAt = nowIso();
   writeStore(store);
   return task;
 }
@@ -580,10 +623,13 @@ function failTask(taskId, error, maxAttempts = 3) {
   if (!task) return null;
   task.lastError = String(error || 'unknown_error');
   task.status = task.attemptCount >= maxAttempts ? 'failed' : 'scheduled';
+  task.processingStartedAt = null;
   if (task.status === 'scheduled') {
     task.dueAt = new Date(Date.now() + Math.min(task.attemptCount, 5) * 60 * 1000).toISOString();
+    task.updatedAt = nowIso();
   } else {
     task.processedAt = nowIso();
+    task.updatedAt = nowIso();
   }
   writeStore(store);
   return task;

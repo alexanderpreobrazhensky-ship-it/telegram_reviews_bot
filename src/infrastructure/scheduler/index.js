@@ -1,4 +1,4 @@
-function createScheduler({ db, handlers = {}, logger = console, intervalMs = 15000, batchSize = 10, maxAttempts = 3 } = {}) {
+function createScheduler({ db, handlers = {}, logger = console, intervalMs = 15000, batchSize = 10, maxAttempts = 3, stuckTimeoutMs = 300000 } = {}) {
   let timer = null;
   let running = false;
 
@@ -7,7 +7,7 @@ function createScheduler({ db, handlers = {}, logger = console, intervalMs = 150
     running = true;
     let processed = 0;
     try {
-      const dueTasks = db.claimDueTasks({ limit: batchSize });
+      const dueTasks = db.claimDueTasks({ limit: batchSize, stuckTimeoutMs });
       for (const task of dueTasks) {
         const handler = handlers[task.taskType];
         if (!handler) {
@@ -34,7 +34,9 @@ function createScheduler({ db, handlers = {}, logger = console, intervalMs = 150
   function start() {
     if (timer) return;
     timer = setInterval(() => {
-      runOnce().catch(() => {});
+      runOnce().catch((error) => {
+        logger.error?.(`scheduler loop failed: ${error?.message || error}`);
+      });
     }, Math.max(1000, Number(intervalMs) || 15000));
   }
 

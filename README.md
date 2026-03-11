@@ -1,57 +1,87 @@
 # Единая платформа автосервиса (Node.js / BotHost)
 
-## Этап 6: analytics + management reporting MVP
-Реализован MVP-слой аналитики и управленческой отчётности поверх этапов 2–5, без нарушения BotHost-safe production contract и существующих контуров (`client_bot`, `master_bot`, `integration_bot`, WebApp, `/health`, feedback/quality, integration API).
+## Production contract (неизменяемый)
+- Runtime: **Node.js**
+- Entrypoint: **`app.js`**
+- Manifest: **`package.json`**
+- Deploy branch: **`main`**
+- Python не участвует в production startup path.
 
-## BotHost production contract
-- Runtime: Node.js
-- Entrypoint: `app.js`
-- Manifest: `package.json`
-- Ветка деплоя: `main`
-- Python не используется как production startup path.
+## Что реализовано
+- `client_bot` + WebApp MVP.
+- `master_bot` MVP.
+- feedback/quality flow MVP.
+- integration layer MVP (email/manual + one_c skeleton).
+- analytics/reporting MVP + snapshots.
+- scheduler/worker для задач (feedback/reminders).
 
-## Запуск
+## Быстрый запуск локально
 ```bash
 npm install
 npm start
 ```
 
-## Analytics/reporting MVP
-Добавлен application/service layer `src/core/application/reportingService.js` с методами:
-- `buildRequestsMetrics(...)`
-- `buildFeedbackMetrics(...)`
-- `buildQualityMetrics(...)`
-- `buildMasterMetrics(...)`
-- `buildSourceMetrics(...)`
-- `buildRecommendationMetrics(...)`
-- `buildManagementSummary(...)`
-- `buildPeriodicSnapshot(...)`
+## ENV
+### Обязательные
+- `PORT`
+- `TELEGRAM_CLIENT_BOT_TOKEN`
+- `TELEGRAM_MASTER_BOT_TOKEN`
+- `TELEGRAM_INTEGRATION_BOT_TOKEN`
 
-### Какие метрики считаются
-- **Requests:** total, by type/status/source channel/source system, processed/lost/archived.
-- **Conversion-like:** доля processed/lost/in_progress.
-- **Feedback/Quality:** total feedback, average rating, low-rating count/share, quality cases by status, resolved/unresolved.
-- **Masters:** touched/processed/lost, quality assigned/resolved by master.
-- **Sources:** `telegram_chat`, `webapp`, `email`, `manual_import`, `one_c`, `other`.
-- **Recommendations:** total/actual/completed/declined/expired/critical.
-- **Timing (best-effort MVP):** от создания заявки до первого движения из `new`, до `in_progress`, до `processed`, до создания feedback task.
+### Рекомендуемые
+- `WEBAPP_URL` — ссылка для кнопки WebApp в client bot
+- `DB_FILE_PATH` — путь к файловой БД (для BotHost указывать persistent volume)
+- `NODE_ENV=production`
 
-## Периоды и фильтры
-Поддержаны периоды:
-- `weekly`
-- `monthly`
-- `quarterly`
-- `custom` (`from` + `to`)
+### Optional
+- `ENABLE_INTEGRATION_WORKER`
+- `ONE_C_SYNC_ENABLED`
+- `EMAIL_IMPORT_ENABLED`
+- `ONE_C_WEBHOOK_SECRET`
+- `INTEGRATION_RETRY_MAX`
+- `INTEGRATION_RETRY_DELAY_SECONDS`
+- `FEEDBACK_REQUEST_DELAY_MINUTES`
+- `SCHEDULER_INTERVAL_MS`
+- `SCHEDULER_BATCH_SIZE`
+- `SCHEDULER_MAX_ATTEMPTS`
+- `SCHEDULER_STUCK_TIMEOUT_MS`
 
-Фильтры:
-- date range
-- `masterId`
-- `requestType`
-- `sourceChannel`
-- `sourceSystem`
+## BotHost deploy guide
+1. В BotHost выбрать ветку `main`.
+2. Runtime: Node.js 18+.
+3. Main file: `app.js`.
+4. Прописать обязательные ENV (минимум 3 Telegram token + `PORT`).
+5. Указать `DB_FILE_PATH` на постоянное хранилище.
+6. Запустить деплой.
 
-## Reporting API
-Добавлены endpoints:
+## Webhook routes (для Telegram setWebhook)
+- `POST /telegram/client_bot/webhook`
+- `POST /telegram/master_bot/webhook`
+- `POST /telegram/integration_bot/webhook`
+
+## API inventory (ключевое)
+### Health
+- `GET /health`
+
+### Client/WebApp
+- `POST /api/client/requests/service`
+- `POST /api/client/requests/parts`
+- `POST /api/client/requests/consultation`
+- `POST /api/client/requests/warranty`
+- `POST /api/client/requests/data-change`
+- `GET /api/client/requests`
+- `GET /api/client/recommendations`
+- `POST /api/client/recommendations/:id/interest`
+
+### Integration
+- `POST /api/integrations/email`
+- `POST /api/integrations/manual`
+- `POST /api/integrations/one-c/:entityType`
+- `GET /api/integrations/events`
+- `GET /api/integrations/events/:id`
+- `POST /api/integrations/events/:id/retry`
+
+### Reporting
 - `GET /api/reports/summary?period=weekly|monthly|quarterly`
 - `GET /api/reports/summary?from=...&to=...`
 - `GET /api/reports/requests`
@@ -64,42 +94,19 @@ npm start
 - `GET /api/reports/snapshots`
 - `GET /api/reports/snapshots/:id`
 
-## Management summaries
-`buildManagementSummary(...)` возвращает:
-1. structured JSON summary;
-2. human-readable text summary (готово для manager-facing delivery/future AI post-processing).
+### WebApp/static
+- `GET /`, `/requests`, `/recommendations`
+- `GET /forms/service-request`, `/forms/parts-request`, `/forms/consultation`, `/forms/warranty-request`, `/forms/data-change-request`
+- `GET /styles.css`, `/webapp.js`
 
-## Manager-facing hooks (master_bot)
-Добавлены команды:
-- `/report_week`
-- `/report_month`
-- `/report_quarter`
-- `/report_stats`
-
-Доступ: только `manager` и `admin`; `master` получает `REPORT_ACCESS_DENIED`.
-
-## Snapshot storage
-В файловой БД (`data/db.json`) добавлена коллекция:
-- `reportSnapshots`
-
-Snapshot-поля:
-- `id`
-- `reportType`
-- `periodType`
-- `periodStart`
-- `periodEnd`
-- `generatedAt`
-- `metrics`
-- `summaryText`
-- `generatedBy`
-- `sourceDataVersion` (optional)
-- `notes` (optional)
-
-## Ограничения MVP
-- Нет полноценного BI/дашборда.
-- Нет production-grade DWH.
-- 1С-обогащение метрик пока ограничено (summary честно отмечает отсутствие полноценных one_c событий).
-- Воронка визитов считается best-effort по доступным платформенным данным.
+## Smoke-test plan после деплоя
+1. `GET /health` -> 200.
+2. Вызвать 3 webhook endpoints тестовым update payload.
+3. Открыть WebApp страницы `/`, `/requests`, `/recommendations`.
+4. Создать минимум 1 client request через API/WebApp.
+5. Проверить `GET /api/reports/summary?period=weekly`.
+6. Создать snapshot `POST /api/reports/snapshots`.
+7. Проверить feedback flow: перевод заявки в `processed` -> task -> клиентская оценка.
 
 ## Тесты
 ```bash

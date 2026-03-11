@@ -13,3 +13,26 @@ test('config loads defaults', () => {
   assert.equal(Object.hasOwn(config, 'oneCSyncEnabled'), true);
   assert.equal(Object.hasOwn(config, 'emailImportEnabled'), true);
 });
+
+
+test('config sanitizes invalid numeric env values', () => {
+  const original = {
+    PORT: process.env.PORT,
+    SCHEDULER_INTERVAL_MS: process.env.SCHEDULER_INTERVAL_MS,
+    INTEGRATION_RETRY_MAX: process.env.INTEGRATION_RETRY_MAX
+  };
+
+  process.env.PORT = 'invalid';
+  process.env.SCHEDULER_INTERVAL_MS = '0';
+  process.env.INTEGRATION_RETRY_MAX = '-5';
+
+  const config = loadConfig();
+  assert.equal(config.port, 3000);
+  assert.equal(config.schedulerIntervalMs, 1000);
+  assert.equal(config.integrationRetryMax, 1);
+
+  for (const [key, value] of Object.entries(original)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+});
