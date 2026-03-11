@@ -9,8 +9,8 @@
 - Production path: **Node-first**
 
 ## Deploy fixes applied
-- Lockfile contract приведён к `npm ci`: добавлен актуальный `package-lock.json`, конфликтующих lock-артефактов нет.
-- Runtime port берётся из `process.env.PORT`; fallback `3000` используется только для локального запуска.
+- Lockfile contract приведён к `npm ci`: в репозитории хранится обязательный актуальный `package-lock.json`, `npm-shrinkwrap.json` отсутствует.
+- Runtime port всегда берётся из `process.env.PORT` в production; fallback `3000` используется только для локального запуска.
 - Legacy Python deployment traces нейтрализованы (Dockerfile, BotHost entrypoint, CI).
 
 ## Quick start (local)
@@ -18,6 +18,12 @@
 npm ci
 npm start
 ```
+
+## Build & runtime contract
+- `package-lock.json` обязателен и должен коммититься при любом изменении npm-дерева.
+- CI/деплой использует `npm ci` (без fallback на `npm install`).
+- Production runtime слушает `process.env.PORT`; локальный fallback: `3000`.
+
 
 ## ENV audit (runtime)
 ### Обязательные для production

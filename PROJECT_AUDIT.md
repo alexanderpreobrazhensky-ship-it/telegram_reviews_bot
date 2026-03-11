@@ -1,7 +1,7 @@
 # PROJECT_AUDIT.md — final pre-deploy re-audit
 
 ## 9.1 Executive summary
-Проект — единая Node.js-платформа автосервиса с тремя Telegram-ботами (`client_bot`, `master_bot`, `integration_bot`), WebApp, integration/event pipeline, scheduler и reporting-слоем. Production-контракт зафиксирован как Node-first и синхронизирован с deploy-конфигами. Ключевые блокеры деплоя закрыты: lockfile для `npm ci` и runtime-port через `process.env.PORT`. Риски MVP-уровня остаются в зоне file DB, single-process scheduler и skeleton one_c integration.
+Проект — единая Node.js-платформа автосервиса с тремя Telegram-ботами (`client_bot`, `master_bot`, `integration_bot`), WebApp, integration/event pipeline, scheduler и reporting-слоем. Production-контракт зафиксирован как Node-first и синхронизирован с deploy-конфигами. Ключевые блокеры деплоя закрыты: lockfile для `npm ci` и runtime-port через `process.env.PORT` (с local fallback 3000). Риски MVP-уровня остаются в зоне file DB, single-process scheduler и skeleton one_c integration.
 
 ## 9.2 Production contract
 - Runtime: **Node.js**
@@ -39,7 +39,7 @@
    - `src/interfaces/master_bot/index.js`
    - `src/interfaces/integration_bot/index.js`
 5. Инициализация scheduler через `createScheduler()`.
-6. `server.listen(config.port)`; `config.port` = `process.env.PORT` (fallback 3000 local only).
+6. `server.listen(config.port)`; `config.port` = `process.env.PORT` (fallback 3000 local only); startup log отражает фактический runtime port.
 
 ## 9.5 Runtime model
 - Single Node process.
@@ -112,7 +112,7 @@
 
 ## 9.8 ENV audit
 ### Обязательные
-- `PORT` — runtime listening port.
+- `PORT` — runtime listening port (обязателен для production, передаётся платформой).
 - `TELEGRAM_CLIENT_BOT_TOKEN` — отправка/обработка client bot.
 - `TELEGRAM_MASTER_BOT_TOKEN` — master bot webhook/ответы.
 - `TELEGRAM_INTEGRATION_BOT_TOKEN` — integration bot webhook/ответы.
@@ -216,7 +216,7 @@
 
 ## 9.21 Deploy readiness audit
 ### Pre-deploy
-- `npm ci` проходит.
+- `npm ci` проходит и не требует fallback на `npm install`.
 - `npm test` проходит.
 - `.bothost/entrypoint.conf` указывает `app.js`.
 - Dockerfile согласован с Node runtime.
