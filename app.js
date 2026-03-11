@@ -18,10 +18,17 @@ function bootstrap() {
   const config = loadConfig();
   const server = createServer({ config, logger });
 
+  if (!config.telegramClientBotToken) {
+    logger.warn('TELEGRAM_CLIENT_BOT_TOKEN is missing: outgoing bot notifications are disabled');
+  }
+
   const scheduler = createScheduler({
     db,
     logger,
     intervalMs: config.schedulerIntervalMs,
+    batchSize: config.schedulerBatchSize,
+    maxAttempts: config.schedulerMaxAttempts,
+    stuckTimeoutMs: config.schedulerStuckTimeoutMs,
     handlers: {
       async feedback_request(task) {
         const client = task.payload?.clientId ? db.getClientCard(task.payload.clientId)?.client : null;

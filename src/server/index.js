@@ -15,11 +15,11 @@ function readBody(req) {
       raw += chunk;
     });
     req.on('end', () => {
-      if (!raw) return resolve({});
+      if (!raw) return resolve({ body: {}, invalidJson: false });
       try {
-        resolve(JSON.parse(raw));
+        resolve({ body: JSON.parse(raw), invalidJson: false });
       } catch {
-        resolve({});
+        resolve({ body: {}, invalidJson: true });
       }
     });
   });
@@ -31,9 +31,13 @@ function sendJson(res, status, payload) {
 }
 
 function serveFile(res, filePath, contentType) {
-  const content = fs.readFileSync(filePath, 'utf8');
-  res.writeHead(200, { 'Content-Type': `${contentType}; charset=utf-8` });
-  res.end(content);
+  try {
+    const content = fs.readFileSync(filePath, 'utf8');
+    res.writeHead(200, { 'Content-Type': `${contentType}; charset=utf-8` });
+    res.end(content);
+  } catch {
+    sendJson(res, 404, { error: 'Not found' });
+  }
 }
 
 function createClientRequest({ body, type, sourceChannel = 'webapp' }) {
@@ -49,6 +53,14 @@ function createClientRequest({ body, type, sourceChannel = 'webapp' }) {
   const request = db.createRequest({ clientId: client.id, vehicleId: vehicle?.id || null, requestType: type, description: body.description || body.question || body.changeDetails || '', sourceChannel });
   db.createCommunicationEvent({ clientId: client.id, requestId: request.id, source: sourceChannel === 'webapp' ? 'webapp' : 'bot', payload: { action: 'request_created', type } });
   return { client, vehicle, request };
+}
+
+
+function validateClientRequestPayload(body = {}) {
+  const errors = [];
+  if (!String(body.fullName || '').trim()) errors.push('fullName is required');
+  if (!String(body.phone || '').trim()) errors.push('phone is required');
+  return errors;
 }
 
 function createServer({ config, logger }) {
@@ -74,11 +86,23 @@ function createServer({ config, logger }) {
       return serveFile(res, path.join(process.cwd(), 'public', 'index.html'), 'text/html');
     }
 
-    if (req.method === 'POST' && pathname === '/api/client/requests/service') return sendJson(res, 201, createClientRequest({ body: await readBody(req), type: REQUEST_TYPES.SERVICE }).request);
-    if (req.method === 'POST' && pathname === '/api/client/requests/parts') return sendJson(res, 201, createClientRequest({ body: await readBody(req), type: REQUEST_TYPES.PARTS }).request);
-    if (req.method === 'POST' && pathname === '/api/client/requests/consultation') return sendJson(res, 201, createClientRequest({ body: await readBody(req), type: REQUEST_TYPES.CONSULTATION }).request);
-    if (req.method === 'POST' && pathname === '/api/client/requests/warranty') return sendJson(res, 201, createClientRequest({ body: await readBody(req), type: REQUEST_TYPES.WARRANTY }).request);
-    if (req.method === 'POST' && pathname === '/api/client/requests/data-change') return sendJson(res, 201, createClientRequest({ body: await readBody(req), type: REQUEST_TYPES.DATA_CHANGE }).request);
+    if (req.method === 'POST' && pathname.startsWith('/api/client/requests/')) {
+      const { body, invalidJson } = await readBody(req);
+      if (invalidJson) return sendJson(res, 400, { error: 'Invalid JSON payload' });
+      const errors = validateClientRequestPayload(body);
+      if (errors.length) return sendJson(res, 400, { error: 'Validation error', details: errors });
+
+      const typeMap = {
+        '/api/client/requests/service': REQUEST_TYPES.SERVICE,
+        '/api/client/requests/parts': REQUEST_TYPES.PARTS,
+        '/api/client/requests/consultation': REQUEST_TYPES.CONSULTATION,
+        '/api/client/requests/warranty': REQUEST_TYPES.WARRANTY,
+        '/api/client/requests/data-change': REQUEST_TYPES.DATA_CHANGE
+      };
+      const type = typeMap[pathname];
+      if (!type) return sendJson(res, 404, { error: 'Not found' });
+      return sendJson(res, 201, createClientRequest({ body, type }).request);
+    }
 
     if (req.method === 'GET' && pathname === '/api/client/requests') {
       return sendJson(res, 200, { items: db.listRequests({ phone: requestUrl.searchParams.get('phone'), telegramId: requestUrl.searchParams.get('telegramId') }) });
@@ -95,12 +119,15 @@ function createServer({ config, logger }) {
     }
 
     if (req.method === 'POST' && pathname === '/api/integrations/email') {
-      const event = ingestEmail(await readBody(req));
+      const { body, invalidJson } = await readBody(req);
+      if (invalidJson) return sendJson(res, 400, { error: 'Invalid JSON payload' });
+      const event = ingestEmail(body);
       return sendJson(res, 201, event);
     }
 
     if (req.method === 'POST' && pathname === '/api/integrations/manual') {
-      const body = await readBody(req);
+      const { body, invalidJson } = await readBody(req);
+      if (invalidJson) return sendJson(res, 400, { error: 'Invalid JSON payload' });
       const event = integrationService.receiveIntegrationEvent({
         sourceSystem: body.sourceSystem || integrationService.INTEGRATION_SOURCES.MANUAL_IMPORT,
         eventType: body.eventType || integrationService.INTEGRATION_EVENT_TYPES.MANUAL_REQUEST_IMPORT,
@@ -111,7 +138,8 @@ function createServer({ config, logger }) {
     }
 
     if (req.method === 'POST' && pathname.startsWith('/api/integrations/one-c/')) {
-      const body = await readBody(req);
+      const { body, invalidJson } = await readBody(req);
+      if (invalidJson) return sendJson(res, 400, { error: 'Invalid JSON payload' });
       const entityType = pathname.split('/')[4];
       const eventTypeMap = {
         client: integrationService.INTEGRATION_EVENT_TYPES.ONE_C_CLIENT_SYNC,
@@ -172,7 +200,8 @@ function createServer({ config, logger }) {
     if (req.method === 'GET' && pathname === '/api/reports/recommendations') return sendJson(res, 200, reportingService.buildRecommendationMetrics(Object.fromEntries(requestUrl.searchParams.entries())));
 
     if (req.method === 'POST' && pathname === '/api/reports/snapshots') {
-      const body = await readBody(req);
+      const { body, invalidJson } = await readBody(req);
+      if (invalidJson) return sendJson(res, 400, { error: 'Invalid JSON payload' });
       const snapshot = reportingService.buildPeriodicSnapshot(body || {});
       return sendJson(res, 201, snapshot);
     }
@@ -190,7 +219,8 @@ function createServer({ config, logger }) {
 
     const matched = router.find((item) => item.path === pathname && item.method === req.method);
     if (matched) {
-      const body = await readBody(req);
+      const { body, invalidJson } = await readBody(req);
+      if (invalidJson) return sendJson(res, 400, { error: 'Invalid JSON payload' });
       const payload = matched.handler ? await matched.handler({ body, config }) : { accepted: true };
       logger.info(`Accepted route: ${req.method} ${pathname}`);
       return sendJson(res, 200, payload);
