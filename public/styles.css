@@ -1,8 +1,112 @@
-body { font-family: Arial, sans-serif; margin: 0; padding: 24px; background: #f5f7fb; }
-main { max-width: 900px; margin: 0 auto; background: #fff; padding: 20px; border-radius: 10px; }
-nav { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 16px; }
-a { color: #1155cc; text-decoration: none; background: #eef3ff; padding: 6px 10px; border-radius: 6px; }
-label { display: block; margin-bottom: 10px; }
-input, textarea, button { width: 100%; padding: 8px; margin-top: 4px; box-sizing: border-box; }
-button { cursor: pointer; background: #1155cc; color: #fff; border: 0; border-radius: 6px; }
-.ok { color: #1f7a1f; }
+:root {
+  color-scheme: light dark;
+  --tg-bg-color: #f4f6fb;
+  --tg-text-color: #1f2937;
+  --tg-hint-color: #5f6b7a;
+  --tg-link-color: #1d4ed8;
+  --tg-button-color: #2563eb;
+  --tg-button-text-color: #ffffff;
+  --tg-secondary-bg-color: #ffffff;
+  --surface-muted: #e8edf7;
+  --border-color: #d5deed;
+  --success-color: #166534;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --tg-bg-color: #111827;
+    --tg-text-color: #e5e7eb;
+    --tg-hint-color: #9ca3af;
+    --tg-link-color: #7fb0ff;
+    --tg-button-color: #3b82f6;
+    --tg-button-text-color: #ffffff;
+    --tg-secondary-bg-color: #1f2937;
+    --surface-muted: #2a3546;
+    --border-color: #374151;
+    --success-color: #86efac;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  font-family: Arial, sans-serif;
+  margin: 0;
+  padding: 24px;
+  background: var(--tg-bg-color);
+  color: var(--tg-text-color);
+}
+
+main {
+  max-width: 900px;
+  margin: 0 auto;
+  background: var(--tg-secondary-bg-color);
+  padding: 20px;
+  border-radius: 12px;
+  border: 1px solid var(--border-color);
+}
+
+h1,
+h2,
+h3 {
+  margin-top: 0;
+  color: var(--tg-text-color);
+}
+
+nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+a {
+  color: var(--tg-link-color);
+  text-decoration: none;
+  background: var(--surface-muted);
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border-color);
+}
+
+label {
+  display: block;
+  margin-bottom: 10px;
+}
+
+input,
+textarea,
+button {
+  width: 100%;
+  padding: 10px;
+  margin-top: 4px;
+  box-sizing: border-box;
+  border-radius: 8px;
+  border: 1px solid var(--border-color);
+  background: var(--tg-secondary-bg-color);
+  color: var(--tg-text-color);
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--tg-hint-color);
+}
+
+button {
+  cursor: pointer;
+  background: var(--tg-button-color);
+  color: var(--tg-button-text-color);
+  border: 0;
+  font-weight: 600;
+}
+
+button:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
+
+.ok {
+  color: var(--success-color);
+}
