@@ -1,74 +1,152 @@
-# PROJECT_AUDIT.md — final pre-deploy re-audit
+# PROJECT_AUDIT.md
 
-## 9.1 Executive summary
-Проект — единая Node.js-платформа автосервиса с тремя Telegram-ботами (`client_bot`, `master_bot`, `integration_bot`), WebApp, integration/event pipeline, scheduler и reporting-слоем. Production-контракт зафиксирован как Node-first и синхронизирован с deploy-конфигами. Ключевые блокеры деплоя закрыты: lockfile для `npm ci` и runtime-port через `process.env.PORT` (с local fallback 3000). Риски MVP-уровня остаются в зоне file DB, single-process scheduler и skeleton one_c integration.
+## 1. Контекст и цель аудита
+Этот аудит выполнен как единый источник правды по текущему состоянию репозитория перед подготовкой отдельного ТЗ на исправления и доведение до деплоя. Проект подтверждён как **Node.js-first** по production-контракту: runtime Node.js, entrypoint `app.js`, manifest `package.json`, целевая платформа BotHost.
 
-## 9.2 Production contract
-- Runtime: **Node.js**
-- Entrypoint: **`app.js`**
-- Manifest: **`package.json`**
-- Branch: **`main`**
-- Platform target: **BotHost**
-- Production path: **Node-first**
+---
 
-## 9.3 Repository snapshot
-### Production-critical
-- `app.js`
-- `src/server/index.js`
-- `src/interfaces/*`
-- `src/core/*`
-- `src/infrastructure/*`
-- `public/*`
-- `package.json`, `package-lock.json`
-- `.bothost/entrypoint.conf`
-- `Dockerfile`
+## 2. Общая структура репозитория
 
-### Auxiliary
-- `tests/node/*` — актуальные Node tests.
-- `audit/*` — старые audit artifacts (не являются source of truth).
+### 2.1 Корневая структура (ключевые зоны)
+- Runtime/deploy: `app.js`, `package.json`, `package-lock.json`, `Dockerfile`, `.bothost/entrypoint.conf`.
+- Основной код Node: `src/`.
+- Frontend WebApp: `public/`.
+- Тесты Node: `tests/node/`.
+- Legacy-тесты Python (отключены): `tests/test_*.py`.
+- Данные/персистентность: `data/` (`db.json` создаётся runtime-ом).
+- Legacy/исторический контур: `bots/`, `services/`, `shared/`, `requirements.txt`, `legacy/index.js`.
+- Документация/аудиты: `README.md`, `PROJECT_AUDIT.md`, `audit/*`.
 
-### Legacy
-- `bots/*`, `services/*`, `shared/*`, `tests/test_*.py`, `requirements.txt`, `legacy/index.js` — historical Python/transition contour, не production path.
+### 2.2 Production-critical файлы
+- `app.js` — фактический bootstrap процесса, создание HTTP-сервера + запуск scheduler.
+- `src/server/index.js` — HTTP routing: health, webhooks, client/integration/reporting API, static/WebApp routes.
+- `src/infrastructure/config/index.js` — loadConfig и env parsing.
+- `src/infrastructure/db/index.js` — file-based persistence и бизнес-операции.
+- `src/infrastructure/scheduler/index.js` — interval scheduler и retry/stuck механика.
+- `src/interfaces/*` — webhook handlers трёх ботов.
+- `public/*` — клиентский WebApp.
+- `package.json`/`package-lock.json` — Node manifest + lockfile.
+- `.bothost/entrypoint.conf`, `Dockerfile` — deploy/runtime указания.
 
-## 9.4 Entrypoints and startup chain
-1. `node app.js` → `bootstrap()`.
-2. `loadConfig()` из `src/infrastructure/config/index.js`.
-3. `createServer()` из `src/server/index.js`.
-4. Регистрация webhook-роутов из:
-   - `src/interfaces/client_bot/index.js`
-   - `src/interfaces/master_bot/index.js`
-   - `src/interfaces/integration_bot/index.js`
-5. Инициализация scheduler через `createScheduler()`.
-6. `server.listen(config.port)`; `config.port` = `process.env.PORT` (fallback 3000 local only); startup log отражает фактический runtime port.
+### 2.3 Служебные файлы
+- `.github/workflows/tests.yml` — CI на `npm ci` + `npm test`.
+- `audit/*` — старые аудиторские артефакты, не должны считаться актуальным runtime source-of-truth.
 
-## 9.5 Runtime model
-- Single Node process.
-- HTTP server обслуживает API + webhooks + static WebApp.
-- Scheduler работает как interval-loop в том же процессе.
-- Persistence: file JSON DB (`DB_FILE_PATH`).
-- Ограничения: нет distributed locking, нет external queue/exactly-once гарантий.
+### 2.4 Legacy/подозрительные артефакты
+- `bots/`, `services/`, `shared/`, `requirements.txt` — Python/гибридный исторический слой, не используемый production Node path.
+- `legacy/index.js` — shim с warning и редиректом в `app.js`.
+- `src/interfaces/webapp/routes.js`, `src/interfaces/webapp/state.js` — вспомогательный skeleton, напрямую в runtime роутере не участвует.
 
-## 9.6 Feature readiness matrix
-- `client_bot` — **implemented (MVP)**.
-- WebApp — **implemented (MVP)**.
-- `master_bot` — **implemented (MVP)**.
-- `integration_bot` — **implemented (MVP/operator tool)**.
-- feedback flow — **implemented**.
-- quality flow — **partially implemented**.
-- scheduler/task layer — **implemented with operational limits**.
-- integration layer — **implemented (email/manual) + one_c skeleton**.
-- reporting layer — **implemented (summary + metrics + snapshots)**.
+---
 
-## 9.7 Full routes inventory
-### Health
-- `GET /health` — сервисный health-check.
+## 3. Entrypoints и startup chain
 
-### Telegram webhooks
-- `POST /telegram/client_bot/webhook` — входящие обновления client bot.
-- `POST /telegram/master_bot/webhook` — команды мастер/менеджер бота.
-- `POST /telegram/integration_bot/webhook` — мониторинг integration events.
+### 3.1 Основной production entrypoint (de-facto)
+- **`app.js`** — подтверждён в `package.json.main`, Docker CMD и BotHost `main_file`.
 
-### Client API
+### 3.2 Secondary entrypoints
+- `npm start` → `node app.js`.
+- `legacy/index.js` → лог предупреждения + `require('../app')` (не основной путь).
+
+### 3.3 Фактическая цепочка запуска
+1. `bootstrap()` в `app.js`.
+2. `loadConfig()` читает env.
+3. `createServer({ config, logger })` создаёт HTTP server.
+4. Регистрируются webhook routes из `client_bot`, `master_bot`, `integration_bot` интерфейсов.
+5. Инициализируется scheduler (`createScheduler`) с параметрами из config.
+6. `server.listen(config.port)`.
+7. После успешного listen запускается `scheduler.start()`.
+8. На `server.close` вызывается `scheduler.stop()`.
+
+### 3.4 Где что стартует
+- HTTP server: `src/server/index.js`.
+- Webhook handlers: `src/interfaces/client_bot`, `master_bot`, `integration_bot`.
+- Scheduler: создаётся в `app.js`, loop — `src/infrastructure/scheduler/index.js`.
+- Config reading: `src/infrastructure/config/index.js`.
+
+### 3.5 Сверка code vs Dockerfile vs BotHost config vs docs
+- `app.js` как entrypoint: **согласовано** (`package.json`, Dockerfile, `.bothost/entrypoint.conf`, README).
+- Branch `main`: отражён в `.bothost/entrypoint.conf` и README.
+- Node runtime narrative: согласован в README и CI (`npm ci`, `npm test`).
+
+---
+
+## 4. Runtime model
+- Модель: **single-process Node.js**.
+- В одном процессе живут одновременно:
+  - HTTP API + static/WebApp routes,
+  - Telegram webhooks (3 бота),
+  - scheduler loop.
+- Queue broker отсутствует; retry и scheduling опираются на file DB.
+- Persistence: JSON file на диске (`DB_FILE_PATH` или `data/db.json`).
+
+### Runtime assumptions
+- Процесс один, без горизонтального масштабирования по умолчанию.
+- Доступ к файлу БД локальный и консистентный в рамках одного процесса.
+- Фоновые задачи обрабатываются этим же процессом, отдельного worker-процесса нет.
+
+### Ограничения модели
+- Нет distributed lock и coordination для multi-instance.
+- Нет transactional/ACID гарантий уровня SQL.
+- Перезапуск процесса/падения влияют и на API, и на scheduler одновременно.
+
+---
+
+## 5. Полный ENV audit
+
+### 5.1 Runtime-active env (Node path)
+| ENV | Статус | Default | Где читается | Назначение | Критичность deploy/runtime |
+|---|---|---|---|---|---|
+| `PORT` | required (prod) | `3000` | `src/infrastructure/config/index.js` | Порт HTTP-сервера | Критично для deploy и runtime |
+| `NODE_ENV` | recommended | `development` | `src/infrastructure/config/index.js` | Маркер окружения (в `/health`) | Средняя |
+| `TELEGRAM_CLIENT_BOT_TOKEN` | required (prod) | `''` | `src/infrastructure/config/index.js`, `app.js`, `client/master handlers` | Отправка сообщений client bot / уточнения | Высокая |
+| `TELEGRAM_MASTER_BOT_TOKEN` | required (prod) | `''` | `src/infrastructure/config/index.js`, `client_bot` quality notify | Отправка уведомлений в master bot | Высокая |
+| `TELEGRAM_INTEGRATION_BOT_TOKEN` | required (prod) | `''` | `src/infrastructure/config/index.js` | Интеграционный бот (на уровне webhook route и config) | Средняя/высокая |
+| `WEBAPP_URL` | required (фактически для Mini App UX) | `https://example.com` | `src/infrastructure/config/index.js`, `client_bot /start` | URL WebApp-кнопки в Telegram | Высокая для бизнес-сценария |
+| `DB_FILE_PATH` | recommended | `data/db.json` | `src/infrastructure/db/index.js` | Путь к JSON БД | Высокая |
+| `SCHEDULER_INTERVAL_MS` | optional | `15000` | `config` → `app.js` scheduler | Интервал loop | Средняя |
+| `SCHEDULER_BATCH_SIZE` | optional | `10` | `config` → scheduler | Batch due tasks | Средняя |
+| `SCHEDULER_MAX_ATTEMPTS` | optional | `3` | `config` → scheduler | Retry лимит фоновых задач | Средняя |
+| `SCHEDULER_STUCK_TIMEOUT_MS` | optional | `300000` | `config` → scheduler/db | Recovery зависших processing задач | Средняя |
+| `FEEDBACK_REQUEST_DELAY_MINUTES` | optional | `5` | `config`, `db.updateRequestStatus` | Отложенный запрос фидбека после `processed` | Средняя |
+| `INTEGRATION_RETRY_MAX` | optional (documented) | `3` | `config` | Задекларирован лимит retry интеграций | Низкая (де-факто не применяется) |
+| `INTEGRATION_RETRY_DELAY_SECONDS` | optional (documented) | `60` | `config` | Задекларирован delay retry интеграций | Низкая (де-факто не применяется) |
+
+### 5.2 Documented/legacy/dead env
+| ENV | Категория | Комментарий |
+|---|---|---|
+| `DB_URL` | documented-only / dead for runtime | Читается в config, но storage фактически file JSON, не Postgres driver. |
+| `QUEUE_DRIVER` | documented-only / dead | Читается в config, но отдельный queue backend не используется. |
+| `ONE_C_WEBHOOK_SECRET` | documented-only / dead | Читается в config, но в HTTP routes не валидируется. |
+| `ENABLE_INTEGRATION_WORKER` | documented-only / dead | Включатель worker не влияет на фактический runtime (отдельного worker нет). |
+| `ONE_C_SYNC_ENABLED` | documented-only / dead | Читается, но one_c поток работает как skeleton через route + placeholder. |
+| `EMAIL_IMPORT_ENABLED` | documented-only / dead | Читается, но email ingest route не gated этим флагом. |
+
+### 5.3 Legacy env (Python contour, не production path)
+Обнаружены в `bots/client_bot/*` и `services/client_bot_service/*`: `CLIENT_TELEGRAM_BOT_TOKEN`, `TELEGRAM_BOT_TOKEN`, `BOT_API_TOKEN`, `API_TOKEN`, `BOT_TOKEN`, `TOKEN`, `CLIENT_SERVICE_PORT`, `CLIENT_WEBAPP_URL`, `WEBAPP_PATH`, `CLIENT_MASTERS_CHAT_ID`, `CLIENT_MASTER_CHAT_ID`, `CLIENT_MASTER_USER_IDS`, `CLIENT_MASTER_IDS`, `CLIENT_CHAT_ID`, `TELEGRAM_BOT_USERNAME`, `REPORT_CHAT_IDS`.
+
+### 5.4 Спец-проверки из ТЗ
+- `PORT`: слушается через `config.port` (из `process.env.PORT`, fallback 3000).
+- `WEBAPP_URL`: реально используется в client bot (`/start`, quick flow сообщения).
+- `DB_FILE_PATH`: реально используется для DB path.
+- `NODE_ENV`: отражается в health payload.
+- Telegram tokens: реально читаются и используются для исходящих Telegram API вызовов.
+- Scheduler env: реально влияет на scheduler loop.
+- Integration env: в основном декларативные, не все влияют на фактический поток.
+
+---
+
+## 6. Полный inventory маршрутов
+
+### 6.1 Health
+- `GET /health` — health-check + `env`.
+
+### 6.2 Telegram webhooks
+- `POST /telegram/client_bot/webhook` — обработка клиентского бота.
+- `POST /telegram/master_bot/webhook` — обработка мастер/менеджер бота.
+- `POST /telegram/integration_bot/webhook` — команды интеграционного бота.
+
+### 6.3 Client API
 - `POST /api/client/requests/service`
 - `POST /api/client/requests/parts`
 - `POST /api/client/requests/consultation`
@@ -78,15 +156,15 @@
 - `GET /api/client/recommendations`
 - `POST /api/client/recommendations/:id/interest`
 
-### Integration API
+### 6.4 Integration API
 - `POST /api/integrations/email`
 - `POST /api/integrations/manual`
-- `POST /api/integrations/one-c/:entityType`
+- `POST /api/integrations/one-c/:entityType` (`client|vehicle|visit|recommendation`)
 - `GET /api/integrations/events`
 - `GET /api/integrations/events/:id`
 - `POST /api/integrations/events/:id/retry`
 
-### Reporting API
+### 6.5 Reporting API
 - `GET /api/reports/summary`
 - `GET /api/reports/requests`
 - `GET /api/reports/feedback`
@@ -98,7 +176,7 @@
 - `GET /api/reports/snapshots`
 - `GET /api/reports/snapshots/:id`
 
-### WebApp/static
+### 6.6 WebApp/static
 - `GET /`
 - `GET /requests`
 - `GET /recommendations`
@@ -110,140 +188,280 @@
 - `GET /styles.css`
 - `GET /webapp.js`
 
-## 9.8 ENV audit
-### Обязательные
-- `PORT` — runtime listening port (обязателен для production, передаётся платформой).
-- `TELEGRAM_CLIENT_BOT_TOKEN` — отправка/обработка client bot.
-- `TELEGRAM_MASTER_BOT_TOKEN` — master bot webhook/ответы.
-- `TELEGRAM_INTEGRATION_BOT_TOKEN` — integration bot webhook/ответы.
+---
 
-### Рекомендуемые
-- `WEBAPP_URL` — ссылка Mini App.
-- `DB_FILE_PATH` — путь к persistent file DB.
-- `NODE_ENV` — окружение.
+## 7. Bot audit
 
-### Optional
-- `DB_URL` (в конфиге, сейчас не драйвит file DB runtime).
-- `QUEUE_DRIVER` (memory by default).
+### 7.1 client_bot
+Реально реализовано:
+- `/start`: приветствие + inline WebApp button (`WEBAPP_URL`) + reply-клавиатура быстрых сценариев.
+- Быстрые обращения из чата (через state machine `fullName -> phone`).
+- Сохранение request + communication event.
+- Приём фидбека формата `1..5 [comment]`.
+- При низкой оценке создаётся quality case и отправляются уведомления мастеру/менеджеру (если найдены staff chat ids).
 
-### Scheduler/retry
-- `SCHEDULER_INTERVAL_MS`
-- `SCHEDULER_BATCH_SIZE`
-- `SCHEDULER_MAX_ATTEMPTS`
-- `SCHEDULER_STUCK_TIMEOUT_MS`
-- `FEEDBACK_REQUEST_DELAY_MINUTES`
-- `INTEGRATION_RETRY_MAX`
-- `INTEGRATION_RETRY_DELAY_SECONDS`
+Риски/пробелы:
+- In-memory sessions (`Map`) теряются при рестарте процесса.
+- Нет валидации телефона в quick flow.
+- Ошибки Telegram API подавляются (`catch(() => {})`), нет наблюдаемой доставки/alerts.
 
-### Integration-related
-- `ENABLE_INTEGRATION_WORKER`
-- `ONE_C_SYNC_ENABLED`
-- `EMAIL_IMPORT_ENABLED`
-- `ONE_C_WEBHOOK_SECRET`
+### 7.2 master_bot
+Реально реализовано:
+- `/start`, выдача роли и базового меню.
+- Списки заявок по статусам (`Новые заявки`, `В работе`).
+- Поиск (`Поиск`, `/search`).
+- Карточки клиента/заявки (`/client`, `/request`).
+- Изменение статуса заявки (`/set_status`), комментарии, client notes, запрос уточнения клиенту.
+- Отчётные команды (`/report_week|month|quarter|stats`) с role check (`manager/admin`).
+- Quality cases: list/card/status/comment.
 
-### Deploy-related
-- `PORT`, `WEBAPP_URL`, `DB_FILE_PATH`, `NODE_ENV`.
+Ограничения:
+- Role model упрощённая: новый staff user по умолчанию создаётся как `master`.
+- Нет внешней authz/policy системы кроме локальной проверки роли.
 
-## 9.9 Persistence audit
-- Хранилище: JSON file DB (`src/infrastructure/db/index.js`).
+### 7.3 integration_bot
+Реально реализовано:
+- `/start`, `/events`, `/failed`, `/pending`, `/stats`, `/event <id>`, `/retry <id>`, `/ignore <id>`.
+- Работает поверх той же integration events таблицы в file DB.
+
+Skeleton/ограничения:
+- Это operator-интерфейс к текущему integration state, без изоляции прав и без отдельного worker-процесса.
+
+---
+
+## 8. WebApp audit
+
+### 8.1 Структура `public/`
+- `index.html` — контейнер + навигация + подключение `webapp.js`.
+- `webapp.js` — SPA-логика рендеринга форм/списков/рекомендаций.
+- `styles.css` — базовые стили.
+
+### 8.2 Страницы и формы
+- Формы: service, parts, consultation, warranty, data-change.
+- Разделы: `Мои обращения`, `Рекомендации`.
+- Главная: приветственный текст.
+
+### 8.3 API usage
+- Submit форм в `/api/client/requests/*`.
+- Загрузка списка обращений через `/api/client/requests?phone=...`.
+- Загрузка рекомендаций через `/api/client/recommendations`.
+- Подтверждение интереса: `POST /api/client/recommendations/:id/interest`.
+
+### 8.4 Flow открытия из client_bot
+- Кнопка WebApp формируется в `/start` client bot и использует `config.webAppUrl` (`WEBAPP_URL`).
+
+### 8.5 Готовность к Telegram Mini App
+- Базовый HTTPS URL open-flow есть.
+- Специфическая Telegram Mini App интеграция (theme params, viewport адаптация, init data verification) отсутствует.
+- Требуется ручная проверка внутри Telegram-клиентов.
+
+### 8.6 Theme compatibility
+- Используются hardcoded цвета (`#f5f7fb`, `#fff`, `#1155cc`, `#eef3ff`, `#1f7a1f`).
+- Нет интеграции с Telegram theme variables.
+- Риск визуальных проблем в dark mode.
+
+---
+
+## 9. Persistence audit
+- Драйвер: JSON file storage (`src/infrastructure/db/index.js`).
+- Путь: `DB_FILE_PATH` или `data/db.json`.
 - Коллекции: clients, vehicles, visits, requests, communicationEvents, integrationEvents, integrationEventLogs, recommendations, staffUsers, requestStatusHistory, requestInternalComments, clientInternalNotes, masterActions, qualityCases, qualityCaseComments, feedback, tasks, reportSnapshots.
-- При пустой/битой БД происходит auto-init структуры.
-- Риски: race conditions при многопроцессном доступе, размер файла, отсутствие транзакций.
 
-## 9.10 Scheduler / task audit
-- Task types в runtime: `feedback_request`, `quality_followup`, `recommendation_reminder`, `maintenance_reminder`.
-- Запуск: при старте `app.js` после `server.listen`.
-- Retries: через `failTask(..., maxAttempts)`.
-- Stuck recovery: `claimDueTasks({ stuckTimeoutMs })`.
-- Ограничения: at-least-once, без exactly-once и без distributed coordination.
+### Поведение при пустой/битой БД
+- При отсутствии файла: auto-init структуры.
+- При ошибке чтения JSON: fallback на initial store (фактически «восстановление через reset структуры»).
+- При schema drift: `ensureStore()` дозаполняет отсутствующие ключи.
 
-## 9.11 Bot audit
-- `client_bot`: `/start`, быстрые обращения, сбор feedback (1..5 + комментарий), webapp deep-link.
-- `master_bot`: команды по заявкам/клиентам/quality/reporting, role-based доступ.
-- `integration_bot`: команды мониторинга integration events (`/events`, `/failed`, `/pending`, `/stats`, `/event`, `/retry`, `/ignore`).
+### Риски file-based persistence
+- Нет блокировок на multi-process запись.
+- Риск потери/порчи при конкурентной записи или аварийном прерывании.
+- Рост файла влияет на latency операций read-modify-write.
 
-## 9.12 WebApp audit
-- Single-page WebApp (`public/index.html`, `public/webapp.js`, `public/styles.css`).
-- Формы создают обращения через `/api/client/requests/*`.
-- Страницы истории/рекомендаций используют `/api/client/requests` и `/api/client/recommendations`.
-- Mini App flow: открытие из Telegram через `WEBAPP_URL`.
-- Ограничения: ручная проверка поведения внутри Telegram-клиентов обязательна.
+### Масштабирование / MVP пригодность
+- Для MVP/single-node — допустимо.
+- Для production growth потребуется переход на внешнюю БД и очередь.
 
-## 9.13 Theme compatibility
-- Поддержка light/dark должна проверяться вручную.
-- Есть риск hardcoded цветов (MVP front без автоматизированного visual regression).
+---
 
-## 9.14 Integration layer audit
-- Source systems: `email`, `manual_import`, `one_c`.
-- Event types: manual import и one_c sync типы.
-- Pipeline: receive → normalize/process → status/retry.
-- Retry flow: `POST /api/integrations/events/:id/retry` + policy в сервисе.
-- Working: email/manual.
-- Skeleton/risky: полноценный one_c sync.
+## 10. Scheduler / task audit
 
-## 9.15 Reporting / analytics audit
-- Метрики: requests, feedback, quality, masters, sources, recommendations, timing.
-- Summary: `GET /api/reports/summary` + форматированный summary text.
-- Snapshots: `POST/GET /api/reports/snapshots`.
-- Ограничения: качество отчёта зависит от полноты входных событий (особенно visits/one_c).
+### 10.1 Task types
+- Реально создаётся автоматически: `feedback_request` (при переводе заявки в `processed`).
+- В handlers зарегистрированы также `quality_followup`, `recommendation_reminder`, `maintenance_reminder`, но обработчики пустые (`async () => {}`) и автогенерация этих задач не обнаружена.
 
-## 9.16 Tests audit
-- Актуальные: `tests/node/*` (Node runtime, routes, flows, reporting, hardening).
-- Legacy Python tests изолированы как historical-only (marked `@unittest.skip`).
-- Непокрыто: e2e Mini App в Telegram клиентах, real BotFather/webhook infra, production SSL.
+### 10.2 Retry и stuck recovery
+- `claimDueTasks`: переводит due `scheduled` → `processing`, повышает `attemptCount`.
+- `failTask`: возвращает в `scheduled` либо в `failed` по `maxAttempts`, с backoff по минутам.
+- Stuck recovery: processing-задачи дольше `stuckTimeoutMs` возвращаются в `scheduled`.
 
-## 9.17 Documentation audit
-- README синхронизирован с Node-first production contract.
-- Устранён doc/code drift по Dockerfile, entrypoint и CI runtime.
-- Legacy traces сохранены только как historical контур и не определяют deploy narrative.
+### 10.3 Гарантии
+- At-least-once обработка.
+- Exactly-once отсутствует.
+- Нет кросс-процессной координации.
 
-## 9.18 BotHost-specific risk audit
-- Дефолтный случайный BotHost домен не рассматривать как надёжную production-базу.
-- По operational практике update-from-git для такого домена может быть нестабилен.
-- Production domain: `вашлогин.bothost.ru`.
+### 10.4 Риски для BotHost
+- При рестартах/деплое background loop прерывается.
+- При горизонтальном scale (если включить) возможны гонки по file DB.
 
-## 9.19 Domain strategy
-- Использовать единый домен `https://вашлогин.bothost.ru`.
-- Он обязателен для `WEBAPP_URL`, webhook URLs и BotFather menu button.
-- Это снижает риск drift между каналами и улучшает воспроизводимость deploy.
+---
 
-## 9.20 HTTPS / certificate readiness
-Проверить перед production:
-1. Корректный сертификат на `вашлогин.bothost.ru`.
-2. Нет `NET::ERR_CERT_AUTHORITY_INVALID`.
-3. Нет browser security warnings.
-4. Mini App открывается по HTTPS из Telegram.
+## 11. Integration layer audit
 
-## 9.21 Deploy readiness audit
-### Pre-deploy
-- `npm ci` проходит и не требует fallback на `npm install`.
-- `npm test` проходит.
-- `.bothost/entrypoint.conf` указывает `app.js`.
-- Dockerfile согласован с Node runtime.
+### 11.1 Source systems и event types
+- Source systems: `email`, `manual_import`, `one_c`, `system`.
+- Event types: email receive, manual import/sync, one_c sync варианты.
 
-### BotHost assumptions
-- Branch `main`.
-- Runtime Node.js.
-- Main file `app.js`.
-- ENV заданы (`PORT`, токены, `WEBAPP_URL`, `DB_FILE_PATH`).
+### 11.2 Pipeline
+- Receive event → normalize payload → process branch:
+  - email/manual_request_import: создаёт/обновляет client/vehicle/request + communication event;
+  - one_c: нормализуется и помечается `ignored` (skeleton path).
 
-### Post-deploy smoke
+### 11.3 Retry flow
+- Manual retry через API (`/api/integrations/events/:id/retry`) и integration_bot (`/retry`).
+- Автоматический отдельный integration worker отсутствует.
+
+### 11.4 Working paths vs skeleton
+- Working: email/manual import базового запроса.
+- Skeleton: one_c полноценная синхронизация сущностей (client/vehicle/visit/recommendation) не доведена до applied sync.
+
+### 11.5 one_c readiness
+- Частичная готовность (ingest/normalize/logging).
+- Не готово как полнофункциональный production sync adapter.
+
+---
+
+## 12. Reporting / analytics audit
+
+### Что реализовано
+- Метрики по requests, feedback, quality, masters, sources, recommendations, timing.
+- Management summary + текстовая сводка.
+- Snapshot механизм (`create/list/get`).
+
+### Ограничения данных
+- В коде явно зашито предупреждение о неполноте при пустых `visits`.
+- При отсутствии one_c событий аналитика ограничивается платформенными данными.
+
+### Что реально работает
+- Все reporting endpoints доступны и покрыты Node-тестами.
+
+---
+
+## 13. Tests audit
+
+### 13.1 Актуальные тесты
+- `tests/node/*.test.js` — активный контур, запускается через `npm test`.
+- Покрытие: routes, webhook flows, client/master/integration сценарии, reporting, hardening, scheduler, production path checks.
+
+### 13.2 Legacy тесты
+- `tests/test_*.py` — помечены `@unittest.skip`, исторические placeholders.
+
+### 13.3 Пробелы покрытия
+- Нет e2e Telegram Mini App внутри реального Telegram-клиента.
+- Нет инфраструктурных e2e проверок webhook + SSL на BotHost.
+- Нет нагрузочных тестов file DB/scheduler гонок.
+
+### 13.4 Потенциально вводящие в заблуждение моменты
+- Наличие Python-тестов и Python-кода может создать ложное впечатление dual-runtime production, хотя текущий контракт Node-first.
+
+---
+
+## 14. Documentation audit
+
+### Проверено
+- `README.md` соответствует Node-first контракту и текущим route/env нарративам.
+- `PROJECT_AUDIT.md` обновлён как единый audit source-of-truth.
+- Deploy hints в README синхронизированы с BotHost-конфигом.
+
+### Найденный doc/code drift
+1. В README env-переменные интеграционного worker-профиля перечислены как optional runtime, но в коде часть из них фактически не влияет на поведение (`ENABLE_INTEGRATION_WORKER`, `ONE_C_SYNC_ENABLED`, `EMAIL_IMPORT_ENABLED`, `ONE_C_WEBHOOK_SECRET`, `DB_URL`, `QUEUE_DRIVER`).
+2. В репозитории остаются Python docs/traces (`bots/client_bot/README.md`, legacy env aliases), которые не соответствуют production path.
+
+---
+
+## 15. Deploy readiness audit
+
+### 15.1 Обязательные условия запуска
+- `npm ci` должен выполняться.
+- `package-lock.json` должен быть консистентен с `package.json`.
+- `node app.js` как entrypoint.
+- Должны быть заданы токены Telegram-ботов.
+- `WEBAPP_URL` должен указывать на рабочий HTTPS домен.
+
+### 15.2 Спец-проверки из ТЗ (подтверждение)
+1. `package-lock.json` корректен: lockfile v3, имя совпадает, `npm ci` проходит.
+2. `npm ci` работает в текущем состоянии.
+3. `npm-shrinkwrap.json` отсутствует и не мешает.
+4. Runtime слушает `process.env.PORT` (через config), не хардкодит 8000.
+5. `Dockerfile` соответствует Node-first (`node app.js`, `npm ci`).
+6. `.bothost/entrypoint.conf` соответствует Node-first (`main_file=app.js`, `branch=main`).
+7. `README.md` в целом согласован с кодом (с оговоркой по documented-only env).
+8. WebApp готов к базовому запуску как Mini App URL, но без глубокой Telegram theme/init-data интеграции.
+
+### 15.3 Что проверить вручную после деплоя
 - `/health`, `/`, `/styles.css`, `/webapp.js`.
-- Webhooks 3 ботов.
-- WebApp submit/list flows.
-- Reporting endpoints.
+- Все 3 webhook endpoint-а с реальными Telegram bot tokens.
+- `/start` сценарии всех ботов.
+- WebApp формы и list-flow в реальном Telegram клиенте.
+- HTTPS/certificate отсутствие browser warnings.
 
-## 9.22 Known issues / limitations
-- File DB не рассчитана на высокую конкурентность.
-- Scheduler single-process.
-- one_c интеграция частично skeleton.
-- Нет полного e2e набора с Telegram/HTTPS инфраструктурой.
+---
 
-## 9.23 Final deploy conclusion
-Репозиторий **готов к MVP deploy операционно безопасно при условиях**:
-1. Используется Node-first контракт (`app.js`, `package.json`, `main`).
-2. Настроен production-домен `вашлогин.bothost.ru`.
-3. Заданы обязательные ENV и persistent `DB_FILE_PATH`.
-4. Пройден post-deploy smoke checklist.
+## 16. BotHost-specific audit
 
-Оставшиеся риски являются типичными для MVP и не блокируют запуск при соблюдении условий выше.
+### Подтверждённые BotHost нюансы
+- Случайный дефолтный домен BotHost — риск нестабильности и drift.
+- Предпочтительный короткий домен: `https://вашлогин.bothost.ru`.
+- Этот же домен нужно использовать консистентно для:
+  - `WEBAPP_URL`,
+  - webhook URLs,
+  - BotFather menu button.
+
+### Ограничения runtime на BotHost
+- Процессовая модель без отдельного worker предполагает, что API+scheduler делят один process budget.
+- Нужно учитывать restart behavior при update-from-git.
+
+---
+
+## 17. Legacy cleanup candidates (следующий этап)
+1. `bots/`, `services/`, `shared/`, `requirements.txt` — Python legacy слой, не нужный для Node deploy.
+2. `legacy/index.js` — можно оставить как compatibility shim либо удалить после окончательной миграции.
+3. `audit/*` старых форматов — оставить как архив, но не как operational doc source.
+4. Documented-only env в README/config — либо реализовать, либо убрать из публичного deploy narrative.
+
+---
+
+## 18. Known issues / limitations
+- File DB и single-process scheduler ограничивают масштабирование.
+- one_c integration путь преимущественно skeleton (`ignored` после normalize).
+- Отсутствует строгая доставка Telegram сообщений (ошибки подавляются).
+- In-memory сессии ботов теряются при рестарте.
+- Theme/Telegram Mini App UX интеграция базовая, без адаптации к Telegram theme variables.
+- Legacy Python следы остаются и могут запутывать при эксплуатации.
+
+---
+
+## 19. Final conclusion
+
+### Готовность к MVP deploy
+**Да, условно готов к MVP deploy** на BotHost как Node-first сервис при выполнении обязательных условий окружения.
+
+### Условия, при которых deploy допустим
+- Валидные Telegram tokens заданы.
+- `WEBAPP_URL` установлен на `https://вашлогин.bothost.ru`.
+- HTTPS сертификат валиден.
+- Запуск в single-instance режиме (или без конкурентной записи в одну file DB).
+
+### Что блокирует полноценный production-scale deploy
+- Отсутствие промышленной БД и очереди.
+- one_c не завершён как полноценный sync path.
+- Отсутствие e2e инфраструктурного контроля Telegram/SSL/BotHost runtime.
+
+### Что желательно исправить до запуска
+1. Уточнить и почистить env-контракт (убрать/реализовать dead env).
+2. Явно зафиксировать operational limits single-process + file DB в README/runbook.
+3. Провести ручной Mini App UX smoke в Telegram (light/dark).
+
+### Что можно отложить на после запуска
+- Полный рефактор интеграционного worker-пайплайна.
+- Миграция на внешнюю БД/queue при росте нагрузки.
+- Полная зачистка legacy Python следов (после стабилизации MVP).
