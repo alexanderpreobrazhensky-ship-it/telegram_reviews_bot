@@ -9,7 +9,7 @@
   },
   "scripts": {
     "start": "node app.js",
-    "test": "node --test tests/node"
+    "test": "node --test --test-concurrency=1 tests/node"
   },
   "keywords": [
     "telegram",

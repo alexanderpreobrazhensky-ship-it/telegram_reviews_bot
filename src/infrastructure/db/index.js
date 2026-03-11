@@ -13,8 +13,11 @@ function makeInitialStore() {
   return {
     clients: [],
     vehicles: [],
+    visits: [],
     requests: [],
     communicationEvents: [],
+    integrationEvents: [],
+    integrationEventLogs: [],
     recommendations: [
       { id: crypto.randomUUID(), clientId: null, text: 'Проверить состояние тормозных колодок в ближайшие 500 км.', severity: 'critical', status: 'actual', createdAt: now, interested: false },
       { id: crypto.randomUUID(), clientId: null, text: 'Рекомендуется сезонная диагностика кондиционера.', severity: 'normal', status: 'actual', createdAt: now, interested: false }
@@ -50,6 +53,37 @@ function ensureStore() {
       changed = true;
     }
   }
+
+  const entityCollections = ['clients', 'vehicles', 'visits', 'requests', 'recommendations'];
+  for (const collection of entityCollections) {
+    for (const item of store[collection] || []) {
+      if (!item.externalIds) {
+        item.externalIds = {};
+        changed = true;
+      }
+      if (!item.sourceSystem) {
+        item.sourceSystem = 'system';
+        changed = true;
+      }
+      if (!item.sourceOfTruth) {
+        item.sourceOfTruth = 'local';
+        changed = true;
+      }
+      if (!Object.hasOwn(item, 'lastSyncedAt')) {
+        item.lastSyncedAt = null;
+        changed = true;
+      }
+      if (!Object.hasOwn(item, 'localPendingChanges')) {
+        item.localPendingChanges = false;
+        changed = true;
+      }
+      if (!Object.hasOwn(item, 'needsManualReview')) {
+        item.needsManualReview = false;
+        changed = true;
+      }
+    }
+  }
+
   if (changed) {
     fs.writeFileSync(DB_PATH, JSON.stringify(store, null, 2));
   }
@@ -74,6 +108,12 @@ function upsertClient({ fullName, phone, telegramId }) {
       phone,
       telegramId: telegramId || null,
       preferredChannel: 'telegram',
+      externalIds: {},
+      sourceSystem: 'system',
+      sourceOfTruth: 'local',
+      lastSyncedAt: null,
+      localPendingChanges: false,
+      needsManualReview: false,
       createdAt: nowIso()
     };
     store.clients.push(client);
@@ -94,7 +134,22 @@ function upsertVehicle({ clientId, brand, model, year, vin, plateNumber }) {
   const store = readStore();
   let vehicle = store.vehicles.find((v) => v.clientId === clientId && ((vin && v.vin === vin) || (plateNumber && v.plateNumber === plateNumber)));
   if (!vehicle) {
-    vehicle = { id: crypto.randomUUID(), clientId, brand: brand || '', model: model || '', year: year || '', vin: vin || '', plateNumber: plateNumber || '', createdAt: nowIso() };
+    vehicle = {
+      id: crypto.randomUUID(),
+      clientId,
+      brand: brand || '',
+      model: model || '',
+      year: year || '',
+      vin: vin || '',
+      plateNumber: plateNumber || '',
+      externalIds: {},
+      sourceSystem: 'system',
+      sourceOfTruth: 'local',
+      lastSyncedAt: null,
+      localPendingChanges: false,
+      needsManualReview: false,
+      createdAt: nowIso()
+    };
     store.vehicles.push(vehicle);
   } else {
     Object.assign(vehicle, { brand: brand || vehicle.brand, model: model || vehicle.model, year: year || vehicle.year, vin: vin || vehicle.vin, plateNumber: plateNumber || vehicle.plateNumber, updatedAt: nowIso() });
@@ -115,6 +170,12 @@ function createRequest({ clientId, vehicleId, requestType, description, sourceCh
     description: description || '',
     assignedMasterId: null,
     lostReason: null,
+    externalIds: {},
+    sourceSystem: sourceChannel || 'system',
+    sourceOfTruth: 'local',
+    lastSyncedAt: null,
+    localPendingChanges: false,
+    needsManualReview: false,
     createdAt: nowIso(),
     updatedAt: nowIso()
   };
@@ -565,6 +626,85 @@ function resetStore() {
   ensureStore();
 }
 
+function createIntegrationEvent({ sourceSystem, eventType, rawPayload, dedupeKey = null }) {
+  const store = readStore();
+  const event = {
+    id: crypto.randomUUID(),
+    sourceSystem,
+    eventType,
+    rawPayload,
+    normalizedPayload: null,
+    processingStatus: 'received',
+    processingAttemptCount: 0,
+    lastError: null,
+    createdAt: nowIso(),
+    processedAt: null,
+    relatedEntityType: null,
+    relatedEntityId: null,
+    dedupeKey
+  };
+  store.integrationEvents.push(event);
+  store.integrationEventLogs.push({ id: crypto.randomUUID(), eventId: event.id, status: 'received', message: 'Event received', createdAt: nowIso() });
+  writeStore(store);
+  return event;
+}
+
+function updateIntegrationEvent(eventId, patch = {}, logMessage = null) {
+  const store = readStore();
+  const event = store.integrationEvents.find((item) => item.id === eventId);
+  if (!event) return null;
+  Object.assign(event, patch);
+  if (patch.processingStatus === 'processed' || patch.processingStatus === 'failed' || patch.processingStatus === 'ignored') {
+    event.processedAt = event.processedAt || nowIso();
+  }
+  if (logMessage || patch.processingStatus) {
+    store.integrationEventLogs.push({
+      id: crypto.randomUUID(),
+      eventId,
+      status: patch.processingStatus || event.processingStatus,
+      message: logMessage || null,
+      createdAt: nowIso()
+    });
+  }
+  writeStore(store);
+  return event;
+}
+
+function getIntegrationEventById(eventId) {
+  const store = readStore();
+  return store.integrationEvents.find((item) => item.id === eventId) || null;
+}
+
+function listIntegrationEvents({ status, sourceSystem, limit = 20 } = {}) {
+  const store = readStore();
+  let items = [...store.integrationEvents];
+  if (status) items = items.filter((item) => item.processingStatus === status);
+  if (sourceSystem) items = items.filter((item) => item.sourceSystem === sourceSystem);
+  return items.sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))).slice(0, limit);
+}
+
+function getIntegrationEventCard(eventId) {
+  const store = readStore();
+  const event = store.integrationEvents.find((item) => item.id === eventId);
+  if (!event) return null;
+  return { event, logs: store.integrationEventLogs.filter((item) => item.eventId === eventId) };
+}
+
+function applyEntitySyncMetadata({ collection, entityId, metadata = {} }) {
+  const store = readStore();
+  const entity = (store[collection] || []).find((item) => item.id === entityId);
+  if (!entity) return null;
+  entity.externalIds = { ...(entity.externalIds || {}), ...(metadata.externalIds || {}) };
+  if (metadata.sourceSystem) entity.sourceSystem = metadata.sourceSystem;
+  if (metadata.sourceOfTruth) entity.sourceOfTruth = metadata.sourceOfTruth;
+  if (Object.hasOwn(metadata, 'lastSyncedAt')) entity.lastSyncedAt = metadata.lastSyncedAt;
+  if (Object.hasOwn(metadata, 'localPendingChanges')) entity.localPendingChanges = metadata.localPendingChanges;
+  if (Object.hasOwn(metadata, 'needsManualReview')) entity.needsManualReview = metadata.needsManualReview;
+  entity.updatedAt = nowIso();
+  writeStore(store);
+  return entity;
+}
+
 module.exports = {
   DB_PATH,
   upsertClient,
@@ -596,5 +736,11 @@ module.exports = {
   completeTask,
   failTask,
   resetStore,
-  readStore
+  readStore,
+  createIntegrationEvent,
+  updateIntegrationEvent,
+  getIntegrationEventById,
+  listIntegrationEvents,
+  getIntegrationEventCard,
+  applyEntitySyncMetadata
 };

@@ -1,12 +1,7 @@
 # Единая платформа автосервиса (Node.js / BotHost)
 
-## Этап 3: master_bot MVP + client_bot/WebApp continuity
-Реализован рабочий контур сотрудника без слома intake-потока:
-- Telegram `master_bot` (`POST /telegram/master_bot/webhook`) с `/start`, главным меню и обработкой заявок.
-- Сценарии сотрудника: новые заявки, заявки в работе, поиск, карточки клиента/заявки, смена статуса, внутренние комментарии, служебные заметки по клиенту.
-- Базовая CRM-персистентность в `data/db.json`: assignment мастера, история статусов, lost reason, internal comments, master actions/events.
-- Skeleton quality layer: список/карточка quality case, смена статуса, комментарии по разбору.
-- Сохранена работа `client_bot` + WebApp MVP из этапа 2.
+## Этап 5: integration layer MVP + подготовка к 1С
+Реализован первый рабочий интеграционный слой, при этом сохранены контуры этапов 2-4 (`client_bot`, `master_bot`, WebApp, feedback/quality flow, `/health`, действующие webhook/API).
 
 ## BotHost production contract
 - Runtime: Node.js
@@ -21,72 +16,125 @@ npm install
 npm start
 ```
 
-## ENV
-- `PORT` (default `3000`)
-- `NODE_ENV`
-- `DB_URL` (зарезервировано под будущую внешнюю БД)
-- `DB_FILE_PATH` (опциональный путь к json-хранилищу)
-- `WEBAPP_URL` (HTTPS URL для кнопки открытия WebApp из Telegram)
-- `TELEGRAM_CLIENT_BOT_TOKEN`
-- `TELEGRAM_MASTER_BOT_TOKEN`
+## Новые ENV (этап 5)
 - `TELEGRAM_INTEGRATION_BOT_TOKEN`
-- `QUEUE_DRIVER`
-- `ONE_C_WEBHOOK_SECRET`
+- `ENABLE_INTEGRATION_WORKER` (default `true`)
+- `INTEGRATION_RETRY_MAX` (default `3`)
+- `INTEGRATION_RETRY_DELAY_SECONDS` (default `60`)
+- `ONE_C_SYNC_ENABLED` (default `false`)
+- `EMAIL_IMPORT_ENABLED` (default `true`)
 
-## Routes
-### Health
-- `GET /health`
+Ранее существующие ENV также сохранены (`PORT`, `NODE_ENV`, `DB_FILE_PATH`, `WEBAPP_URL`, `TELEGRAM_CLIENT_BOT_TOKEN`, `TELEGRAM_MASTER_BOT_TOKEN`, `QUEUE_DRIVER`, `ONE_C_WEBHOOK_SECRET`, и т.д.).
 
-### WebApp pages
-- `GET /`
-- `GET /requests`
-- `GET /recommendations`
-- `GET /forms/service-request`
-- `GET /forms/parts-request`
-- `GET /forms/consultation`
-- `GET /forms/warranty-request`
-- `GET /forms/data-change-request`
+## Integration layer MVP
+### Pipeline
+Введён application-layer pipeline:
+- `receiveIntegrationEvent(...)`
+- `normalizeIntegrationPayload(...)`
+- `processIntegrationEvent(...)`
+- `retryIntegrationEvent(...)`
+- `markIntegrationEventFailed(...)`
 
-### API
-- `POST /api/client/requests/service`
-- `POST /api/client/requests/parts`
-- `POST /api/client/requests/consultation`
-- `POST /api/client/requests/warranty`
-- `POST /api/client/requests/data-change`
-- `GET /api/client/requests?phone=...`
-- `GET /api/client/recommendations`
-- `POST /api/client/recommendations/:id/interest`
+Поток обработки:
+1. Внешний payload сохраняется в `integrationEvents` как `received`.
+2. Payload нормализуется (`normalizedPayload`, статус `normalized`).
+3. Запускается обработка (`processing`) и domain-update.
+4. Результат фиксируется как `processed` / `failed` / `ignored`.
+5. История шагов пишется в `integrationEventLogs`.
 
-### Telegram webhooks
-- `POST /telegram/client_bot/webhook`
-- `POST /telegram/master_bot/webhook`
+### Source systems
+Поддержаны:
+- `email` (working MVP)
+- `manual_import` (working MVP)
+- `one_c` (normalization + processing skeleton)
+- `system` (зарезервировано)
+
+### Event types
+Добавлены:
+- `email_request_received`
+- `one_c_client_sync`
+- `one_c_vehicle_sync`
+- `one_c_visit_sync`
+- `one_c_recommendation_sync`
+- `manual_request_import`
+- `manual_client_sync`
+- `manual_recommendation_sync`
+
+## Email ingestion MVP
+### Endpoint
+- `POST /api/integrations/email`
+
+### Поддерживаемый payload
+- `from`
+- `subject`
+- `body`
+- `receivedAt`
+- `attachments` (optional metadata)
+- `threadId` (optional)
+
+### Что делает
+- создаёт `IntegrationEvent`;
+- извлекает имя/телефон/VIN/текст обращения (эвристически);
+- определяет тип заявки (`service/parts/warranty/consultation`);
+- создаёт/находит `Client`;
+- создаёт `Request` c `sourceChannel=email`;
+- создаёт `CommunicationEvent`;
+- проставляет source-of-truth/external-id метаданные.
+
+## Manual import flow
+- `POST /api/integrations/manual`
+
+Позволяет вручную подать `sourceSystem`, `eventType`, `rawPayload`, `dedupeKey` для отладки/тестов/импорта.
+
+## 1С skeleton-ready
+- `POST /api/integrations/one-c/:entityType` (`client|vehicle|visit|recommendation`)
+- Нормализаторы для `one_c_*_sync` определяют expected raw shape, mapping fields, external-id fields и source-of-truth поведение.
+- На текущем этапе 1С-события принимаются и нормализуются, затем помечаются `ignored` (skeleton hook).
+
+## Source-of-truth и external IDs foundation
+Для сущностей `clients`, `vehicles`, `visits`, `requests`, `recommendations` добавлены поля:
+- `externalIds`
+- `sourceSystem`
+- `sourceOfTruth`
+- `lastSyncedAt`
+- `localPendingChanges`
+- `needsManualReview`
+
+## Integration bot MVP
+Webhook:
 - `POST /telegram/integration_bot/webhook`
 
-## Master bot MVP: рабочие сценарии
-- `/start` + главное меню.
-- Просмотр списков заявок: `new`, `in_progress` (базово), поддержка статусов `waiting_data`, `processed`, `lost`, `archived` в service/storage.
-- Поиск по ФИО/телефону/VIN/госномеру.
-- Карточка клиента: ФИО, телефон, preferred channel, telegram binding, авто, обращения, рекомендации, внутренние заметки.
-- Карточка заявки: id, тип, статус, источник, описание, клиент, авто, ответственный мастер, история статусов, внутренние комментарии.
-- Изменение статусов с валидным workflow:
-  - `new -> waiting_data`
-  - `new -> in_progress`
-  - `waiting_data -> in_progress`
-  - `in_progress -> processed`
-  - `in_progress -> lost` (обязательный lost reason)
-  - `processed -> archived`
-  - `lost -> archived`
-- Внутренние комментарии по заявке (не отправляются клиенту).
-- Служебные заметки по клиенту (skeleton).
-- Запрос уточнения у клиента: фиксация intent/action/event, при доступном Telegram — попытка шаблонной отправки.
-- Quality skeleton: просмотр cases, карточка, смена статуса, комментарий.
+Команды:
+- `/start`
+- `/events` (последние)
+- `/failed`
+- `/pending`
+- `/stats` (received/processed/failed)
+- `/event <id>`
+- `/retry <id>`
+- `/ignore <id>` (optional)
 
-## Что пока не реализовано
-- Интеграция 1С, VK, MAX.
-- Полный quality workflow с автоматическим созданием кейсов.
-- Полноценный чат-движок мастер-клиент.
-- Продвинутая аналитика/AI.
-- Production-grade SQL storage (используется файловое хранилище MVP).
+## Integration API
+Новые endpoints:
+- `POST /api/integrations/email`
+- `POST /api/integrations/manual`
+- `POST /api/integrations/one-c/:entityType`
+- `GET /api/integrations/events`
+- `GET /api/integrations/events/:id`
+- `POST /api/integrations/events/:id/retry`
+
+## Что реально работает vs skeleton
+### Реально работает
+- integration event pipeline;
+- email ingestion в заявку + коммуникационное событие;
+- manual import flow;
+- retry flow для integration event;
+- integration_bot monitoring/control команды.
+
+### Skeleton
+- production-grade двусторонняя 1С синхронизация;
+- автопланировщик интеграционных retry;
+- продвинутый merge/conflict UI.
 
 ## Тесты
 ```bash
