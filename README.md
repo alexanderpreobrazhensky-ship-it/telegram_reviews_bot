@@ -54,6 +54,22 @@ npm start
 5. Указать `DB_FILE_PATH` на постоянное хранилище.
 6. Запустить деплой.
 
+## Domain strategy
+- Для production использовать короткий пользовательский домен: `вашлогин.bothost.ru`.
+- Дефолтный случайный домен BotHost не использовать как основной production domain.
+- До настройки BotFather и webhook сначала проверить HTTPS и валидность сертификата на production-домене.
+
+## WebApp / Mini App readiness
+- `WEBAPP_URL` должен ссылаться на `https://вашлогин.bothost.ru`.
+- WebApp должен открываться по HTTPS без security warnings.
+- Mini App нужно проверять в двух режимах: прямое открытие в браузере и открытие из `client_bot`.
+- Перед production deploy обязательно проверить совместимость light/dark theme.
+
+## Telegram / BotFather
+- Menu Button URL в BotFather должен указывать на `https://вашлогин.bothost.ru`.
+- Webhook для всех Telegram-ботов должен использовать этот же домен.
+- После деплоя обязательно проверить `getWebhookInfo` для каждого бота.
+
 ## Webhook routes (для Telegram setWebhook)
 - `POST /telegram/client_bot/webhook`
 - `POST /telegram/master_bot/webhook`
@@ -100,13 +116,31 @@ npm start
 - `GET /styles.css`, `/webapp.js`
 
 ## Smoke-test plan после деплоя
+### HTTP / static
 1. `GET /health` -> 200.
-2. Вызвать 3 webhook endpoints тестовым update payload.
-3. Открыть WebApp страницы `/`, `/requests`, `/recommendations`.
-4. Создать минимум 1 client request через API/WebApp.
-5. Проверить `GET /api/reports/summary?period=weekly`.
-6. Создать snapshot `POST /api/reports/snapshots`.
-7. Проверить feedback flow: перевод заявки в `processed` -> task -> клиентская оценка.
+2. `GET /` -> 200.
+3. `GET /styles.css` -> 200.
+4. `GET /webapp.js` -> 200.
+
+### WebApp
+5. Открыть WebApp напрямую по `https://вашлогин.bothost.ru`.
+6. Открыть WebApp из `client_bot` (через Menu Button / WebApp-кнопку).
+7. Проверить отправку форм (минимум по одному обращению).
+8. Проверить список обращений в WebApp.
+9. Проверить light/dark theme (визуально, без потери читаемости).
+
+### Bots
+10. Проверить `client_bot` командой `/start`.
+11. Проверить `master_bot` командой `/start`.
+12. Проверить `integration_bot` командой `/start`.
+
+### Reporting
+13. Проверить `GET /api/reports/summary?period=weekly` -> 200.
+14. Проверить `POST /api/reports/snapshots` -> 201.
+
+### HTTPS / domain
+15. Проверить валидность HTTPS-сертификата домена `вашлогин.bothost.ru`.
+16. Убедиться, что браузер не показывает security/certificate warnings.
 
 ## Тесты
 ```bash
