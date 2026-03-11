@@ -6,7 +6,7 @@ const db = require('../infrastructure/db');
 const { REQUEST_TYPES } = require('../core/domain');
 const { ingestEmail } = require('../integrations/email');
 const { oneCSyncPlaceholder } = require('../integrations/one_c');
-const { integrationService } = require('../core/application');
+const { integrationService, createReportingService } = require('../core/application');
 
 function readBody(req) {
   return new Promise((resolve) => {
@@ -53,6 +53,7 @@ function createClientRequest({ body, type, sourceChannel = 'webapp' }) {
 
 function createServer({ config, logger }) {
   const router = [];
+  const reportingService = createReportingService({ db });
   require('../interfaces/client_bot').registerClientBotRoutes(router);
   require('../interfaces/master_bot').registerMasterBotRoutes(router);
   require('../interfaces/integration_bot').registerIntegrationBotRoutes(router);
@@ -146,6 +147,45 @@ function createServer({ config, logger }) {
       } catch (error) {
         return sendJson(res, 404, { error: String(error.message || error) });
       }
+    }
+
+
+
+    if (req.method === 'GET' && pathname === '/api/reports/summary') {
+      const params = {
+        period: requestUrl.searchParams.get('period') || 'weekly',
+        from: requestUrl.searchParams.get('from') || undefined,
+        to: requestUrl.searchParams.get('to') || undefined,
+        masterId: requestUrl.searchParams.get('masterId') || undefined,
+        requestType: requestUrl.searchParams.get('requestType') || undefined,
+        sourceChannel: requestUrl.searchParams.get('sourceChannel') || undefined,
+        sourceSystem: requestUrl.searchParams.get('sourceSystem') || undefined
+      };
+      return sendJson(res, 200, reportingService.buildManagementSummary(params));
+    }
+
+    if (req.method === 'GET' && pathname === '/api/reports/requests') return sendJson(res, 200, reportingService.buildRequestsMetrics(Object.fromEntries(requestUrl.searchParams.entries())));
+    if (req.method === 'GET' && pathname === '/api/reports/feedback') return sendJson(res, 200, reportingService.buildFeedbackMetrics(Object.fromEntries(requestUrl.searchParams.entries())));
+    if (req.method === 'GET' && pathname === '/api/reports/quality') return sendJson(res, 200, reportingService.buildQualityMetrics(Object.fromEntries(requestUrl.searchParams.entries())));
+    if (req.method === 'GET' && pathname === '/api/reports/masters') return sendJson(res, 200, reportingService.buildMasterMetrics(Object.fromEntries(requestUrl.searchParams.entries())));
+    if (req.method === 'GET' && pathname === '/api/reports/sources') return sendJson(res, 200, reportingService.buildSourceMetrics(Object.fromEntries(requestUrl.searchParams.entries())));
+    if (req.method === 'GET' && pathname === '/api/reports/recommendations') return sendJson(res, 200, reportingService.buildRecommendationMetrics(Object.fromEntries(requestUrl.searchParams.entries())));
+
+    if (req.method === 'POST' && pathname === '/api/reports/snapshots') {
+      const body = await readBody(req);
+      const snapshot = reportingService.buildPeriodicSnapshot(body || {});
+      return sendJson(res, 201, snapshot);
+    }
+
+    if (req.method === 'GET' && pathname === '/api/reports/snapshots') {
+      const limit = Number(requestUrl.searchParams.get('limit') || 50);
+      return sendJson(res, 200, { items: reportingService.listSnapshots({ limit }) });
+    }
+
+    if (req.method === 'GET' && pathname.startsWith('/api/reports/snapshots/')) {
+      const id = pathname.split('/')[4];
+      const snapshot = reportingService.getSnapshotById(id);
+      return snapshot ? sendJson(res, 200, snapshot) : sendJson(res, 404, { error: 'Not found' });
     }
 
     const matched = router.find((item) => item.path === pathname && item.method === req.method);
