@@ -153,3 +153,11 @@ Snapshot содержит:
 - нет продвинутой финансовой и 1С-обогащённой аналитики;
 - timing/conversion считаются в MVP best-effort формате;
 - периодическая автогенерация snapshot оставлена как foundation (manual trigger + service-level scaffold).
+
+## 8) Быстрый smoke-check после деплоя
+- `GET /health`
+- `POST /telegram/client/webhook`
+- `POST /telegram/master/webhook`
+- `POST /telegram/integration/webhook`
+- `GET /api/reports/summary?period=weekly`
+- `POST /api/reports/snapshots`
