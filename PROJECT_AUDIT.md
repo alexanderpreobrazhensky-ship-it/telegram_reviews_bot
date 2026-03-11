@@ -154,22 +154,56 @@
   2. Не persistent storage для `db.json` -> потеря данных после рестарта.
   3. Неверно выставлены webhook URL/path -> update не доходит.
   4. Деплой нескольких инстансов на shared file-db -> race/consistency проблемы.
+  5. Дефолтный случайный домен BotHost не является надёжной production-опцией.
+  6. По информации поддержки BotHost обновление из Git для дефолтного случайного домена может работать нестабильно.
+  7. Для production нужен короткий пользовательский домен вида `вашлогин.bothost.ru`.
 - Что уже предотвращено:
   - invalid JSON больше не валит обработчики, даёт `400`;
   - пустая/битая БД поднимается через safe init;
   - stuck tasks re-claimed.
 
-## 5.10 Deploy readiness checklist
+## 5.10 Domain strategy
+- Production domain: `вашлогин.bothost.ru`.
+- `WEBAPP_URL` должен ссылаться именно на production short domain `вашлогин.bothost.ru`.
+- Telegram webhook URLs должны быть завязаны на этот же домен.
+- BotFather Menu Button URL должен указывать на этот же домен.
+- Дефолтный случайный домен BotHost не использовать как основной production domain.
+
+## 5.11 HTTPS / certificate readiness
+- Перед production deploy обязательно проверить, что домен открывается по HTTPS.
+- Проверить валидность сертификата (доверенная цепочка, не истёкший сертификат).
+- Убедиться в отсутствии ошибок вида `NET::ERR_CERT_AUTHORITY_INVALID`.
+- Проверить, что WebApp открывается без browser security warnings.
+- Проверить, что Mini App внутри Telegram открывается корректно по HTTPS.
+
+## 5.12 WebApp / Mini App compatibility
+- В текущем MVP-контуре WebApp совместим с Telegram Mini App по архитектуре (статический shell + API + Telegram WebApp launch flow).
+- Открытие WebApp из `client_bot` должно работать через корректный `WEBAPP_URL`.
+- Статика (`/`, `/styles.css`, `/webapp.js`) должна отдаваться корректно в production.
+- Формы WebApp должны отправляться успешно и сохранять обращения.
+- Mobile layout не должен ломаться на типичных мобильных экранах Telegram WebView.
+- Прямое открытие WebApp по HTTPS в браузере должно работать.
+- Часть пунктов (UI/UX, mobile layout, поведение внутри Telegram клиента) требует обязательной ручной проверки перед production deploy.
+
+## 5.13 Theme compatibility
+- Обязательна проверка light theme.
+- Обязательна проверка dark theme.
+- В WebApp не должно быть hardcoded color assumptions, приводящих к потере читаемости в одной из тем.
+- Финальная manual visual check на совместимость тем обязательна перед production deploy.
+
+## 5.14 Deploy readiness checklist
 ### До деплоя
 - Проверить `main` branch, Node runtime, `app.js` как entrypoint.
-- Выставить обязательные ENV и `WEBAPP_URL`.
+- Выставить обязательные ENV и `WEBAPP_URL` на `https://вашлогин.bothost.ru`.
 - Убедиться, что путь `DB_FILE_PATH` указывает на persistent volume.
+- Использовать короткий пользовательский домен `вашлогин.bothost.ru`, не случайный дефолтный домен BotHost.
+- Проверить HTTPS/certificate readiness до настройки webhook и BotFather.
 - Локально прогнать `npm test`.
 
 ### В панели BotHost
 - Main file: `app.js`.
 - Runtime: Node.js 18+.
-- Env: как минимум `PORT`, 3 Telegram token, `WEBAPP_URL`.
+- Env: как минимум `PORT`, 3 Telegram token, `WEBAPP_URL` (`https://вашлогин.bothost.ru`).
 - Проверить webhook set на:
   - `/telegram/client_bot/webhook`
   - `/telegram/master_bot/webhook`
@@ -189,14 +223,16 @@
 ### WebApp smoke
 - Открыть формы, отправить минимум 1 обращение каждого типа.
 - Проверить список обращений и рекомендации.
+- Проверить открытие Mini App из `client_bot` и прямое открытие по HTTPS.
+- Проверить light/dark theme вручную в Telegram WebView и в браузере.
 
-## 5.11 Known issues / limitations
+## 5.15 Known issues / limitations
 - One-C остаётся skeleton-интеграцией (нормализация/route без реального sync).
 - Отсутствует полноценная RBAC-аутентификация для HTTP API (MVP уровень).
 - Нет внешней очереди/БД; файл-хранилище ограничивает горизонтальное масштабирование.
 - Reporting — operational MVP без BI/DWH.
 
-## 5.12 Change history (этап 7)
+## 5.16 Change history (этап 7)
 1. Усилен config loader: безопасный parse + clamping env.
 2. Усилен HTTP слой: `400` на invalid JSON, валидация обязательных client полей.
 3. Усилен storage: safe-read fallback + atomic write, task field migration.
@@ -205,5 +241,13 @@
 6. Обновлены `README.md` и текущий `PROJECT_AUDIT.md` под deploy readiness.
 
 ## Финальный вывод
-- Для MVP-эксплуатации на BotHost проект готов при условии single-instance + persistent `db.json` + корректных webhook/env.
+- Проект готов к production deploy только при одновременном выполнении условий:
+  - single-instance deployment;
+  - persistent storage для `db.json`;
+  - корректные Telegram tokens;
+  - корректные webhook paths;
+  - использование короткого пользовательского домена `вашлогин.bothost.ru`;
+  - валидный HTTPS сертификат без browser security warnings;
+  - корректный `WEBAPP_URL` на production short domain;
+  - успешный pre-deploy и post-deploy smoke-check (HTTP/static, bots, WebApp/Mini App, reporting, theme).
 - Для роста нагрузки нужен следующий шаг: переход с file-db на транзакционное хранилище и выделенная очередь задач.
