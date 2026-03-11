@@ -9,7 +9,7 @@
 - Production path: **Node-first**
 
 ## Deploy fixes applied
-- Lockfile contract приведён к `npm ci`: в репозитории хранится обязательный актуальный `package-lock.json`, `npm-shrinkwrap.json` отсутствует.
+- Lockfile contract: в репозитории обязателен `package-lock.json`; install step для deploy — `npm ci --omit=dev` (в Dockerfile и локально), `npm-shrinkwrap.json` отсутствует.
 - Runtime port всегда берётся из `process.env.PORT` в production; fallback `3000` используется только для локального запуска.
 - Legacy Python deployment traces нейтрализованы (Dockerfile, BotHost entrypoint, CI).
 
@@ -21,7 +21,7 @@ npm start
 
 ## Build & runtime contract
 - `package-lock.json` обязателен и должен коммититься при любом изменении npm-дерева.
-- CI/деплой использует `npm ci` (без fallback на `npm install`).
+- CI/деплой использует `npm ci --omit=dev` (без двусмысленного объединения с `npm install`).
 - Production runtime слушает `process.env.PORT`; локальный fallback: `3000`.
 
 
@@ -34,7 +34,7 @@ npm start
 
 ### Рекомендуемые
 - `WEBAPP_URL` — Mini App URL (использовать `https://вашлогин.bothost.ru`).
-- `DB_FILE_PATH` — путь к persistent file DB.
+- `DB_FILE_PATH` — путь к persistent file DB (по умолчанию `data/db.json`).
 - `NODE_ENV=production`
 
 ### Optional
@@ -54,8 +54,9 @@ npm start
 1. Branch: `main`.
 2. Runtime: Node.js 18+.
 3. Main file: `app.js`.
-4. Указать ENV (`PORT`, 3 Telegram token, `WEBAPP_URL`, `DB_FILE_PATH`).
-5. Деплоить через update-from-git.
+4. Указать ENV (`PORT`, 3 Telegram token, `WEBAPP_URL`, при необходимости `DB_FILE_PATH`).
+5. Проверить BotHost entrypoint: `branch=main`, `main_file=app.js` (`.bothost/entrypoint.conf`).
+6. Деплоить через update-from-git.
 
 ### Domain strategy
 - Production base domain: `https://вашлогин.bothost.ru`.
