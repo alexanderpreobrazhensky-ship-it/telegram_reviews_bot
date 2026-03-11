@@ -4,6 +4,9 @@ const path = require('path');
 const { URL } = require('url');
 const db = require('../infrastructure/db');
 const { REQUEST_TYPES } = require('../core/domain');
+const { ingestEmail } = require('../integrations/email');
+const { oneCSyncPlaceholder } = require('../integrations/one_c');
+const { integrationService } = require('../core/application');
 
 function readBody(req) {
   return new Promise((resolve) => {
@@ -88,6 +91,61 @@ function createServer({ config, logger }) {
       const id = pathname.split('/')[4];
       const updated = db.markRecommendationInterest(id);
       return updated ? sendJson(res, 200, updated) : sendJson(res, 404, { error: 'Not found' });
+    }
+
+    if (req.method === 'POST' && pathname === '/api/integrations/email') {
+      const event = ingestEmail(await readBody(req));
+      return sendJson(res, 201, event);
+    }
+
+    if (req.method === 'POST' && pathname === '/api/integrations/manual') {
+      const body = await readBody(req);
+      const event = integrationService.receiveIntegrationEvent({
+        sourceSystem: body.sourceSystem || integrationService.INTEGRATION_SOURCES.MANUAL_IMPORT,
+        eventType: body.eventType || integrationService.INTEGRATION_EVENT_TYPES.MANUAL_REQUEST_IMPORT,
+        rawPayload: body.rawPayload || body,
+        dedupeKey: body.dedupeKey || null
+      });
+      return sendJson(res, 201, event);
+    }
+
+    if (req.method === 'POST' && pathname.startsWith('/api/integrations/one-c/')) {
+      const body = await readBody(req);
+      const entityType = pathname.split('/')[4];
+      const eventTypeMap = {
+        client: integrationService.INTEGRATION_EVENT_TYPES.ONE_C_CLIENT_SYNC,
+        vehicle: integrationService.INTEGRATION_EVENT_TYPES.ONE_C_VEHICLE_SYNC,
+        visit: integrationService.INTEGRATION_EVENT_TYPES.ONE_C_VISIT_SYNC,
+        recommendation: integrationService.INTEGRATION_EVENT_TYPES.ONE_C_RECOMMENDATION_SYNC
+      };
+      const eventType = eventTypeMap[entityType];
+      if (!eventType) return sendJson(res, 400, { error: 'Unsupported one-c entity type' });
+      return sendJson(res, 201, oneCSyncPlaceholder(eventType, body));
+    }
+
+    if (req.method === 'GET' && pathname === '/api/integrations/events') {
+      return sendJson(res, 200, {
+        items: db.listIntegrationEvents({
+          status: requestUrl.searchParams.get('status') || undefined,
+          sourceSystem: requestUrl.searchParams.get('sourceSystem') || undefined,
+          limit: Number(requestUrl.searchParams.get('limit') || 20)
+        })
+      });
+    }
+
+    if (req.method === 'GET' && pathname.startsWith('/api/integrations/events/')) {
+      const id = pathname.split('/')[4];
+      const card = db.getIntegrationEventCard(id);
+      return card ? sendJson(res, 200, card) : sendJson(res, 404, { error: 'Not found' });
+    }
+
+    if (req.method === 'POST' && pathname.startsWith('/api/integrations/events/') && pathname.endsWith('/retry')) {
+      const id = pathname.split('/')[4];
+      try {
+        return sendJson(res, 200, integrationService.retryIntegrationEvent(id));
+      } catch (error) {
+        return sendJson(res, 404, { error: String(error.message || error) });
+      }
     }
 
     const matched = router.find((item) => item.path === pathname && item.method === req.method);
