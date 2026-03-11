@@ -2,8 +2,9 @@
 
 ## 1) Статус этапов
 - Skeleton-этап: завершён.
-- Этап 2 (client_bot + WebApp MVP): реализован.
-- Этап 3 (master_bot MVP): реализован.
+- Этап 2 (client_bot + WebApp MVP): реализован и сохранён рабочим.
+- Этап 3 (master_bot MVP): реализован и сохранён рабочим.
+- Этап 4 (reminders + feedback + quality flow MVP): реализован.
 
 ## 2) Production contract (BotHost-safe)
 - Runtime: Node.js.
@@ -12,119 +13,68 @@
 - Ветка деплоя: `main`.
 - Node-first запуск сохранён, Python как production path не используется.
 
-## 3) Реализованный master_bot MVP
-Webhook:
-- `POST /telegram/master_bot/webhook`.
-
-Рабочие сценарии:
-- `/start` + главное меню.
-- Просмотр новых заявок (`new`).
-- Просмотр заявок в работе (`in_progress`).
-- Поиск по клиенту: ФИО, телефон, VIN, госномер.
-- Карточка клиента.
-- Карточка заявки.
-- Изменение статуса заявки по разрешённому workflow.
-- Добавление внутреннего комментария к заявке.
-- Добавление служебной заметки по клиенту (skeleton).
-- Просмотр quality cases / карточки quality case / смена статуса / комментарий.
-- Инициирование запроса клиенту (intent/event + безопасная отправка шаблона при доступном Telegram token).
-
-Роли (структура заложена):
-- `master`
-- `manager`
-- `admin`
-
-## 4) Статусы и workflow заявок
-Поддерживаемые статусы:
-- `new`
-- `waiting_data`
-- `in_progress`
-- `processed`
-- `lost`
-- `archived`
-
-Реализованные переходы:
-- `new -> waiting_data`
-- `new -> in_progress`
-- `waiting_data -> in_progress`
-- `in_progress -> processed`
-- `in_progress -> lost` (обязателен `lostReason`)
-- `processed -> archived`
-- `lost -> archived`
-
-Каждая смена статуса:
-- пишется в БД,
-- добавляется в `requestStatusHistory`,
-- фиксирует кто/когда/из какого статуса в какой,
-- создаёт event в `communicationEvents`,
-- создаёт action в `masterActions`.
-
-## 5) Что теперь сохраняется в `data/db.json`
-Сохранена совместимость с этапом 2 (Client/Vehicle/Request/CommunicationEvent/Recommendation), добавлены:
-- `staffUsers` — сотрудники и роли.
-- `requestStatusHistory` — история статусов заявки.
-- `requestInternalComments` — внутренние комментарии мастеров.
-- `clientInternalNotes` — служебные заметки по клиенту.
-- `masterActions` — журнал действий сотрудников.
-- `qualityCases` — skeleton сущности quality.
-- `qualityCaseComments` — комментарии к quality cases.
-
-В заявке дополнительно используются:
-- `assignedMasterId`
-- `lostReason`
-- `updatedAt`
-
-## 6) Карточки CRM
-### Карточка клиента (минимум)
-- ФИО
-- телефон
-- preferred channel
-- telegram binding
-- список автомобилей
-- список обращений
-- список рекомендаций
-- внутренние заметки
-
-### Карточка заявки (минимум)
-- id
-- тип
-- статус
-- источник
-- дата/описание
-- клиент
-- авто
-- ответственный мастер
-- история статусов
-- внутренние комментарии
-
-## 7) Quality case skeleton
-Поддержаны статусы quality case:
-- `new`, `assigned`, `in_progress`, `resolved`, `unresolved`, `archived`.
-
+## 3) Что добавлено в этапе 4
+### 3.1 Feedback flow MVP
 Реализовано:
-- список cases,
-- карточка case,
-- изменение статуса,
-- комментарий по разбору.
+- получение клиентского feedback из `client_bot` (формат: `1..5` + optional comment);
+- сохранение feedback в БД (`feedback` коллекция);
+- поля feedback: `id`, `clientId`, `requestId`, `visitId`, `rating`, `comment`, `sourceChannel`, `createdAt`, `createdBy`, `status`, `qualityCaseId`;
+- фиксация communication event при получении feedback;
+- автосоздание quality case при рейтинге `< 3`.
 
-## 8) Сохранность этапа 2
-Не сломаны:
-- `client_bot` webhook,
-- WebApp страницы и API,
+### 3.2 Reminder / task layer MVP
+Реализовано:
+- БД-слой для task/jobs (`tasks`);
+- обязательные поля задачи: `id`, `taskType`, `status`, `dueAt`, `createdAt`, `processedAt`, `attemptCount`, `lastError`, `payload`;
+- статусы: `scheduled`, `processing`, `completed`, `failed`, `cancelled`;
+- task types:
+  - `feedback_request` (реально исполняется),
+  - `quality_followup` (skeleton),
+  - `recommendation_reminder` (skeleton),
+  - `maintenance_reminder` (skeleton);
+- планировщик (`src/infrastructure/scheduler`) с interval-worker, claim due задач, idempotent-safe обработкой, retry/fail логикой.
+
+### 3.3 Feedback request trigger
+MVP правило реализовано:
+- при переводе заявки в `processed` автоматически создаётся отложенная задача `feedback_request`;
+- delay настраивается через env `FEEDBACK_REQUEST_DELAY_MINUTES`.
+
+### 3.4 Отправка feedback request
+Реализовано:
+- scheduler-обработчик `feedback_request` отправляет клиенту Telegram-сообщение с запросом оценки 1..5;
+- при недоступном канале задача корректно уходит в retry/fail по лимиту попыток;
+- отправка логируется в `communicationEvents`.
+
+### 3.5 Quality flow MVP
+При feedback `< 3`:
+- автоматически создаётся `QualityCase` со статусом `new`;
+- заполняются `clientId`, `feedbackId`, `requestId`, `assignedTo` (если известен мастер), `reasonCategory=low_rating`;
+- пишется событие в `communicationEvents`;
+- пишется action в `masterActions`;
+- в event model фиксируется дублирование для руководителя (`duplicateForRole: manager`);
+- при наличии telegram binding отправляется уведомление мастеру и manager-copy через master bot token.
+
+## 4) Изменения в хранилище `data/db.json`
+Новые коллекции:
+- `feedback`
+- `tasks`
+
+Расширения:
+- `qualityCases` дополнен полями для feedback-driven quality workflow (`clientId`, `feedbackId`, `reasonCategory`).
+
+## 5) Обратная совместимость этапов 2/3
+Сохранены рабочими:
+- `client_bot` webhook;
+- `master_bot` webhook;
+- WebApp маршруты и API;
 - `/health`.
 
-## 9) Тестовое покрытие этапа 3
-Добавлены поведенческие node-тесты для master_bot MVP:
-- `/start`, главное меню,
-- получение списка новых заявок,
-- поиск по ФИО/телефону/VIN/госномеру,
-- статусные переходы (`new -> waiting_data`, `new -> in_progress`, `in_progress -> processed`, `in_progress -> lost`),
-- обязательность lost reason,
-- persistence проверки (status history, internal comment, assignment мастера),
-- карточка клиента,
-- карточка заявки,
-- наличие рекомендаций,
-- quality case skeleton проверки.
+## 6) Покрытие тестами этапа 4
+Добавлены node-тесты:
+- создание feedback task при `processed`;
+- приём feedback клиента и автосоздание quality case для низкой оценки;
+- фиксация manager duplication event и staff action;
+- scheduler run-once обработка due tasks и безопасный fail-path.
 
-## 10) Текущая готовность платформы
-Платформа готова к следующему шагу: расширение CRM-функций сотрудника, усложнение quality flow и подготовка интеграций (включая 1С), при сохранении BotHost-safe Node.js production contract.
+## 7) Готовность к следующему шагу
+Платформа готова к расширению reminder-логики (recommendation/time/mileage/rule-based), enrichment quality workflow и дальнейшей интеграции без нарушения BotHost-safe Node.js production contract.

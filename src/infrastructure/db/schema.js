@@ -9,11 +9,12 @@ const schemaOverview = {
   client_internal_notes: ['id', 'client_id', 'actor_id', 'actor_role', 'text', 'created_at'],
   visits: ['id', 'client_id', 'vehicle_id', 'request_id', 'status', 'is_repeat', 'is_warranty', 'is_promo'],
   recommendations: ['id', 'client_id', 'vehicle_id', 'visit_id', 'status', 'severity', 'text'],
-  quality_cases: ['id', 'request_id', 'visit_id', 'status', 'assigned_to'],
+  quality_cases: ['id', 'client_id', 'feedback_id', 'request_id', 'visit_id', 'status', 'assigned_to', 'reason_category'],
   quality_case_comments: ['id', 'quality_case_id', 'actor_id', 'actor_role', 'text', 'created_at'],
   communication_events: ['id', 'client_id', 'request_id', 'channel', 'direction', 'payload'],
   master_actions: ['id', 'actor_id', 'role', 'action', 'request_id', 'client_id', 'payload', 'created_at'],
-  tasks: ['id', 'task_type', 'scheduled_at', 'status', 'payload'],
+  feedback: ['id', 'client_id', 'request_id', 'visit_id', 'rating', 'comment', 'source_channel', 'created_by', 'status', 'quality_case_id'],
+  tasks: ['id', 'task_type', 'due_at', 'created_at', 'processed_at', 'status', 'attempt_count', 'last_error', 'payload'],
   integration_events: ['id', 'event_type', 'integration', 'aggregate_type', 'aggregate_id', 'status', 'payload']
 };
 

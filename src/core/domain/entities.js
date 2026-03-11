@@ -83,15 +83,22 @@ const Feedback = {
   requestId: 'Request.id|null',
   visitId: 'Visit.id|null',
   rating: 5,
-  comment: 'string'
+  comment: 'string',
+  sourceChannel: 'telegram|webapp|phone|other',
+  createdBy: 'client|staff|system',
+  status: 'received|escalated|closed',
+  qualityCaseId: 'QualityCase.id|null'
 };
 
 const QualityCase = {
   ...baseEntity,
-  requestId: 'Request.id',
+  clientId: 'Client.id|null',
+  feedbackId: 'Feedback.id|null',
+  requestId: 'Request.id|null',
   visitId: 'Visit.id|null',
   status: 'QUALITY_CASE_STATUSES',
-  assignedTo: 'string|null'
+  assignedTo: 'string|null',
+  reasonCategory: 'string|null'
 };
 
 const CommunicationEvent = {
@@ -105,9 +112,12 @@ const CommunicationEvent = {
 
 const Task = {
   ...baseEntity,
-  taskType: 'reminder|quality_followup|recommendation_followup|integration_retry',
-  scheduledAt: 'ISODate',
-  status: 'pending|running|completed|failed',
+  taskType: 'feedback_request|quality_followup|recommendation_reminder|maintenance_reminder',
+  dueAt: 'ISODate',
+  processedAt: 'ISODate|null',
+  status: 'scheduled|processing|completed|failed|cancelled',
+  attemptCount: 0,
+  lastError: 'string|null',
   payload: {}
 };
 

@@ -25,7 +25,9 @@ function makeInitialStore() {
     clientInternalNotes: [],
     masterActions: [],
     qualityCases: [],
-    qualityCaseComments: []
+    qualityCaseComments: [],
+    feedback: [],
+    tasks: []
   };
 }
 
@@ -242,6 +244,30 @@ function updateRequestStatus({ requestId, toStatus, actorId, actorRole, lostReas
     createdAt: nowIso()
   });
   store.masterActions.push({ id: crypto.randomUUID(), actorId, role: actorRole, action: 'request_status_changed', requestId, clientId: request.clientId, payload: { fromStatus, toStatus, lostReason: history.reason }, createdAt: nowIso() });
+
+  if (toStatus === 'processed') {
+    const feedbackTaskExists = store.tasks.some((task) => task.taskType === 'feedback_request' && task.status !== 'cancelled' && task.payload?.requestId === requestId);
+    if (!feedbackTaskExists) {
+      const delayMinutes = Number(process.env.FEEDBACK_REQUEST_DELAY_MINUTES || 5);
+      const dueAt = new Date(Date.now() + Math.max(0, delayMinutes) * 60 * 1000).toISOString();
+      store.tasks.push({
+        id: crypto.randomUUID(),
+        taskType: 'feedback_request',
+        status: 'scheduled',
+        dueAt,
+        createdAt: nowIso(),
+        processedAt: null,
+        attemptCount: 0,
+        lastError: null,
+        payload: {
+          clientId: request.clientId,
+          requestId,
+          assignedMasterId: request.assignedMasterId || null
+        }
+      });
+    }
+  }
+
   writeStore(store);
   return { request, history };
 }
@@ -334,10 +360,171 @@ function listQualityCases(statuses = []) {
 
 function createQualityCase({ requestId, status = 'new', assignedTo = null, summary = 'Manual quality case' }) {
   const store = readStore();
-  const qualityCase = { id: crypto.randomUUID(), requestId, status, assignedTo, summary, createdAt: nowIso(), updatedAt: nowIso() };
+  const request = requestId ? store.requests.find((item) => item.id === requestId) : null;
+  const qualityCase = {
+    id: crypto.randomUUID(),
+    requestId,
+    clientId: request?.clientId || null,
+    feedbackId: null,
+    status,
+    assignedTo,
+    reasonCategory: null,
+    summary,
+    createdAt: nowIso(),
+    updatedAt: nowIso()
+  };
   store.qualityCases.push(qualityCase);
   writeStore(store);
   return qualityCase;
+}
+
+function findClientByTelegramId(telegramId) {
+  const store = readStore();
+  return store.clients.find((item) => item.telegramId === String(telegramId || '')) || null;
+}
+
+function findRequestById(requestId) {
+  const store = readStore();
+  return store.requests.find((item) => item.id === requestId) || null;
+}
+
+function createFeedback({ clientId, requestId = null, visitId = null, rating, comment = '', sourceChannel = 'telegram', createdBy = 'client' }) {
+  const store = readStore();
+  const request = requestId ? store.requests.find((item) => item.id === requestId) : null;
+  let qualityCase = null;
+  const feedback = {
+    id: crypto.randomUUID(),
+    clientId,
+    requestId,
+    visitId,
+    rating,
+    comment,
+    sourceChannel,
+    createdAt: nowIso(),
+    createdBy,
+    status: 'received',
+    qualityCaseId: null
+  };
+  store.feedback.push(feedback);
+
+  store.communicationEvents.push({
+    id: crypto.randomUUID(),
+    clientId,
+    requestId,
+    source: sourceChannel,
+    payload: { action: 'feedback_received', feedbackId: feedback.id, rating, comment },
+    createdAt: nowIso()
+  });
+
+  if (rating < 3) {
+    qualityCase = {
+      id: crypto.randomUUID(),
+      clientId,
+      feedbackId: feedback.id,
+      requestId,
+      status: 'new',
+      assignedTo: request?.assignedMasterId || null,
+      reasonCategory: 'low_rating',
+      summary: `Автокейс по низкой оценке (${rating}/5)`,
+      createdAt: nowIso(),
+      updatedAt: nowIso()
+    };
+    store.qualityCases.push(qualityCase);
+    feedback.qualityCaseId = qualityCase.id;
+    feedback.status = 'escalated';
+
+    store.communicationEvents.push({
+      id: crypto.randomUUID(),
+      clientId,
+      requestId,
+      source: 'system',
+      payload: {
+        action: 'quality_case_created_from_feedback',
+        qualityCaseId: qualityCase.id,
+        feedbackId: feedback.id,
+        duplicateForRole: 'manager'
+      },
+      createdAt: nowIso()
+    });
+
+    store.masterActions.push({
+      id: crypto.randomUUID(),
+      actorId: 'system',
+      role: 'system',
+      action: 'quality_case_auto_created_from_feedback',
+      requestId,
+      clientId,
+      payload: { qualityCaseId: qualityCase.id, feedbackId: feedback.id, assignedTo: qualityCase.assignedTo, duplicateForRole: 'manager' },
+      createdAt: nowIso()
+    });
+  }
+
+  writeStore(store);
+  return { feedback, qualityCase };
+}
+
+function createTask({ taskType, dueAt, payload = {} }) {
+  const store = readStore();
+  const task = {
+    id: crypto.randomUUID(),
+    taskType,
+    status: 'scheduled',
+    dueAt: dueAt || nowIso(),
+    createdAt: nowIso(),
+    processedAt: null,
+    attemptCount: 0,
+    lastError: null,
+    payload
+  };
+  store.tasks.push(task);
+  writeStore(store);
+  return task;
+}
+
+function listTasks(statuses = []) {
+  const store = readStore();
+  return statuses.length ? store.tasks.filter((item) => statuses.includes(item.status)) : store.tasks;
+}
+
+function claimDueTasks({ now = new Date().toISOString(), limit = 10 } = {}) {
+  const store = readStore();
+  const due = store.tasks
+    .filter((task) => task.status === 'scheduled' && task.dueAt <= now)
+    .sort((a, b) => String(a.dueAt).localeCompare(String(b.dueAt)))
+    .slice(0, limit);
+
+  due.forEach((task) => {
+    task.status = 'processing';
+    task.attemptCount += 1;
+    task.lastError = null;
+  });
+  if (due.length) writeStore(store);
+  return due;
+}
+
+function completeTask(taskId) {
+  const store = readStore();
+  const task = store.tasks.find((item) => item.id === taskId);
+  if (!task) return null;
+  task.status = 'completed';
+  task.processedAt = nowIso();
+  writeStore(store);
+  return task;
+}
+
+function failTask(taskId, error, maxAttempts = 3) {
+  const store = readStore();
+  const task = store.tasks.find((item) => item.id === taskId);
+  if (!task) return null;
+  task.lastError = String(error || 'unknown_error');
+  task.status = task.attemptCount >= maxAttempts ? 'failed' : 'scheduled';
+  if (task.status === 'scheduled') {
+    task.dueAt = new Date(Date.now() + Math.min(task.attemptCount, 5) * 60 * 1000).toISOString();
+  } else {
+    task.processedAt = nowIso();
+  }
+  writeStore(store);
+  return task;
 }
 
 function updateQualityCaseStatus({ qualityCaseId, status, actorId, actorRole }) {
@@ -400,6 +587,14 @@ module.exports = {
   updateQualityCaseStatus,
   addQualityCaseComment,
   getQualityCaseCard,
+  findClientByTelegramId,
+  findRequestById,
+  createFeedback,
+  createTask,
+  listTasks,
+  claimDueTasks,
+  completeTask,
+  failTask,
   resetStore,
   readStore
 };
