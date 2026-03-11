@@ -30,7 +30,8 @@ function makeInitialStore() {
     qualityCases: [],
     qualityCaseComments: [],
     feedback: [],
-    tasks: []
+    tasks: [],
+    reportSnapshots: []
   };
 }
 
@@ -621,6 +622,40 @@ function getQualityCaseCard(qualityCaseId) {
   };
 }
 
+
+
+function createReportSnapshot({ reportType, periodType, periodStart, periodEnd, metrics, summaryText, generatedBy = 'manual', sourceDataVersion = null, notes = null }) {
+  const store = readStore();
+  const snapshot = {
+    id: crypto.randomUUID(),
+    reportType,
+    periodType,
+    periodStart,
+    periodEnd,
+    generatedAt: nowIso(),
+    metrics,
+    summaryText,
+    generatedBy,
+    sourceDataVersion,
+    notes
+  };
+  store.reportSnapshots.push(snapshot);
+  writeStore(store);
+  return snapshot;
+}
+
+function listReportSnapshots({ limit = 50 } = {}) {
+  const store = readStore();
+  return [...store.reportSnapshots]
+    .sort((a, b) => String(b.generatedAt).localeCompare(String(a.generatedAt)))
+    .slice(0, limit);
+}
+
+function getReportSnapshotById(id) {
+  const store = readStore();
+  return store.reportSnapshots.find((item) => item.id === id) || null;
+}
+
 function resetStore() {
   if (fs.existsSync(DB_PATH)) fs.unlinkSync(DB_PATH);
   ensureStore();
@@ -735,6 +770,9 @@ module.exports = {
   claimDueTasks,
   completeTask,
   failTask,
+  createReportSnapshot,
+  listReportSnapshots,
+  getReportSnapshotById,
   resetStore,
   readStore,
   createIntegrationEvent,

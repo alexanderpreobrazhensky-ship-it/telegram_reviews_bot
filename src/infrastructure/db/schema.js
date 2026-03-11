@@ -16,7 +16,8 @@ const schemaOverview = {
   feedback: ['id', 'client_id', 'request_id', 'visit_id', 'rating', 'comment', 'source_channel', 'created_by', 'status', 'quality_case_id'],
   tasks: ['id', 'task_type', 'due_at', 'created_at', 'processed_at', 'status', 'attempt_count', 'last_error', 'payload'],
   integration_events: ['id', 'source_system', 'event_type', 'raw_payload', 'normalized_payload', 'processing_status', 'processing_attempt_count', 'last_error', 'created_at', 'processed_at', 'related_entity_type', 'related_entity_id', 'dedupe_key'],
-  integration_event_logs: ['id', 'event_id', 'status', 'message', 'created_at']
+  integration_event_logs: ['id', 'event_id', 'status', 'message', 'created_at'],
+  report_snapshots: ['id', 'report_type', 'period_type', 'period_start', 'period_end', 'generated_at', 'metrics', 'summary_text', 'generated_by', 'source_data_version', 'notes']
 };
 
 module.exports = { schemaOverview };

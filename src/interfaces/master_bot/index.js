@@ -1,5 +1,5 @@
 const db = require('../../infrastructure/db');
-const { createMasterService } = require('../../core/application');
+const { createMasterService, createReportingService } = require('../../core/application');
 
 const sessions = new Map();
 
@@ -13,6 +13,13 @@ async function sendTelegramMessage(token, chatId, text, extra = {}) {
 }
 
 const masterService = createMasterService({ db, sendClientMessage: sendTelegramMessage });
+const reportingService = createReportingService({ db });
+
+
+
+function canUseReports(actor) {
+  return actor?.role === 'manager' || actor?.role === 'admin';
+}
 
 function formatRequestLine(request) {
   return `${request.id} | ${request.requestType} | ${request.status} | ${request.description || '-'} `;
@@ -111,6 +118,21 @@ async function handleMasterWebhook({ body, config }) {
       telegramClientBotToken: config.telegramClientBotToken
     });
     return result;
+  }
+
+
+  if (text === '/report_week' || text === '/report_month' || text === '/report_quarter' || text === '/report_stats') {
+    if (!canUseReports(actor)) {
+      return { ok: false, error: 'REPORT_ACCESS_DENIED', allowedRoles: ['manager', 'admin'] };
+    }
+    const periodMap = {
+      '/report_week': 'weekly',
+      '/report_month': 'monthly',
+      '/report_quarter': 'quarterly',
+      '/report_stats': 'weekly'
+    };
+    const report = reportingService.buildManagementSummary({ period: periodMap[text] });
+    return { ok: true, report, text: report.summaryText };
   }
 
   if (text === '/quality_cases') {
