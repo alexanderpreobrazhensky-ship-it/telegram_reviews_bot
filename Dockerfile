@@ -1,13 +1,11 @@
-FROM python:3.11-slim
-
-ENV PYTHONUNBUFFERED=1
+FROM node:20-alpine
 
 WORKDIR /app
 
-COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
 
 COPY . .
-RUN mkdir -p /app/data
 
-CMD ["python", "main.py"]
+ENV NODE_ENV=production
+CMD ["node", "app.js"]
