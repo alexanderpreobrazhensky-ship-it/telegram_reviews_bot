@@ -10,6 +10,7 @@
 - Runtime: Node.js (`>=18`).
 - Entrypoint: `app.js`.
 - Manifest: `package.json` (`main: app.js`, `start: node app.js`).
+- Lockfile policy: `package-lock.json` обязателен и должен быть закоммичен; install pipeline должен использовать `npm ci` (без `npm-shrinkwrap.json`).
 - Branch для деплоя: `main`.
 - Expected BotHost behavior:
   - поднимается HTTP сервер и отвечает JSON/HTML/static;
@@ -90,7 +91,7 @@
 
 ## 5.6 ENV audit
 ### Обязательные
-- `PORT` (required для BotHost bind): порт HTTP.
+- `PORT` (required для BotHost bind): runtime-порт HTTP; приложение обязано слушать `process.env.PORT` (локально допустим fallback `3000`).
 - `TELEGRAM_CLIENT_BOT_TOKEN` (required для исходящих client_bot сообщений).
 - `TELEGRAM_MASTER_BOT_TOKEN` (required для staff/quality уведомлений).
 - `TELEGRAM_INTEGRATION_BOT_TOKEN` (required для integration bot в Telegram).

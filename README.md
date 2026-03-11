@@ -17,13 +17,19 @@
 
 ## Быстрый запуск локально
 ```bash
-npm install
+npm ci
 npm start
 ```
 
+
+## Install pipeline (CI/CD)
+- Для стабильной и воспроизводимой сборки обязателен `package-lock.json` (закоммичен в репозиторий).
+- В CI/CD и на деплое используйте `npm ci` (а не `npm install`).
+- `npm-shrinkwrap.json` не используется в проекте и не должен добавляться в репозиторий.
+
 ## ENV
 ### Обязательные
-- `PORT`
+- `PORT` — сервер в production обязан слушать именно `process.env.PORT` (локальный fallback: `3000`)
 - `TELEGRAM_CLIENT_BOT_TOKEN`
 - `TELEGRAM_MASTER_BOT_TOKEN`
 - `TELEGRAM_INTEGRATION_BOT_TOKEN`
