@@ -1,4 +1,29 @@
 (function () {
+  function initTelegramTheme() {
+    const tg = window.Telegram && window.Telegram.WebApp;
+    if (!tg) return;
+    tg.ready();
+    const root = document.documentElement;
+    const params = tg.themeParams || {};
+    const mapping = {
+      bg_color: '--tg-bg-color',
+      text_color: '--tg-text-color',
+      hint_color: '--tg-hint-color',
+      link_color: '--tg-link-color',
+      button_color: '--tg-button-color',
+      button_text_color: '--tg-button-text-color',
+      secondary_bg_color: '--tg-secondary-bg-color'
+    };
+
+    Object.entries(mapping).forEach(([key, cssVar]) => {
+      if (params[key]) root.style.setProperty(cssVar, params[key]);
+    });
+
+    if (tg.colorScheme) root.style.setProperty('color-scheme', tg.colorScheme);
+  }
+
+  initTelegramTheme();
+
   const mount = document.getElementById('app');
   const path = window.location.pathname;
 
