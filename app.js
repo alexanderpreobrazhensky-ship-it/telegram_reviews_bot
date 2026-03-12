@@ -57,7 +57,9 @@ function bootstrap() {
   server.listen(config.port, () => {
     const address = server.address();
     const runtimePort = address && typeof address === 'object' ? address.port : config.port;
-    logger.info(`Platform skeleton server listening on port ${runtimePort}`);
+    logger.info(
+      `Platform skeleton server listening on port ${runtimePort} (env PORT=${process.env.PORT || 'not-set'}, fallback=3000)`
+    );
     scheduler.start();
   });
 
