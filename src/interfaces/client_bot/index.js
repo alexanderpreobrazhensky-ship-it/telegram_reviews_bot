@@ -60,6 +60,8 @@ async function handleClientWebhook({ body, config }) {
   const chatId = message.chat?.id;
   const telegramId = String(message.from?.id || '');
   const text = message.text || '';
+  const webAppUrl = (config.webAppUrl || '').trim();
+  const inlineWebAppButton = webAppUrl ? [[{ text: 'Открыть WebApp', web_app: { url: webAppUrl } }]] : [];
 
   if (text === '/start') {
     await sendTelegramMessage(
@@ -68,7 +70,7 @@ async function handleClientWebhook({ body, config }) {
       'Добро пожаловать! Откройте WebApp или создайте быстрое обращение.',
       {
         reply_markup: {
-          inline_keyboard: [[{ text: 'Открыть WebApp', web_app: { url: config.webAppUrl } }]],
+          inline_keyboard: inlineWebAppButton,
           keyboard: [['Нужна запись / сервис', 'Нужны запчасти'], ['Вопрос мастеру', 'Гарантийное обращение'], ['Свяжитесь со мной']],
           resize_keyboard: true
         }
@@ -106,7 +108,9 @@ async function handleClientWebhook({ body, config }) {
     });
     db.createCommunicationEvent({ clientId: client.id, requestId: request.id, source: 'bot', payload: { action: 'quick_request_created', requestType: session.requestType } });
     sessions.delete(telegramId);
-    await sendTelegramMessage(config.telegramClientBotToken, chatId, `Обращение создано (${session.requestType}). Также доступен WebApp: ${config.webAppUrl}`);
+    await sendTelegramMessage(config.telegramClientBotToken, chatId, webAppUrl
+      ? `Обращение создано (${session.requestType}). Также доступен WebApp: ${webAppUrl}`
+      : `Обращение создано (${session.requestType}).`);
     return { ok: true, action: 'request_created', requestId: request.id };
   }
 
