@@ -19,6 +19,8 @@ function loadConfig() {
   const schedulerMaxAttempts = parseNumber(process.env.SCHEDULER_MAX_ATTEMPTS, 3, { min: 1, max: 10 });
   const schedulerStuckTimeoutMs = parseNumber(process.env.SCHEDULER_STUCK_TIMEOUT_MS, 300000, { min: 1000, max: 86400000 });
 
+  const rawWebAppUrl = (process.env.WEBAPP_URL || '').trim();
+
   return {
     nodeEnv: process.env.NODE_ENV || 'development',
     port,
@@ -33,7 +35,7 @@ function loadConfig() {
     integrationRetryDelaySeconds,
     oneCSyncEnabled: parseBoolean(process.env.ONE_C_SYNC_ENABLED, false),
     emailImportEnabled: parseBoolean(process.env.EMAIL_IMPORT_ENABLED, true),
-    webAppUrl: process.env.WEBAPP_URL || 'https://example.com',
+    webAppUrl: rawWebAppUrl,
     feedbackRequestDelayMinutes,
     schedulerIntervalMs,
     schedulerBatchSize,

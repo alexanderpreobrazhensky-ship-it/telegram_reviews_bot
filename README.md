@@ -34,6 +34,7 @@ npm start
 
 ### Рекомендуемые
 - `WEBAPP_URL` — Mini App URL (использовать `https://вашлогин.bothost.ru`).
+- URL Mini App в Node production path берётся только из `WEBAPP_URL`; hardcoded ссылки (включая Railway) не допускаются.
 - `DB_FILE_PATH` — путь к persistent file DB (по умолчанию `data/db.json`).
 - `NODE_ENV=production`
 

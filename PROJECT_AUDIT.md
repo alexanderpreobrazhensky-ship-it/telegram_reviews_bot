@@ -249,6 +249,7 @@ Skeleton/ограничения:
 
 ### 8.4 Flow открытия из client_bot
 - Кнопка WebApp формируется в `/start` client bot и использует `config.webAppUrl` (`WEBAPP_URL`).
+- В Node production path не должно быть hardcoded Railway/сторонних доменов для Mini App; источник URL — только `WEBAPP_URL`.
 
 ### 8.5 Готовность к Telegram Mini App
 - Базовый HTTPS URL open-flow есть.
