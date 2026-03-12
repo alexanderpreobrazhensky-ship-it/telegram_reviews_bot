@@ -1,8 +1,8 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="ru">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Отзывы — Автоцентр Лира</title>
 
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
@@ -11,14 +11,15 @@
     :root{
       --bg1:#050b17;
       --bg2:#0b1b3a;
-      --card:rgba(255,255,255,.06);
-      --stroke:rgba(255,255,255,.12);
       --text:#ffffff;
       --muted:rgba(255,255,255,.72);
-      --yandex:#ffd400;
-      --gis:#28c76f;
-      --tg:#2AABEE;
+      --stroke:rgba(255,255,255,.10);
+      --shadow:0 18px 50px rgba(0,0,0,.45);
+      --radius:18px;
     }
+
+    *{box-sizing:border-box}
+    html,body{height:100%}
 
     body{
       margin:0;
@@ -26,21 +27,21 @@
       display:flex;
       align-items:center;
       justify-content:center;
-      font-family: Arial, sans-serif;
-      background: radial-gradient(1200px 700px at 20% 0%, rgba(64,126,255,.22), transparent 55%),
-                  radial-gradient(900px 600px at 80% 20%, rgba(255,212,0,.12), transparent 60%),
-                  linear-gradient(180deg,var(--bg1),var(--bg2));
-      color:var(--text);
       padding:24px;
+      font-family:Arial, sans-serif;
+      color:var(--text);
+      background:
+        radial-gradient(900px 500px at 50% 0%, rgba(90,140,255,.22), transparent 60%),
+        linear-gradient(180deg,var(--bg1),var(--bg2));
     }
 
     .wrap{
       width:min(520px, 100%);
       background:linear-gradient(180deg, rgba(255,255,255,.06), rgba(255,255,255,.03));
       border:1px solid var(--stroke);
-      border-radius:20px;
-      box-shadow: 0 18px 50px rgba(0,0,0,.45);
-      padding:26px;
+      border-radius:24px;
+      padding:28px 22px;
+      box-shadow:var(--shadow);
       text-align:center;
       position:relative;
       overflow:hidden;
@@ -48,22 +49,18 @@
 
     .glow{
       position:absolute;
-      inset:-120px -120px auto auto;
-      width:280px;
-      height:280px;
-      background: radial-gradient(circle at 30% 30%, rgba(64,126,255,.35), transparent 60%);
-      filter: blur(10px);
+      inset:-120px -80px auto -80px;
+      height:220px;
+      background:radial-gradient(closest-side, rgba(42,171,238,.22), transparent 70%);
       pointer-events:none;
-      opacity:.9;
     }
 
     .logo{
-      width:120px;
-      height:auto;
+      width:110px;
       display:block;
-      margin:0 auto 14px;
-      animation: float 4s ease-in-out infinite;
-      filter: drop-shadow(0 8px 18px rgba(0,0,0,.35));
+      margin:0 auto 16px;
+      animation:float 4s ease-in-out infinite;
+      filter:drop-shadow(0 10px 18px rgba(0,0,0,.35));
     }
 
     @keyframes float{
@@ -74,34 +71,102 @@
 
     h1{
       margin:6px 0 6px;
-      font-size:28px;
-      letter-spacing:.2px;
+      font-size:30px;
+      line-height:1.15;
     }
 
-    .subtitle{
-      margin:0 0 18px;
+    .sub{
+      margin:0 0 20px;
       color:var(--muted);
       font-size:15px;
-      line-height:1.35;
     }
 
-    .buttons{
+    .btns{
       display:flex;
       flex-direction:column;
       gap:14px;
       margin-top:14px;
     }
 
-    .btn{
-      padding:16px 16px;
-      border-radius:14px;
+    a.btn{
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      text-decoration:none;
+      padding:16px;
+      border-radius:16px;
       font-size:18px;
-      border:none;
-      cursor:pointer;
       font-weight:800;
-      transition: transform .08s ease, filter .15s ease;
+      border:1px solid rgba(255,255,255,.10);
+      box-shadow:0 10px 22px rgba(0,0,0,.25);
+      transition:transform .1s ease, filter .12s ease;
+      -webkit-tap-highlight-color: transparent;
     }
-    .btn:active{ transform: translateY(1px) scale(.995); }
-    .btn:hover{ filter: brightness(1.04); }
 
-    .yandex{ background:var(--yandex); color:#111;
+    a.btn:hover{filter:brightness(1.04)}
+    a.btn:active{transform:scale(.99)}
+
+    .yandex{background:#ffd400;color:#111}
+    .gis{background:#28c76f;color:#fff}
+    .tg{background:#2AABEE;color:#fff}
+
+    .note{
+      margin-top:18px;
+      color:rgba(255,255,255,.56);
+      font-size:12.5px;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="wrap">
+    <div class="glow"></div>
+
+    <img class="logo" src="logo.png" alt="Автоцентр Лира">
+
+    <h1>Будем рады вашему отзыву</h1>
+    <p class="sub">Выберите площадку</p>
+
+    <div class="btns">
+      <a class="btn yandex" id="btnYandex"
+         href="https://yandex.ru/maps/org/lira/1014791361/reviews/?ll=43.889574%2C56.287187&tab=reviews&z=17"
+         target="_blank" rel="noopener">
+         Оставить отзыв в Яндекс
+      </a>
+
+      <a class="btn gis" id="btn2gis"
+         href="https://2gis.ru/n_novgorod/firm/2674540559836449/tab/reviews?m=43.889507%2C56.287218%2F16"
+         target="_blank" rel="noopener">
+         Оставить отзыв в 2ГИС
+      </a>
+
+      <a class="btn tg" id="btnTg"
+         href="https://t.me/LIRA_NN"
+         target="_blank" rel="noopener">
+         Наш Telegram
+      </a>
+    </div>
+
+    <div class="note">Спасибо, что помогаете нам становиться лучше.</div>
+  </div>
+
+  <script>
+    const SUPABASE_URL = "https://oqgjjxsi0aofenvacetl.supabase.co";
+    const SUPABASE_ANON_KEY = "sb_publishable_tJ00AmXTERE9jKnHfSFpvQ_yVce_t4d";
+
+    const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+    async function track(platform){
+      try{
+        await sb.from("review_clicks").insert({ platform });
+      }catch(e){
+        console.warn("track error:", e);
+      }
+    }
+
+    document.getElementById("btnYandex").addEventListener("click", () => track("yandex"));
+    document.getElementById("btn2gis").addEventListener("click", () => track("2gis"));
+    document.getElementById("btnTg").addEventListener("click", () => track("telegram"));
+  </script>
+</body>
+</html>
