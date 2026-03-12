@@ -69,7 +69,12 @@ async function handleClientWebhook({ body, config }) {
       {
         reply_markup: {
           inline_keyboard: [[{ text: 'Открыть WebApp', web_app: { url: config.webAppUrl } }]],
-          keyboard: [['Нужна запись / сервис', 'Нужны запчасти'], ['Вопрос мастеру', 'Гарантийное обращение'], ['Свяжитесь со мной']],
+          keyboard: [
+            [{ text: 'Мини-приложение', web_app: { url: config.webAppUrl } }],
+            ['Нужна запись / сервис', 'Нужны запчасти'],
+            ['Вопрос мастеру', 'Гарантийное обращение'],
+            ['Свяжитесь со мной']
+          ],
           resize_keyboard: true
         }
       }
