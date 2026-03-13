@@ -8,6 +8,7 @@ const logger = require('../../src/infrastructure/logging/logger');
 
 async function withServer(run) {
   db.resetStore();
+  process.env.MASTER_BOT_ADMIN_IDS = '7001';
   const config = loadConfig();
   const server = createServer({ config, logger });
   await new Promise((resolve) => server.listen(0, resolve));
@@ -16,6 +17,7 @@ async function withServer(run) {
     await run(`http://127.0.0.1:${port}`);
   } finally {
     await new Promise((resolve) => server.close(resolve));
+    delete process.env.MASTER_BOT_ADMIN_IDS;
   }
 }
 
@@ -43,7 +45,7 @@ test('processed request creates feedback task and low feedback creates quality c
     const reqResponse = await fetch(`${base}/api/client/requests/service`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ fullName: 'Клиент Фидбек', phone: '+70000000100', telegramId, description: 'Нужен ремонт' })
+      body: JSON.stringify({ fullName: 'Клиент Фидбек', phone: '+70000000100', telegramId, year: '2020', vin: 'VIN-FB', description: 'Нужен ремонт' })
     });
     const request = await reqResponse.json();
 

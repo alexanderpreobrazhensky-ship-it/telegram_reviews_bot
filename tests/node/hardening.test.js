@@ -39,7 +39,7 @@ test('client request route rejects invalid json and required fields', async () =
     const ok = await fetch(`${base}/api/client/requests/service`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ fullName: 'Иван', phone: '+79990000000', description: 'ok' })
+      body: JSON.stringify({ fullName: 'Иван', phone: '+79990000000', year: '2019', vin: 'VIN-H', description: 'ok' })
     });
     assert.equal(ok.status, 201);
   });

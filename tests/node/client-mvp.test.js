@@ -34,8 +34,8 @@ test('health and webapp pages are available', async () => {
 const requestCases = [
   ['/api/client/requests/service', 'service_request', { fullName: 'Иван Иванов', phone: '+79990000001', brand: 'Lada', model: 'Vesta', year: '2020', vin: 'VIN001', plateNumber: 'A111AA', description: 'Стучит подвеска' }],
   ['/api/client/requests/parts', 'parts_request', { fullName: 'Иван Иванов', phone: '+79990000002', brand: 'Kia', model: 'Rio', year: '2018', vin: 'VIN002', plateNumber: 'B222BB', description: 'Нужен фильтр' }],
-  ['/api/client/requests/consultation', 'consultation_request', { fullName: 'Иван Иванов', phone: '+79990000003', question: 'Когда менять масло?' }],
-  ['/api/client/requests/warranty', 'warranty_request', { fullName: 'Иван Иванов', phone: '+79990000004', brand: 'VW', model: 'Polo', vin: 'VIN004', plateNumber: 'C333CC', description: 'Повторилась неисправность' }],
+  ['/api/client/requests/consultation', 'consultation_request', { fullName: 'Иван Иванов', phone: '+79990000003', year: '2017', vin: 'VIN003', question: 'Когда менять масло?' }],
+  ['/api/client/requests/warranty', 'warranty_request', { fullName: 'Иван Иванов', phone: '+79990000004', brand: 'VW', model: 'Polo', year: '2019', vin: 'VIN004', plateNumber: 'C333CC', description: 'Повторилась неисправность', visitContext: 'Визит 2024-09-01' }],
   ['/api/client/requests/data-change', 'data_change_request', { fullName: 'Иван Иванов', phone: '+79990000005', changeDetails: 'Сменил номер телефона' }]
 ];
 
@@ -60,7 +60,7 @@ test('client bot /start and quick request flow works', async () => {
     await fetch(`${base}/telegram/client_bot/webhook`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: { text: 'Петров Петр', chat: { id: 1 }, from: { id: 10 } } }) });
     await fetch(`${base}/telegram/client_bot/webhook`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: { text: '+79990000006', chat: { id: 1 }, from: { id: 10 } } }) });
 
-    const requests = await fetch(`${base}/api/client/requests?phone=%2B79990000006`);
+    const requests = await fetch(`${base}/api/client/requests?phone=9990000006`);
     const data = await requests.json();
     assert.equal(data.items.length, 1);
     assert.equal(data.items[0].requestType, 'service_request');
@@ -70,7 +70,7 @@ test('client bot /start and quick request flow works', async () => {
 
 test('persistence stores client vehicle request and communication events', async () => {
   await withServer(async (base) => {
-    await fetch(`${base}/api/client/requests/service`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ fullName: 'Сидоров Сидор', phone: '+79990000007', brand: 'Renault', model: 'Logan', year: '2019', vin: 'VIN007', plateNumber: 'T777TT', description: 'Проверка' }) });
+    await fetch(`${base}/api/client/requests/service`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ fullName: 'Сидоров Сидор', phone: '+79990000007', year: '2019', vin: 'VIN007', brand: 'Renault', model: 'Logan', plateNumber: 'T777TT', description: 'Проверка' }) });
     const state = db.readStore();
     assert.equal(state.clients.length, 1);
     assert.equal(state.vehicles.length, 1);

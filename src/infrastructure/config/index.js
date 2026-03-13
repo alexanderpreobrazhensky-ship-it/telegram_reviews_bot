@@ -18,6 +18,11 @@ function loadConfig() {
   const schedulerBatchSize = parseNumber(process.env.SCHEDULER_BATCH_SIZE, 10, { min: 1, max: 100 });
   const schedulerMaxAttempts = parseNumber(process.env.SCHEDULER_MAX_ATTEMPTS, 3, { min: 1, max: 10 });
   const schedulerStuckTimeoutMs = parseNumber(process.env.SCHEDULER_STUCK_TIMEOUT_MS, 300000, { min: 1000, max: 86400000 });
+  const webappDedupeWindowMs = parseNumber(process.env.WEBAPP_DEDUPE_WINDOW_MS, 45000, { min: 5000, max: 600000 });
+  const masterBotAdminIds = String(process.env.MASTER_BOT_ADMIN_IDS || '')
+    .split(',')
+    .map((id) => id.trim())
+    .filter(Boolean);
 
   return {
     nodeEnv: process.env.NODE_ENV || 'development',
@@ -38,7 +43,11 @@ function loadConfig() {
     schedulerIntervalMs,
     schedulerBatchSize,
     schedulerMaxAttempts,
-    schedulerStuckTimeoutMs
+    schedulerStuckTimeoutMs,
+    webappDedupeWindowMs,
+    telegramMastersChatId: process.env.TELEGRAM_MASTERS_CHAT_ID || '',
+    webappTelegramChannelLink: process.env.WEBAPP_TELEGRAM_CHANNEL_LINK || '',
+    masterBotAdminIds
   };
 }
 

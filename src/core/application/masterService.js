@@ -1,14 +1,14 @@
 const REQUEST_STATUSES = ['new', 'waiting_data', 'in_progress', 'processed', 'lost', 'archived'];
 const QUALITY_CASE_STATUSES = ['new', 'assigned', 'in_progress', 'resolved', 'unresolved', 'archived'];
 
-function createMasterService({ db, sendClientMessage }) {
+function createMasterService({ db, sendClientMessage, adminTelegramIds = [] }) {
   return {
     getAvailableRoles() {
       return ['master', 'manager', 'admin'];
     },
 
     resolveActor({ telegramId, fullName }) {
-      return db.resolveStaffUser({ telegramId, fullName });
+      return db.resolveStaffUser({ telegramId, fullName, adminTelegramIds });
     },
 
     listRequestsByStatus(status) {
@@ -59,6 +59,18 @@ function createMasterService({ db, sendClientMessage }) {
 
     addQualityCaseComment({ qualityCaseId, actorId, actorRole, text }) {
       return db.addQualityCaseComment({ qualityCaseId, actorId, actorRole, text });
+    },
+
+    listStaffUsers() {
+      return db.listStaffUsers();
+    },
+
+    grantStaffAccess({ telegramId, fullName, role, actorId, actorRole }) {
+      return db.createStaffUser({ telegramId, fullName, role, actorId, actorRole });
+    },
+
+    revokeStaffAccess({ telegramId, actorId, actorRole }) {
+      return db.revokeStaffUser({ telegramId, actorId, actorRole });
     },
 
     async requestClientClarification({ requestId, actorId, actorRole, text, chatId, telegramClientBotToken }) {

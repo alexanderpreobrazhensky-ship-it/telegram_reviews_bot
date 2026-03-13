@@ -233,16 +233,95 @@ function recordMasterAction({ actorId, role, action, requestId = null, clientId 
   return item;
 }
 
-function resolveStaffUser({ telegramId, fullName }) {
+function resolveStaffUser({ telegramId, fullName, adminTelegramIds = [] }) {
   const store = readStore();
-  const tid = String(telegramId || '');
-  let user = store.staffUsers.find((u) => u.telegramId === tid);
-  if (!user) {
-    user = { id: crypto.randomUUID(), telegramId: tid, fullName: fullName || `master_${tid}`, role: 'master', createdAt: nowIso() };
-    store.staffUsers.push(user);
+  const tid = String(telegramId || '').trim();
+  if (!tid) return null;
+  const adminSet = new Set((adminTelegramIds || []).map((id) => String(id).trim()).filter(Boolean));
+  const isEnvAdmin = adminSet.has(tid);
+  let user = store.staffUsers.find((u) => u.telegramId === tid) || null;
+
+  if (isEnvAdmin) {
+    if (!user) {
+      user = { id: crypto.randomUUID(), telegramId: tid, fullName: fullName || `admin_${tid}`, role: 'admin', createdAt: nowIso(), updatedAt: nowIso() };
+      store.staffUsers.push(user);
+      writeStore(store);
+    } else if (user.role !== 'admin') {
+      user.role = 'admin';
+      user.updatedAt = nowIso();
+      if (fullName) user.fullName = fullName;
+      writeStore(store);
+    }
+    return user;
+  }
+
+  if (!user) return null;
+  if (fullName && fullName !== user.fullName) {
+    user.fullName = fullName;
+    user.updatedAt = nowIso();
     writeStore(store);
   }
   return user;
+}
+
+function listStaffUsers() {
+  const store = readStore();
+  return [...store.staffUsers].sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
+}
+
+function createStaffUser({ telegramId, fullName, role, actorId = null, actorRole = null }) {
+  const allowedRoles = new Set(['master', 'manager']);
+  if (!allowedRoles.has(role)) return { error: 'INVALID_ROLE' };
+  const tid = String(telegramId || '').trim();
+  if (!tid) return { error: 'TELEGRAM_ID_REQUIRED' };
+
+  const store = readStore();
+  let user = store.staffUsers.find((item) => item.telegramId === tid) || null;
+  if (user) {
+    if (user.role === 'admin') return { error: 'ADMIN_ROLE_IMMUTABLE' };
+    user.role = role;
+    user.fullName = fullName || user.fullName || `staff_${tid}`;
+    user.updatedAt = nowIso();
+  } else {
+    user = { id: crypto.randomUUID(), telegramId: tid, fullName: fullName || `staff_${tid}`, role, createdAt: nowIso(), updatedAt: nowIso() };
+    store.staffUsers.push(user);
+  }
+
+  store.masterActions.push({
+    id: crypto.randomUUID(),
+    actorId,
+    role: actorRole,
+    action: 'staff_user_upserted',
+    requestId: null,
+    clientId: null,
+    payload: { staffUserId: user.id, telegramId: tid, role },
+    createdAt: nowIso()
+  });
+
+  writeStore(store);
+  return { user };
+}
+
+function revokeStaffUser({ telegramId, actorId = null, actorRole = null }) {
+  const tid = String(telegramId || '').trim();
+  if (!tid) return { error: 'TELEGRAM_ID_REQUIRED' };
+  const store = readStore();
+  const index = store.staffUsers.findIndex((item) => item.telegramId === tid);
+  if (index === -1) return { error: 'STAFF_USER_NOT_FOUND' };
+  if (store.staffUsers[index].role === 'admin') return { error: 'ADMIN_ROLE_IMMUTABLE' };
+  const [removed] = store.staffUsers.splice(index, 1);
+  store.masterActions.push({
+    id: crypto.randomUUID(),
+    actorId,
+    role: actorRole,
+    action: 'staff_user_revoked',
+    requestId: null,
+    clientId: null,
+    payload: { staffUserId: removed.id, telegramId: tid },
+    createdAt: nowIso()
+  });
+  writeStore(store);
+  return { user: removed };
 }
 
 function listRequests({ phone, telegramId, statuses }) {
@@ -472,6 +551,31 @@ function findClientByTelegramId(telegramId) {
 function findRequestById(requestId) {
   const store = readStore();
   return store.requests.find((item) => item.id === requestId) || null;
+}
+
+function findRecentDuplicateRequest({ requestType, phone, vin, text, withinMs = 45000 }) {
+  const store = readStore();
+  const normalizedPhone = String(phone || '').trim();
+  const normalizedVin = String(vin || '').trim().toUpperCase();
+  const normalizedText = String(text || '').trim().toLowerCase();
+  const now = Date.now();
+  const windowMs = Math.max(1000, Number(withinMs) || 45000);
+
+  for (let i = store.requests.length - 1; i >= 0; i -= 1) {
+    const request = store.requests[i];
+    if (request.requestType !== requestType) continue;
+    const createdAtMs = Date.parse(request.createdAt || '');
+    if (!Number.isFinite(createdAtMs) || now - createdAtMs > windowMs) continue;
+    const client = store.clients.find((item) => item.id === request.clientId) || null;
+    if (!client || String(client.phone || '').trim() !== normalizedPhone) continue;
+    const vehicle = request.vehicleId ? (store.vehicles.find((item) => item.id === request.vehicleId) || null) : null;
+    const vinMatch = normalizedVin ? String(vehicle?.vin || '').trim().toUpperCase() === normalizedVin : true;
+    if (!vinMatch) continue;
+    const textMatch = String(request.description || '').trim().toLowerCase() === normalizedText;
+    if (!textMatch) continue;
+    return request;
+  }
+  return null;
 }
 
 function createFeedback({ clientId, requestId = null, visitId = null, rating, comment = '', sourceChannel = 'telegram', createdBy = 'client' }) {
@@ -796,6 +900,9 @@ module.exports = {
   listRecommendations,
   markRecommendationInterest,
   resolveStaffUser,
+  listStaffUsers,
+  createStaffUser,
+  revokeStaffUser,
   recordMasterAction,
   updateRequestStatus,
   addInternalComment,
@@ -810,6 +917,7 @@ module.exports = {
   getQualityCaseCard,
   findClientByTelegramId,
   findRequestById,
+  findRecentDuplicateRequest,
   createFeedback,
   createTask,
   listTasks,
