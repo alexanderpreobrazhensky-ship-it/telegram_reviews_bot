@@ -61,6 +61,7 @@ test('report snapshots can be created, persisted and retrieved', () => {
 
 test('report routes and stage 2-5 regression routes stay alive', async () => {
   db.resetStore();
+  process.env.MASTER_BOT_ADMIN_IDS = '2,778';
   const server = createServer({ config: loadConfig(), logger });
   await new Promise((resolve) => server.listen(0, resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
@@ -83,23 +84,19 @@ test('report routes and stage 2-5 regression routes stay alive', async () => {
     assert.equal(snapshots.status, 200);
   } finally {
     await new Promise((resolve) => server.close(resolve));
+    delete process.env.MASTER_BOT_ADMIN_IDS;
   }
 });
 
 test('manager/admin can use report bot hooks while master cannot', async () => {
   db.resetStore();
-  const manager = db.resolveStaffUser({ telegramId: '777', fullName: 'M' });
-  const admin = db.resolveStaffUser({ telegramId: '778', fullName: 'A' });
-  updateStore((store) => {
-    const m = store.staffUsers.find((u) => u.id === manager.id);
-    const a = store.staffUsers.find((u) => u.id === admin.id);
-    m.role = 'manager';
-    a.role = 'admin';
-  });
+  process.env.MASTER_BOT_ADMIN_IDS = '778';
+  db.createStaffUser({ telegramId: '777', fullName: 'M', role: 'manager' });
 
-  const denied = await handleMasterWebhook({ body: { message: { text: '/report_week', chat: { id: 10 }, from: { id: 10, first_name: 'Master' } } }, config: {} });
-  const allowedManager = await handleMasterWebhook({ body: { message: { text: '/report_week', chat: { id: 777 }, from: { id: 777, first_name: 'Manager' } } }, config: {} });
-  const allowedAdmin = await handleMasterWebhook({ body: { message: { text: '/report_month', chat: { id: 778 }, from: { id: 778, first_name: 'Admin' } } }, config: {} });
+  const denied = await handleMasterWebhook({ body: { message: { text: '/report_week', chat: { id: 10 }, from: { id: 10, first_name: 'Master' } } }, config: loadConfig() });
+  const allowedManager = await handleMasterWebhook({ body: { message: { text: '/report_week', chat: { id: 777 }, from: { id: 777, first_name: 'Manager' } } }, config: loadConfig() });
+  const allowedAdmin = await handleMasterWebhook({ body: { message: { text: '/report_month', chat: { id: 778 }, from: { id: 778, first_name: 'Admin' } } }, config: loadConfig() });
+  delete process.env.MASTER_BOT_ADMIN_IDS;
 
   assert.equal(denied.ok, false);
   assert.equal(allowedManager.ok, true);

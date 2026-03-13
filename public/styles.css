@@ -1,8 +1,72 @@
-body { font-family: Arial, sans-serif; margin: 0; padding: 24px; background: #f5f7fb; }
-main { max-width: 900px; margin: 0 auto; background: #fff; padding: 20px; border-radius: 10px; }
+:root {
+  --bg: #0c1f3f;
+  --bg2: #102b58;
+  --card: #ffffff;
+  --text: #12213f;
+  --muted: #5f6f8c;
+  --primary: #1f64ff;
+  --danger: #d63a3a;
+}
+
+* { box-sizing: border-box; }
+body {
+  font-family: Inter, Arial, sans-serif;
+  margin: 0;
+  padding: 24px;
+  background: radial-gradient(circle at top, var(--bg2), var(--bg));
+  color: #fff;
+}
+main {
+  max-width: 860px;
+  margin: 0 auto;
+  background: rgba(255,255,255,0.08);
+  padding: 20px;
+  border-radius: 18px;
+  backdrop-filter: blur(2px);
+}
 nav { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 16px; }
-a { color: #1155cc; text-decoration: none; background: #eef3ff; padding: 6px 10px; border-radius: 6px; }
-label { display: block; margin-bottom: 10px; }
-input, textarea, button { width: 100%; padding: 8px; margin-top: 4px; box-sizing: border-box; }
-button { cursor: pointer; background: #1155cc; color: #fff; border: 0; border-radius: 6px; }
-.ok { color: #1f7a1f; }
+nav a {
+  color: #fff;
+  text-decoration: none;
+  background: rgba(255,255,255,0.15);
+  padding: 8px 12px;
+  border-radius: 999px;
+}
+section {
+  background: var(--card);
+  color: var(--text);
+  border-radius: 16px;
+  padding: 22px;
+  box-shadow: 0 10px 24px rgba(0,0,0,0.25);
+}
+h1, h2 { margin-top: 0; }
+label { display: block; margin-bottom: 12px; font-weight: 600; }
+input, textarea, button, .btn {
+  width: 100%;
+  margin-top: 6px;
+  border: 1px solid #d8deea;
+  border-radius: 12px;
+  padding: 11px 12px;
+  font-size: 16px;
+}
+textarea { min-height: 90px; resize: vertical; }
+button, .btn {
+  cursor: pointer;
+  background: var(--primary);
+  color: #fff;
+  border: 0;
+  text-decoration: none;
+  display: inline-block;
+  text-align: center;
+}
+button[disabled] { opacity: .7; cursor: default; }
+.inline { width: auto; }
+.btn.ghost { background: #eef3ff; color: #1f3e7a; }
+.form-error { color: var(--danger); font-weight: 600; min-height: 20px; }
+.field-error { color: var(--danger); min-height: 18px; display: block; font-size: 13px; }
+.hint { color: var(--muted); font-size: 13px; }
+.has-error input, .has-error textarea { border-color: var(--danger); }
+.result-actions { display: grid; gap: 10px; margin-top: 14px; }
+.result.ok h2 { color: #1e7f40; }
+.result.error h2 { color: var(--danger); }
+.result-id { color: var(--muted); }

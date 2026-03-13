@@ -26,6 +26,12 @@ function quickTypeFromText(text) {
   return null;
 }
 
+function normalizePhone10(raw) {
+  const digits = String(raw || '').replace(/\D/g, '');
+  if (digits.length === 11 && (digits.startsWith('7') || digits.startsWith('8'))) return digits.slice(1);
+  return digits;
+}
+
 function parseRating(text) {
   const raw = String(text || '').trim();
   const match = raw.match(/^([1-5])(?:\s+(.+))?$/);
@@ -101,7 +107,7 @@ async function handleClientWebhook({ body, config }) {
   }
 
   if (session?.step === 'phone') {
-    const client = db.upsertClient({ fullName: session.fullName, phone: text, telegramId });
+    const client = db.upsertClient({ fullName: session.fullName, phone: normalizePhone10(text), telegramId });
     const request = db.createRequest({
       clientId: client.id,
       vehicleId: null,

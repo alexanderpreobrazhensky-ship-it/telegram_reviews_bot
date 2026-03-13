@@ -7,6 +7,7 @@ const db = require('../../src/infrastructure/db');
 
 async function withServer(run) {
   db.resetStore();
+  process.env.MASTER_BOT_ADMIN_IDS = '5001';
   const config = loadConfig();
   const server = createServer({ config, logger });
   await new Promise((resolve) => server.listen(0, resolve));
@@ -15,6 +16,7 @@ async function withServer(run) {
     await run(`http://127.0.0.1:${port}`);
   } finally {
     await new Promise((resolve) => server.close(resolve));
+    delete process.env.MASTER_BOT_ADMIN_IDS;
   }
 }
 
@@ -38,7 +40,7 @@ async function createClientRequest(base, payload) {
 
 test('master bot /start menu list and search work', async () => {
   await withServer(async (base) => {
-    const req = await createClientRequest(base, { fullName: 'Иван Петров', phone: '+70000000001', vin: 'VIN-M1', plateNumber: 'A111AA', description: 'Шум в подвеске' });
+    const req = await createClientRequest(base, { fullName: 'Иван Петров', phone: '+70000000001', year: '2019', vin: 'VIN-M1', plateNumber: 'A111AA', description: 'Шум в подвеске' });
 
     const start = await sendMaster(base, '/start');
     assert.equal(start.action, 'start');
@@ -49,9 +51,10 @@ test('master bot /start menu list and search work', async () => {
 
     await sendMaster(base, 'Поиск');
     const byName = await sendMaster(base, 'Иван Петров');
-    assert.equal(byName.clients.length, 1);
+    assert.equal(byName.ok, true);
+    assert.equal(byName.card.request.id, req.id);
 
-    const byPhone = await sendMaster(base, '/search +70000000001');
+    const byPhone = await sendMaster(base, '/search 0000000001');
     assert.equal(byPhone.clients.length, 1);
 
     const byVin = await sendMaster(base, '/search VIN-M1');
@@ -64,8 +67,8 @@ test('master bot /start menu list and search work', async () => {
 
 test('status transitions and lost reason validation work', async () => {
   await withServer(async (base) => {
-    const reqA = await createClientRequest(base, { fullName: 'Тест A', phone: '+70000000002', description: 'A' });
-    const reqB = await createClientRequest(base, { fullName: 'Тест B', phone: '+70000000003', description: 'B' });
+    const reqA = await createClientRequest(base, { fullName: 'Тест A', phone: '+70000000002', year: '2020', vin: 'VINA', description: 'A' });
+    const reqB = await createClientRequest(base, { fullName: 'Тест B', phone: '+70000000003', year: '2021', vin: 'VINB', description: 'B' });
 
     const waiting = await sendMaster(base, `/set_status ${reqA.id} waiting_data`);
     assert.equal(waiting.ok, true);
@@ -92,7 +95,7 @@ test('status transitions and lost reason validation work', async () => {
 
 test('persistence stores status history internal comments and assignment', async () => {
   await withServer(async (base) => {
-    const req = await createClientRequest(base, { fullName: 'Сохранение', phone: '+70000000004', description: 'persist' });
+    const req = await createClientRequest(base, { fullName: 'Сохранение', phone: '+70000000004', year: '2022', vin: 'VINP', description: 'persist' });
 
     await sendMaster(base, `/set_status ${req.id} in_progress`);
     await sendMaster(base, `/comment ${req.id} проверили ошибки`);
@@ -111,7 +114,7 @@ test('persistence stores status history internal comments and assignment', async
 
 test('client card request card recommendations and quality case skeleton work', async () => {
   await withServer(async (base) => {
-    const req = await createClientRequest(base, { fullName: 'Карточка Клиента', phone: '+70000000005', vin: 'VIN-CARD', plateNumber: 'C500CC', description: 'card' });
+    const req = await createClientRequest(base, { fullName: 'Карточка Клиента', phone: '+70000000005', year: '2018', vin: 'VIN-CARD', plateNumber: 'C500CC', description: 'card' });
     const state = db.readStore();
     const client = state.clients[0];
 

@@ -40,8 +40,72 @@ function serveFile(res, filePath, contentType) {
   }
 }
 
+function injectConfigIntoHtml(html, config) {
+  const script = `<script>window.__WEBAPP_TELEGRAM_CHANNEL_LINK__=${JSON.stringify(config.webappTelegramChannelLink || '')};</script>`;
+  return html.includes('</body>') ? html.replace('</body>', `${script}</body>`) : `${html}${script}`;
+}
+
+function normalizePhone10(raw) {
+  const digits = String(raw || '').replace(/\D/g, '');
+  if (digits.length === 11 && (digits.startsWith('7') || digits.startsWith('8'))) return digits.slice(1);
+  return digits;
+}
+
+function validateClientRequestPayload(body = {}, type) {
+  const errors = [];
+  const requiredByType = {
+    service_request: ['fullName', 'phone', 'year', 'vin', 'description'],
+    parts_request: ['fullName', 'phone', 'year', 'vin', 'description'],
+    consultation_request: ['fullName', 'phone', 'year', 'vin', 'question'],
+    warranty_request: ['fullName', 'phone', 'year', 'vin', 'description', 'visitContext'],
+    data_change_request: ['fullName', 'phone', 'changeDetails']
+  };
+  for (const field of requiredByType[type] || []) {
+    if (!String(body[field] || '').trim()) errors.push(`${field} is required`);
+  }
+  if (!/^\d{10}$/.test(String(body.phone || ''))) errors.push('phone must be 10 digits');
+  return errors;
+}
+
+async function sendTelegramMessage(token, chatId, text, extra = {}) {
+  if (!token || !chatId) return false;
+  await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ chat_id: chatId, text, ...extra })
+  }).catch(() => {});
+  return true;
+}
+
+async function duplicateToMastersChat({ config, request, payload }) {
+  if (!config.telegramMasterBotToken || !config.telegramMastersChatId) return;
+  const text = [
+    `Новая заявка: ${request.id}`,
+    `Тип: ${request.requestType}`,
+    `Телефон: ${payload.phone || '-'}`,
+    `VIN: ${payload.vin || '-'}`,
+    `Описание: ${payload.description || payload.question || payload.changeDetails || '-'}`
+  ].join('\n');
+  await sendTelegramMessage(config.telegramMasterBotToken, Number(config.telegramMastersChatId), text, {
+    reply_markup: {
+      inline_keyboard: [
+        [
+          { text: 'Взять в работу', callback_data: `req:${request.id}:in_progress` },
+          { text: 'Запросить данные', callback_data: `req:${request.id}:waiting_data` }
+        ],
+        [
+          { text: 'Завершить', callback_data: `req:${request.id}:processed` },
+          { text: 'Потеряно', callback_data: `req:${request.id}:lost` }
+        ],
+        [{ text: 'Открыть карточку', callback_data: `card:${request.id}` }]
+      ]
+    }
+  });
+}
+
 function createClientRequest({ body, type, sourceChannel = 'webapp' }) {
-  const client = db.upsertClient({ fullName: body.fullName, phone: body.phone, telegramId: body.telegramId ? String(body.telegramId) : null });
+  const normalizedPhone = normalizePhone10(body.phone);
+  const client = db.upsertClient({ fullName: body.fullName, phone: normalizedPhone, telegramId: body.telegramId ? String(body.telegramId) : null });
   const vehicle = db.upsertVehicle({
     clientId: client.id,
     brand: body.brand,
@@ -56,12 +120,6 @@ function createClientRequest({ body, type, sourceChannel = 'webapp' }) {
 }
 
 
-function validateClientRequestPayload(body = {}) {
-  const errors = [];
-  if (!String(body.fullName || '').trim()) errors.push('fullName is required');
-  if (!String(body.phone || '').trim()) errors.push('phone is required');
-  return errors;
-}
 
 function createServer({ config, logger }) {
   const router = [];
@@ -83,14 +141,18 @@ function createServer({ config, logger }) {
 
     const webPages = ['/', '/requests', '/recommendations', '/forms/service-request', '/forms/parts-request', '/forms/consultation', '/forms/warranty-request', '/forms/data-change-request'];
     if (req.method === 'GET' && webPages.includes(pathname)) {
-      return serveFile(res, path.join(process.cwd(), 'public', 'index.html'), 'text/html');
+      try {
+        const html = fs.readFileSync(path.join(process.cwd(), 'public', 'index.html'), 'utf8');
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        return res.end(injectConfigIntoHtml(html, config));
+      } catch {
+        return sendJson(res, 404, { error: 'Not found' });
+      }
     }
 
     if (req.method === 'POST' && pathname.startsWith('/api/client/requests/')) {
       const { body, invalidJson } = await readBody(req);
       if (invalidJson) return sendJson(res, 400, { error: 'Invalid JSON payload' });
-      const errors = validateClientRequestPayload(body);
-      if (errors.length) return sendJson(res, 400, { error: 'Validation error', details: errors });
 
       const typeMap = {
         '/api/client/requests/service': REQUEST_TYPES.SERVICE,
@@ -101,7 +163,27 @@ function createServer({ config, logger }) {
       };
       const type = typeMap[pathname];
       if (!type) return sendJson(res, 404, { error: 'Not found' });
-      return sendJson(res, 201, createClientRequest({ body, type }).request);
+
+      body.phone = normalizePhone10(body.phone);
+      const errors = validateClientRequestPayload(body, type);
+      if (errors.length) return sendJson(res, 400, { error: 'Validation error', details: errors });
+
+      const dedupeText = body.description || body.question || body.changeDetails || '';
+      const duplicate = db.findRecentDuplicateRequest({
+        requestType: type,
+        phone: body.phone,
+        vin: body.vin,
+        text: dedupeText,
+        withinMs: config.webappDedupeWindowMs
+      });
+      if (duplicate) return sendJson(res, 200, { ...duplicate, deduplicated: true });
+
+      const created = createClientRequest({ body, type }).request;
+      await duplicateToMastersChat({ config, request: created, payload: body });
+      if (created.requestType === REQUEST_TYPES.COMPLAINT) {
+        await duplicateToMastersChat({ config, request: created, payload: body });
+      }
+      return sendJson(res, 201, created);
     }
 
     if (req.method === 'GET' && pathname === '/api/client/requests') {
