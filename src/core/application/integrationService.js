@@ -249,8 +249,20 @@ function processIntegrationEvent(eventId) {
     if (event.eventType === INTEGRATION_EVENT_TYPES.EMAIL_REQUEST_RECEIVED || event.eventType === INTEGRATION_EVENT_TYPES.MANUAL_REQUEST_IMPORT) {
       result = processEmailEvent(event, normalizedPayload);
     } else if (event.sourceSystem === INTEGRATION_SOURCES.ONE_C) {
-      db.updateIntegrationEvent(eventId, { processingStatus: 'ignored' }, '1C skeleton received and normalized');
-      return db.getIntegrationEventById(eventId);
+      if (event.eventType === INTEGRATION_EVENT_TYPES.ONE_C_RECOMMENDATION_SYNC) {
+        const payload = normalizedPayload.payload || {};
+        const rec = db.upsertRecommendationFromSync({
+          externalId: event.rawPayload?.externalId || null,
+          clientId: null,
+          text: payload.text || '',
+          severity: payload.severity || 'normal',
+          status: 'actual'
+        });
+        result = { relatedEntityType: 'recommendation', relatedEntityId: rec.id };
+      } else {
+        db.updateIntegrationEvent(eventId, { processingStatus: 'ignored' }, '1C skeleton received and normalized');
+        return db.getIntegrationEventById(eventId);
+      }
     } else {
       db.updateIntegrationEvent(eventId, { processingStatus: 'ignored' }, 'Unsupported event type in MVP');
       return db.getIntegrationEventById(eventId);

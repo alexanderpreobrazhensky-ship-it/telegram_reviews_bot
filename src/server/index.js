@@ -54,10 +54,10 @@ function normalizePhone10(raw) {
 function validateClientRequestPayload(body = {}, type) {
   const errors = [];
   const requiredByType = {
-    service_request: ['fullName', 'phone', 'year', 'vin', 'description'],
-    parts_request: ['fullName', 'phone', 'year', 'vin', 'description'],
-    consultation_request: ['fullName', 'phone', 'year', 'vin', 'question'],
-    warranty_request: ['fullName', 'phone', 'year', 'vin', 'description', 'visitContext'],
+    service_request: ['fullName', 'phone', 'wasClientBefore', 'brand', 'model', 'year', 'vin', 'description'],
+    parts_request: ['fullName', 'phone', 'wasClientBefore', 'year', 'vin', 'description'],
+    consultation_request: ['fullName', 'phone', 'wasClientBefore', 'car', 'vin', 'question'],
+    warranty_request: ['fullName', 'phone', 'visitDate', 'description'],
     data_change_request: ['fullName', 'phone', 'changeDetails']
   };
   for (const field of requiredByType[type] || []) {
@@ -97,7 +97,7 @@ async function duplicateToMastersChat({ config, request, payload }) {
           { text: 'Завершить', callback_data: `req:${request.id}:processed` },
           { text: 'Потеряно', callback_data: `req:${request.id}:lost` }
         ],
-        [{ text: 'Открыть карточку', callback_data: `card:${request.id}` }]
+        [{ text: 'Подробнее', callback_data: `card:${request.id}` }]
       ]
     }
   });
@@ -109,12 +109,25 @@ function createClientRequest({ body, type, sourceChannel = 'webapp' }) {
   const vehicle = db.upsertVehicle({
     clientId: client.id,
     brand: body.brand,
-    model: body.model,
+    model: body.model || body.car,
     year: body.year,
     vin: body.vin,
     plateNumber: body.plateNumber
   });
-  const request = db.createRequest({ clientId: client.id, vehicleId: vehicle?.id || null, requestType: type, description: body.description || body.question || body.changeDetails || '', sourceChannel });
+  const request = db.createRequest({
+    clientId: client.id,
+    vehicleId: vehicle?.id || null,
+    requestType: type,
+    description: body.description || body.question || body.changeDetails || '',
+    sourceChannel,
+    payload: {
+      wasClientBefore: body.wasClientBefore || '',
+      visitDate: body.visitDate || '',
+      car: body.car || '',
+      question: body.question || '',
+      changeDetails: body.changeDetails || ''
+    }
+  });
   db.createCommunicationEvent({ clientId: client.id, requestId: request.id, source: sourceChannel === 'webapp' ? 'webapp' : 'bot', payload: { action: 'request_created', type } });
   return { client, vehicle, request };
 }
@@ -137,6 +150,16 @@ function createServer({ config, logger }) {
     if (req.method === 'GET' && (pathname === '/styles.css' || pathname === '/webapp.js')) {
       const staticPath = path.join(process.cwd(), 'public', pathname.slice(1));
       return serveFile(res, staticPath, pathname.endsWith('.css') ? 'text/css' : 'application/javascript');
+    }
+
+    if (req.method === 'GET' && pathname === '/logo.png') {
+      try {
+        const content = fs.readFileSync(path.join(process.cwd(), 'logo.png'));
+        res.writeHead(200, { 'Content-Type': 'image/png' });
+        return res.end(content);
+      } catch {
+        return sendJson(res, 404, { error: 'Not found' });
+      }
     }
 
     const webPages = ['/', '/requests', '/recommendations', '/forms/service-request', '/forms/parts-request', '/forms/consultation', '/forms/warranty-request', '/forms/data-change-request'];
@@ -191,13 +214,32 @@ function createServer({ config, logger }) {
     }
 
     if (req.method === 'GET' && pathname === '/api/client/recommendations') {
-      return sendJson(res, 200, { items: db.listRecommendations({ phone: requestUrl.searchParams.get('phone'), telegramId: requestUrl.searchParams.get('telegramId') }) });
+      const telegramId = requestUrl.searchParams.get('telegramId');
+      if (!telegramId) return sendJson(res, 401, { error: 'AUTH_REQUIRED', details: ['telegramId is required'] });
+      const client = db.findClientByTelegramId(telegramId);
+      if (!client) return sendJson(res, 200, { items: [] });
+      return sendJson(res, 200, { items: db.listRecommendations({ telegramId, requireSynced: true }) });
     }
 
     if (req.method === 'POST' && pathname.startsWith('/api/client/recommendations/') && pathname.endsWith('/interest')) {
       const id = pathname.split('/')[4];
+      const { body } = await readBody(req);
+      const telegramId = String(body.telegramId || '');
+      if (!telegramId) return sendJson(res, 401, { error: 'AUTH_REQUIRED' });
+      const client = db.findClientByTelegramId(telegramId);
+      if (!client) return sendJson(res, 404, { error: 'CLIENT_NOT_FOUND' });
       const updated = db.markRecommendationInterest(id);
-      return updated ? sendJson(res, 200, updated) : sendJson(res, 404, { error: 'Not found' });
+      if (!updated) return sendJson(res, 404, { error: 'Not found' });
+      const request = db.createRequest({
+        clientId: client.id,
+        vehicleId: null,
+        requestType: REQUEST_TYPES.SERVICE,
+        description: `Клиент хочет устранить рекомендацию: ${updated.text}`,
+        sourceChannel: 'webapp',
+        payload: { recommendationId: updated.id, recommendationInterest: true }
+      });
+      await duplicateToMastersChat({ config, request, payload: { phone: client.phone, vin: '', description: request.description } });
+      return sendJson(res, 201, { recommendation: updated, request });
     }
 
     if (req.method === 'POST' && pathname === '/api/integrations/email') {

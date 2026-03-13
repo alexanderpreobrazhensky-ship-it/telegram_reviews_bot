@@ -45,7 +45,11 @@ function buildRequestActionsKeyboard(requestId) {
         { text: 'Завершить', callback_data: `req:${requestId}:processed` },
         { text: 'Потеряно', callback_data: `req:${requestId}:lost` }
       ],
-      [{ text: 'Открыть карточку', callback_data: `card:${requestId}` }]
+      [
+        { text: 'Архивировать', callback_data: `req:${requestId}:archived` },
+        { text: 'Комментарий', callback_data: `req:${requestId}:comment` }
+      ],
+      [{ text: 'Подробнее', callback_data: `card:${requestId}` }]
     ]
   };
 }
@@ -61,7 +65,10 @@ function buildRequestCardText(card) {
     `Статус: ${r.status}`,
     `ФИО: ${client.fullName || '-'}`,
     `Телефон: ${client.phone || '-'}`,
+    `Был ранее: ${r.payload?.wasClientBefore || '-'}`,
     `VIN: ${vehicle.vin || '-'}`,
+    `Автомобиль: ${r.payload?.car || '-'}`,
+    `Марка/модель: ${vehicle.brand || '-'} / ${vehicle.model || '-'}`,
     `Год: ${vehicle.year || '-'}`,
     `Описание: ${r.description || '-'}`,
     `Источник: ${r.sourceChannel || '-'}`,
@@ -116,12 +123,26 @@ async function handleMasterWebhook({ body, config }) {
     }
     if (data.startsWith('req:')) {
       const [, requestId, toStatus] = data.split(':');
+      if (toStatus === 'comment') {
+        sessions.set(telegramId, { step: 'request_comment', requestId });
+        await answerCallbackQuery(token, callbackQuery.id, 'Введите комментарий');
+        return respondWithMessage({ token, chatId, text: `Введите внутренний комментарий по заявке ${requestId}` });
+      }
       if (toStatus === 'lost') {
         sessions.set(telegramId, { step: 'lost_reason', requestId });
         await answerCallbackQuery(token, callbackQuery.id, 'Укажите причину');
         return respondWithMessage({ token, chatId, text: `Укажите причину для статуса "Потеряно" по заявке ${requestId}` });
       }
       const result = masterService.changeRequestStatus({ requestId, toStatus, actorId: actor.id, actorRole: actor.role });
+      if (!result?.error && toStatus === 'waiting_data') {
+        await masterService.requestClientClarification({
+          requestId,
+          actorId: actor.id,
+          actorRole: actor.role,
+          text: 'Пожалуйста, уточните недостающие данные по вашему обращению.',
+          telegramClientBotToken: config.telegramClientBotToken
+        });
+      }
       await answerCallbackQuery(token, callbackQuery.id, result?.error ? 'Ошибка' : 'Готово');
       return respondWithMessage({ token, chatId, text: result?.error ? `Ошибка: ${result.error}` : `Статус заявки ${requestId}: ${toStatus}`, payload: { ok: !result?.error, ...result } });
     }
@@ -180,6 +201,51 @@ async function handleMasterWebhook({ body, config }) {
       sessions.delete(telegramId);
       const result = masterService.changeRequestStatus({ requestId: session.requestId, toStatus: 'lost', actorId: actor.id, actorRole: actor.role, lostReason: text });
       return respondWithMessage({ token, chatId, text: result?.error ? `Ошибка: ${result.error}` : `Заявка ${session.requestId} переведена в потерянные`, payload: { ok: !result?.error, ...result } });
+    }
+
+    if (session?.step === 'request_comment') {
+      sessions.delete(telegramId);
+      const comment = masterService.addInternalComment({ requestId: session.requestId, actorId: actor.id, actorRole: actor.role, text });
+      return comment ? respondWithMessage({ token, chatId, text: 'Комментарий добавлен', payload: { ok: true, comment } }) : respondWithMessage({ token, chatId, text: 'Заявка не найдена', payload: { ok: false } });
+    }
+
+    if (text === 'Список доступов') {
+      const items = masterService.listStaffUsers();
+      return respondWithMessage({ token, chatId, text: items.map((u) => `${u.telegramId} | ${u.role} | ${u.fullName || '-'}`).join('\n') || 'Список пуст', payload: { ok: true, items } });
+    }
+    if (text === 'Выдать доступ') {
+      sessions.set(telegramId, { step: 'access_grant_input' });
+      return respondWithMessage({ token, chatId, text: 'Введите: <telegramId> <master|manager> <ФИО>' });
+    }
+    if (text === 'Изменить роль') {
+      sessions.set(telegramId, { step: 'access_role_input' });
+      return respondWithMessage({ token, chatId, text: 'Введите: <telegramId> <master|manager>' });
+    }
+    if (text === 'Отозвать доступ') {
+      sessions.set(telegramId, { step: 'access_revoke_input' });
+      return respondWithMessage({ token, chatId, text: 'Введите telegramId для отзыва доступа' });
+    }
+    if (text === 'Назад') {
+      sessions.delete(telegramId);
+      return respondWithMessage({ token, chatId, text: 'Главное меню', extra: { reply_markup: { keyboard: [['Новые заявки', 'В работе'], ['Поиск', 'Quality Cases'], ['Доступы']], resize_keyboard: true } } });
+    }
+
+    if (session?.step === 'access_grant_input') {
+      sessions.delete(telegramId);
+      const [tid, role, ...nameParts] = text.split(' ');
+      const result = masterService.grantStaffAccess({ telegramId: tid, fullName: nameParts.join(' ').trim(), role, actorId: actor.id, actorRole: actor.role });
+      return respondWithMessage({ token, chatId, text: result.error ? `Ошибка: ${result.error}` : `Доступ выдан: ${tid} -> ${role}` });
+    }
+    if (session?.step === 'access_role_input') {
+      sessions.delete(telegramId);
+      const [tid, role] = text.split(' ');
+      const result = masterService.grantStaffAccess({ telegramId: tid, role, actorId: actor.id, actorRole: actor.role });
+      return respondWithMessage({ token, chatId, text: result.error ? `Ошибка: ${result.error}` : `Роль обновлена: ${tid} -> ${role}` });
+    }
+    if (session?.step === 'access_revoke_input') {
+      sessions.delete(telegramId);
+      const result = masterService.revokeStaffAccess({ telegramId: text.trim(), actorId: actor.id, actorRole: actor.role });
+      return respondWithMessage({ token, chatId, text: result.error ? `Ошибка: ${result.error}` : `Доступ отозван: ${text.trim()}` });
     }
 
     if (text.startsWith('/access_list')) {
