@@ -26,10 +26,8 @@ function makeInitialStore() {
     communicationEvents: [],
     integrationEvents: [],
     integrationEventLogs: [],
-    recommendations: [
-      { id: crypto.randomUUID(), clientId: null, text: 'Проверить состояние тормозных колодок в ближайшие 500 км.', severity: 'critical', status: 'actual', createdAt: now, interested: false },
-      { id: crypto.randomUUID(), clientId: null, text: 'Рекомендуется сезонная диагностика кондиционера.', severity: 'normal', status: 'actual', createdAt: now, interested: false }
-    ],
+    recommendations: [],
+    recommendationSync: { lastSyncAt: null, source: null },
     staffUsers: [],
     requestStatusHistory: [],
     requestInternalComments: [],
@@ -181,7 +179,7 @@ function upsertVehicle({ clientId, brand, model, year, vin, plateNumber }) {
   return vehicle;
 }
 
-function createRequest({ clientId, vehicleId, requestType, description, sourceChannel }) {
+function createRequest({ clientId, vehicleId, requestType, description, sourceChannel, payload = {} }) {
   const store = readStore();
   const request = {
     id: crypto.randomUUID(),
@@ -191,6 +189,7 @@ function createRequest({ clientId, vehicleId, requestType, description, sourceCh
     status: 'new',
     sourceChannel,
     description: description || '',
+    payload: payload || {},
     assignedMasterId: null,
     lostReason: null,
     externalIds: {},
@@ -338,8 +337,9 @@ function listRequests({ phone, telegramId, statuses }) {
   return requests.map((r) => ({ ...r, summary: r.description.slice(0, 120) }));
 }
 
-function listRecommendations({ phone, telegramId, clientId = null, includeHistory = false }) {
+function listRecommendations({ phone, telegramId, clientId = null, includeHistory = false, requireSynced = false }) {
   const store = readStore();
+  if (requireSynced && !store.recommendationSync?.lastSyncAt) return [];
   let resolvedClientId = clientId;
   if (!resolvedClientId && (phone || telegramId)) {
     const client = store.clients.find((c) => (phone && c.phone === phone) || (telegramId && c.telegramId === telegramId));
@@ -357,8 +357,40 @@ function markRecommendationInterest(id) {
   const recommendation = store.recommendations.find((r) => r.id === id);
   if (!recommendation) return null;
   recommendation.interested = true;
+  recommendation.updatedAt = nowIso();
   writeStore(store);
   return recommendation;
+}
+
+function upsertRecommendationFromSync({ externalId = null, clientId = null, text = '', severity = 'normal', status = 'actual' }) {
+  const store = readStore();
+  let item = null;
+  if (externalId) {
+    item = store.recommendations.find((r) => r.externalIds?.one_c === String(externalId)) || null;
+  }
+  if (!item) {
+    item = {
+      id: crypto.randomUUID(),
+      clientId: clientId || null,
+      text: String(text || '').trim(),
+      severity,
+      status,
+      interested: false,
+      externalIds: externalId ? { one_c: String(externalId) } : {},
+      createdAt: nowIso(),
+      updatedAt: nowIso()
+    };
+    store.recommendations.push(item);
+  } else {
+    item.clientId = clientId || item.clientId || null;
+    item.text = String(text || item.text || '').trim();
+    item.severity = severity || item.severity || 'normal';
+    item.status = status || item.status || 'actual';
+    item.updatedAt = nowIso();
+  }
+  store.recommendationSync = { lastSyncAt: nowIso(), source: 'one_c' };
+  writeStore(store);
+  return item;
 }
 
 const allowedRequestTransitions = {
@@ -899,6 +931,7 @@ module.exports = {
   listRequests,
   listRecommendations,
   markRecommendationInterest,
+  upsertRecommendationFromSync,
   resolveStaffUser,
   listStaffUsers,
   createStaffUser,

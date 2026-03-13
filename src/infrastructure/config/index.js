@@ -46,7 +46,7 @@ function loadConfig() {
     schedulerStuckTimeoutMs,
     webappDedupeWindowMs,
     telegramMastersChatId: process.env.TELEGRAM_MASTERS_CHAT_ID || '',
-    webappTelegramChannelLink: process.env.WEBAPP_TELEGRAM_CHANNEL_LINK || '',
+    webappTelegramChannelLink: process.env.TELEGRAM_CHANNEL_URL || process.env.WEBAPP_TELEGRAM_CHANNEL_LINK || '',
     masterBotAdminIds
   };
 }
