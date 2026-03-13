@@ -29,7 +29,7 @@ async function sendIntegration(base, text, fromId = 9001) {
 
 test('integration bot supports start list failed and retry commands', async () => {
   await withServer(async (base) => {
-    const start = await sendIntegration(base, '/start');
+    const start = await sendIntegration(base, '/start@integration_bot');
     assert.equal(start.action, 'start');
 
     const created = await fetch(`${base}/api/integrations/manual`, {
@@ -58,8 +58,42 @@ test('integration bot supports start list failed and retry commands', async () =
     const retry = await sendIntegration(base, `/retry ${created.id}`);
     assert.equal(retry.ok, true);
 
+    const ignored = await sendIntegration(base, `/ignore ${created.id}`);
+    assert.equal(ignored.ok, true);
+
     const stats = await sendIntegration(base, '/stats');
     assert.equal(stats.action, 'stats');
     assert.equal(Object.hasOwn(stats, 'failed'), true);
+  });
+});
+
+test('integration bot returns clear messages for empty data and invalid command arguments', async () => {
+  await withServer(async (base) => {
+    const events = await sendIntegration(base, '/events');
+    assert.equal(events.action, 'events');
+    assert.equal(events.items.length, 0);
+    assert.match(events.text, /Событий пока нет/i);
+
+    const failed = await sendIntegration(base, '/failed');
+    assert.equal(failed.action, 'failed');
+    assert.equal(failed.items.length, 0);
+    assert.match(failed.text, /Failed событий пока нет/i);
+
+    const pending = await sendIntegration(base, '/pending');
+    assert.equal(pending.action, 'pending');
+    assert.equal(pending.items.length, 0);
+    assert.match(pending.text, /Pending событий пока нет/i);
+
+    const eventWithoutId = await sendIntegration(base, '/event');
+    assert.equal(eventWithoutId.ok, false);
+    assert.equal(eventWithoutId.error, 'EVENT_ID_REQUIRED');
+
+    const retryWithoutId = await sendIntegration(base, '/retry');
+    assert.equal(retryWithoutId.ok, false);
+    assert.equal(retryWithoutId.error, 'EVENT_ID_REQUIRED');
+
+    const ignoreWithoutId = await sendIntegration(base, '/ignore');
+    assert.equal(ignoreWithoutId.ok, false);
+    assert.equal(ignoreWithoutId.error, 'EVENT_ID_REQUIRED');
   });
 });
