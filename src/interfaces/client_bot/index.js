@@ -1,19 +1,13 @@
 const { REQUEST_TYPES } = require('../../core/domain');
 const db = require('../../infrastructure/db');
+const { sendChannelMessage, answerChannelCallback } = require('../../infrastructure/messaging');
+const { QUICK_TYPE_BY_KEY, parseCommandText, resolveStartContext, extractIncomingEvent, buildClientMainMenu } = require('../shared/channelAdapters');
 
 const sessions = new Map();
 
 function registerClientBotRoutes(router) {
-  router.push({ method: 'POST', path: '/telegram/client_bot/webhook', handler: handleClientWebhook });
-}
-
-async function sendTelegramMessage(token, chatId, text, extra = {}) {
-  if (!token || !chatId) return;
-  await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ chat_id: chatId, text, ...extra })
-  }).catch(() => {});
+  router.push({ method: 'POST', path: '/telegram/client_bot/webhook', handler: (ctx) => handleClientWebhook({ ...ctx, channel: 'telegram' }) });
+  router.push({ method: 'POST', path: '/max/client_bot/webhook', handler: (ctx) => handleClientWebhook({ ...ctx, channel: 'max' }) });
 }
 
 function quickTypeFromText(text) {
@@ -22,6 +16,7 @@ function quickTypeFromText(text) {
   if (value.includes('гарант')) return REQUEST_TYPES.WARRANTY;
   if (value.includes('вопрос')) return REQUEST_TYPES.CONSULTATION;
   if (value.includes('свяж')) return REQUEST_TYPES.CALLBACK;
+  if (value.includes('измен')) return REQUEST_TYPES.DATA_CHANGE;
   if (value.includes('запись') || value.includes('сервис')) return REQUEST_TYPES.SERVICE;
   return null;
 }
@@ -38,7 +33,6 @@ function parseRating(text) {
   if (!match) return null;
   return { rating: Number(match[1]), comment: (match[2] || '').trim() };
 }
-
 
 function findStaffForQualityNotifications(qualityCaseId) {
   const store = db.readStore();
@@ -60,69 +54,129 @@ function takePendingFeedbackTask(clientId) {
   return pendingTasks[0] || null;
 }
 
-async function handleClientWebhook({ body, config }) {
-  const message = body?.message;
-  if (!message) return { ok: true };
-  const chatId = message.chat?.id;
-  const telegramId = String(message.from?.id || '');
-  const text = message.text || '';
+function sourceChannelFor(channel) {
+  return channel === 'max' ? 'max_chat' : 'telegram_chat';
+}
 
-  if (text === '/start') {
-    await sendTelegramMessage(
-      config.telegramClientBotToken,
-      chatId,
-      'Добро пожаловать! Откройте WebApp или создайте быстрое обращение.',
-      {
-        reply_markup: {
-          inline_keyboard: [[{ text: 'Открыть WebApp', web_app: { url: config.webAppUrl } }]],
-          keyboard: [
-            [{ text: 'Мини-приложение', web_app: { url: config.webAppUrl } }],
-            ['Нужна запись / сервис', 'Нужны запчасти'],
-            ['Вопрос мастеру', 'Гарантийное обращение'],
-            ['Свяжитесь со мной']
-          ],
-          resize_keyboard: true
-        }
-      }
-    );
-    db.createCommunicationEvent({ source: 'bot', payload: { action: 'start' }, clientId: null, requestId: null });
-    return { ok: true, action: 'start' };
+function feedbackSourceFor(channel) {
+  return channel === 'max' ? 'max_chat' : 'telegram';
+}
+
+function clientBotToken(config, channel) {
+  return channel === 'max' ? config.maxClientBotToken : config.telegramClientBotToken;
+}
+
+function buildHelpText(channel) {
+  const base = [
+    '/start — показать стартовое меню',
+    '/help — подсказка по сценариям',
+    'Сценарии: запись на сервис, запчасти, вопрос мастеру, гарантия, изменение данных, mini app'
+  ];
+  if (channel === 'max') base.push('MAX deep links: form_service, form_parts, form_consultation, form_warranty, form_data_change, requests');
+  return base.join('\n');
+}
+
+async function sendBotMessage({ channel, config, recipientId, text, extra = {} }) {
+  return sendChannelMessage({ channel, token: clientBotToken(config, channel), recipientId, text, extra });
+}
+
+async function handleClientWebhook({ body, config, headers = {}, channel = 'telegram' }) {
+  if (channel === 'max' && config.maxWebhookSecret && headers['x-max-bot-api-secret'] !== config.maxWebhookSecret) {
+    return { ok: false, error: 'INVALID_WEBHOOK_SECRET', statusCode: 403 };
   }
 
-  const session = sessions.get(telegramId);
-  const selectedType = quickTypeFromText(text);
+  const event = extractIncomingEvent({ body, channel });
+  if (!event.message && !event.callback) return { ok: true };
+
+  const userId = event.callback?.userId || event.userId;
+  const recipientId = event.callback?.chatId || event.chatId || userId;
+  const sessionKey = `${channel}:${userId}`;
+  const callbackData = event.callback?.data || '';
+  const incomingText = event.callback ? callbackData : event.text;
+  const { command, payload } = parseCommandText(incomingText);
+  const startPayload = payload || event.startPayload;
+
+  if (event.callback?.id) {
+    await answerChannelCallback({ channel, token: clientBotToken(config, channel), callbackId: event.callback.id, text: 'Обрабатываю действие' });
+  }
+
+  if (command === '/start') {
+    const startContext = resolveStartContext(startPayload);
+    const menu = buildClientMainMenu({ channel, config, deeplinkPayload: startContext.payload, route: startContext.route });
+    await sendBotMessage({
+      channel,
+      config,
+      recipientId,
+      text: startContext.route
+        ? `Добро пожаловать! Откройте mini app для сценария ${startContext.payload}.`
+        : 'Добро пожаловать! Откройте mini app или создайте быстрое обращение.',
+      extra: menu
+    });
+    db.createCommunicationEvent({ source: channel === 'max' ? 'max_client_bot' : 'bot', channel, direction: 'inbound', payload: { action: 'start', startPayload }, clientId: null, requestId: null });
+    return { ok: true, action: 'start', channel, deeplink: startContext };
+  }
+
+  if (command === '/help') {
+    const text = buildHelpText(channel);
+    await sendBotMessage({ channel, config, recipientId, text });
+    return { ok: true, action: 'help', channel };
+  }
+
+  const callbackQuick = callbackData.startsWith('quick:') ? QUICK_TYPE_BY_KEY[callbackData.split(':')[1]] : null;
+  const callbackText = callbackData.startsWith('text:') ? callbackData.slice(5) : '';
+  const effectiveText = callbackText || incomingText;
+  const selectedType = callbackQuick || quickTypeFromText(effectiveText);
+  const session = sessions.get(sessionKey);
 
   if (!session && selectedType) {
-    sessions.set(telegramId, { step: 'fullName', requestType: selectedType, description: text, chatId });
-    await sendTelegramMessage(config.telegramClientBotToken, chatId, 'Укажите ФИО для обращения.');
-    return { ok: true, action: 'collect_full_name' };
+    sessions.set(sessionKey, { step: 'fullName', requestType: selectedType, description: effectiveText, recipientId });
+    await sendBotMessage({ channel, config, recipientId, text: 'Укажите ФИО для обращения.' });
+    return { ok: true, action: 'collect_full_name', channel };
   }
 
   if (session?.step === 'fullName') {
-    session.fullName = text;
+    session.fullName = effectiveText;
     session.step = 'phone';
-    sessions.set(telegramId, session);
-    await sendTelegramMessage(config.telegramClientBotToken, chatId, 'Укажите телефон в формате +7...');
-    return { ok: true, action: 'collect_phone' };
+    sessions.set(sessionKey, session);
+    await sendBotMessage({ channel, config, recipientId, text: 'Укажите телефон в формате +7...' });
+    return { ok: true, action: 'collect_phone', channel };
   }
 
   if (session?.step === 'phone') {
-    const client = db.upsertClient({ fullName: session.fullName, phone: normalizePhone10(text), telegramId });
+    const client = db.upsertClient({
+      fullName: session.fullName,
+      phone: normalizePhone10(effectiveText),
+      telegramId: channel === 'telegram' ? userId : null,
+      maxId: channel === 'max' ? userId : null,
+      preferredChannel: channel
+    });
     const request = db.createRequest({
       clientId: client.id,
       vehicleId: null,
       requestType: session.requestType,
       description: session.description,
-      sourceChannel: 'telegram_chat'
+      sourceChannel: sourceChannelFor(channel)
     });
-    db.createCommunicationEvent({ clientId: client.id, requestId: request.id, source: 'bot', payload: { action: 'quick_request_created', requestType: session.requestType } });
-    sessions.delete(telegramId);
-    await sendTelegramMessage(config.telegramClientBotToken, chatId, `Обращение создано (${session.requestType}). Также доступен WebApp: ${config.webAppUrl}`);
-    return { ok: true, action: 'request_created', requestId: request.id };
+    db.createCommunicationEvent({
+      clientId: client.id,
+      requestId: request.id,
+      source: channel === 'max' ? 'max_client_bot' : 'bot',
+      channel,
+      direction: 'inbound',
+      payload: { action: 'quick_request_created', requestType: session.requestType }
+    });
+    sessions.delete(sessionKey);
+    await sendBotMessage({
+      channel,
+      config,
+      recipientId,
+      text: `Обращение создано (${session.requestType}). Также доступен mini app: ${buildClientMainMenu({ channel, config }).reply_markup.inline_keyboard?.[0]?.[0]?.url || config.webAppUrl}`
+    });
+    return { ok: true, action: 'request_created', requestId: request.id, channel };
   }
 
-  const parsedFeedback = parseRating(text);
-  const client = db.findClientByTelegramId(telegramId);
+  const parsedFeedback = parseRating(effectiveText);
+  const client = channel === 'max' ? db.findClientByMaxId(userId) : db.findClientByTelegramId(userId);
   if (client && parsedFeedback) {
     const task = takePendingFeedbackTask(client.id);
     const requestId = task?.payload?.requestId || null;
@@ -131,7 +185,7 @@ async function handleClientWebhook({ body, config }) {
       requestId,
       rating: parsedFeedback.rating,
       comment: parsedFeedback.comment,
-      sourceChannel: 'telegram',
+      sourceChannel: feedbackSourceFor(channel),
       createdBy: 'client'
     });
 
@@ -142,22 +196,22 @@ async function handleClientWebhook({ body, config }) {
     const confirmation = parsedFeedback.comment
       ? `Спасибо за оценку ${parsedFeedback.rating}/5 и комментарий. Мы зафиксировали обратную связь.`
       : `Спасибо за оценку ${parsedFeedback.rating}/5. Обратная связь сохранена.`;
-    await sendTelegramMessage(config.telegramClientBotToken, chatId, confirmation);
+    await sendBotMessage({ channel, config, recipientId, text: confirmation });
     if (result.qualityCase) {
       const { masterChatId, managerChatId } = findStaffForQualityNotifications(result.qualityCase.id);
-      const textForStaff = `Quality case ${result.qualityCase.id}: низкая оценка ${parsedFeedback.rating}/5 по заявке ${requestId || '-'}; клиент ${client.fullName || client.id}`;
+      const text = `Quality case ${result.qualityCase.id}: низкая оценка ${parsedFeedback.rating}/5 по заявке ${requestId || '-'}; клиент ${client.fullName || client.id}`;
       if (masterChatId) {
-        await sendTelegramMessage(config.telegramMasterBotToken, masterChatId, textForStaff);
+        await sendChannelMessage({ channel: 'telegram', token: config.telegramMasterBotToken, recipientId: masterChatId, text });
       }
       if (managerChatId) {
-        await sendTelegramMessage(config.telegramMasterBotToken, managerChatId, `[manager copy] ${textForStaff}`);
+        await sendChannelMessage({ channel: 'telegram', token: config.telegramMasterBotToken, recipientId: managerChatId, text: `[manager copy] ${text}` });
       }
     }
-    return { ok: true, action: 'feedback_saved', feedbackId: result.feedback.id, qualityCaseId: result.qualityCase?.id || null };
+    return { ok: true, action: 'feedback_saved', feedbackId: result.feedback.id, qualityCaseId: result.qualityCase?.id || null, channel };
   }
 
-  await sendTelegramMessage(config.telegramClientBotToken, chatId, 'Используйте /start для запуска сценария.');
-  return { ok: true, action: 'fallback' };
+  await sendBotMessage({ channel, config, recipientId, text: 'Используйте /start для запуска сценария или /help для подсказки.' });
+  return { ok: true, action: 'fallback', channel };
 }
 
 module.exports = { registerClientBotRoutes, handleClientWebhook, quickTypeFromText };

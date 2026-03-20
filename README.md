@@ -31,9 +31,14 @@ npm start
 - `TELEGRAM_CLIENT_BOT_TOKEN`
 - `TELEGRAM_MASTER_BOT_TOKEN`
 - `TELEGRAM_INTEGRATION_BOT_TOKEN`
+- `MAX_CLIENT_BOT_TOKEN` *(если включён MAX канал)*
+- `MAX_MASTER_BOT_TOKEN` *(если включён MAX канал)*
 
 ### Рекомендуемые
 - `WEBAPP_URL` — Mini App URL (использовать `https://вашлогин.bothost.ru`).
+- `MAX_WEBAPP_URL` — отдельный URL для MAX Mini App, если не используется единый `WEBAPP_URL`.
+- `MAX_BOT_NAME` — имя MAX-бота для deep links.
+- `MAX_WEBHOOK_SECRET` — секрет проверки MAX webhook.
 - `DB_FILE_PATH` — путь к persistent file DB (по умолчанию `data/db.json`).
 - `NODE_ENV=production`
 
@@ -70,6 +75,8 @@ npm start
 - `POST /telegram/client_bot/webhook`
 - `POST /telegram/master_bot/webhook`
 - `POST /telegram/integration_bot/webhook`
+- `POST /max/client_bot/webhook`
+- `POST /max/master_bot/webhook`
 
 ## API / routes (smoke critical)
 - `GET /health`

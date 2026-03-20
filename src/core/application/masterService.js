@@ -1,14 +1,33 @@
 const REQUEST_STATUSES = ['new', 'waiting_data', 'in_progress', 'processed', 'lost', 'archived'];
 const QUALITY_CASE_STATUSES = ['new', 'assigned', 'in_progress', 'resolved', 'unresolved', 'archived'];
 
-function createMasterService({ db, sendClientMessage, adminTelegramIds = [] }) {
+function deriveClientChannel(requestCard) {
+  if (requestCard.client?.preferredChannel === 'max' || String(requestCard.request?.sourceChannel || '').startsWith('max_')) {
+    return 'max';
+  }
+  return 'telegram';
+}
+
+function deriveClientRecipientId(requestCard) {
+  const channel = deriveClientChannel(requestCard);
+  return channel === 'max' ? requestCard.client?.maxId : requestCard.client?.telegramId;
+}
+
+function createMasterService({ db, sendClientMessage, adminIds = [], actorChannel = 'telegram' }) {
   return {
     getAvailableRoles() {
       return ['master', 'manager', 'admin'];
     },
 
-    resolveActor({ telegramId, fullName }) {
-      return db.resolveStaffUser({ telegramId, fullName, adminTelegramIds });
+    resolveActor({ channelUserId, telegramId, maxId, fullName }) {
+      return db.resolveStaffUser({
+        channel: actorChannel,
+        channelUserId,
+        telegramId,
+        maxId,
+        fullName,
+        adminIds
+      });
     },
 
     listRequestsByStatus(status) {
@@ -65,40 +84,45 @@ function createMasterService({ db, sendClientMessage, adminTelegramIds = [] }) {
       return db.listStaffUsers();
     },
 
-    grantStaffAccess({ telegramId, fullName, role, actorId, actorRole }) {
-      return db.createStaffUser({ telegramId, fullName, role, actorId, actorRole });
+    grantStaffAccess({ channelUserId, telegramId, maxId, fullName, role, actorId, actorRole }) {
+      return db.createStaffUser({ channel: actorChannel, channelUserId, telegramId, maxId, fullName, role, actorId, actorRole });
     },
 
-    revokeStaffAccess({ telegramId, actorId, actorRole }) {
-      return db.revokeStaffUser({ telegramId, actorId, actorRole });
+    revokeStaffAccess({ channelUserId, telegramId, maxId, actorId, actorRole }) {
+      return db.revokeStaffUser({ channel: actorChannel, channelUserId, telegramId, maxId, actorId, actorRole });
     },
 
-    async requestClientClarification({ requestId, actorId, actorRole, text, chatId, telegramClientBotToken }) {
+    async requestClientClarification({ requestId, actorId, actorRole, text, telegramClientBotToken, maxClientBotToken }) {
       const requestCard = db.getRequestCard(requestId);
       if (!requestCard) return { error: 'REQUEST_NOT_FOUND' };
+      const channel = deriveClientChannel(requestCard);
+      const recipientId = deriveClientRecipientId(requestCard);
       db.recordMasterAction({
         actorId,
         role: actorRole,
         action: 'client_clarification_requested',
         requestId,
         clientId: requestCard.request.clientId,
-        payload: { text }
+        payload: { text, channel }
       });
       db.createCommunicationEvent({
         clientId: requestCard.request.clientId,
         requestId,
-        source: 'master_bot',
+        source: actorChannel === 'max' ? 'max_master_bot' : 'master_bot',
+        channel,
+        direction: 'outbound',
         payload: { action: 'client_clarification_requested', text }
       });
 
-      if (!requestCard.client?.telegramId || !telegramClientBotToken || !sendClientMessage) {
-        return { ok: true, mode: 'intent_logged' };
+      const token = channel === 'max' ? maxClientBotToken : telegramClientBotToken;
+      if (!recipientId || !token || !sendClientMessage) {
+        return { ok: true, mode: 'intent_logged', channel };
       }
 
-      await sendClientMessage(telegramClientBotToken, chatId || Number(requestCard.client.telegramId), `Запрос уточнения от мастера по заявке ${requestId}: ${text}`);
-      return { ok: true, mode: 'intent_logged_and_sent' };
+      await sendClientMessage({ channel, token, recipientId, text: `Запрос уточнения от мастера по заявке ${requestId}: ${text}` });
+      return { ok: true, mode: 'intent_logged_and_sent', channel };
     }
   };
 }
 
-module.exports = { createMasterService };
+module.exports = { createMasterService, deriveClientChannel, deriveClientRecipientId };

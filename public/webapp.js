@@ -1,6 +1,10 @@
 (function () {
   const mount = document.getElementById('app');
   const path = window.location.pathname;
+  const runtime = window.__WEBAPP_RUNTIME__ || {};
+  const params = new URLSearchParams(window.location.search);
+  const platform = params.get('channel') || 'telegram';
+  const startAppPayload = params.get('startapp') || '';
   const channelLink = window.__WEBAPP_TELEGRAM_CHANNEL_LINK__ || '#';
   const logoSrc = '/logo.png';
 
@@ -58,6 +62,29 @@
     mount.innerHTML = `<section class="result ${ok ? 'ok' : 'error'}"><img class="brand-logo" src="${logoSrc}" alt="logo"/><h2>${ok ? 'Ваша заявка принята' : 'Не удалось отправить заявку'}</h2><p>${ok ? 'Мы свяжемся с вами в ближайшее время.' : 'Повторите попытку позднее.'}</p>${requestId ? `<p class="result-id">Номер обращения: ${requestId}</p>` : ''}<div class="result-actions"><a class="btn" href="${channelLink}" target="_blank" rel="noopener">Подписаться на Telegram-канал</a><a class="btn ghost" href="${channelLink}" target="_blank" rel="noopener">Ссылка на Telegram-канал</a><a class="btn" href="${path}">Создать ещё одно обращение</a><a class="btn ghost" href="/">На главную</a></div></section>`;
   }
 
+  function detectChannelIdentity() {
+    if (platform === 'max') {
+      const maxUserId = window.MAX?.WebApp?.initDataUnsafe?.user?.id || localStorage.getItem('webapp_max_id') || '';
+      if (maxUserId) localStorage.setItem('webapp_max_id', maxUserId);
+      return { sourceChannel: 'max_webapp', maxId: maxUserId || undefined };
+    }
+    const telegramId = window.Telegram?.WebApp?.initDataUnsafe?.user?.id || localStorage.getItem('webapp_telegram_id') || '';
+    if (telegramId) localStorage.setItem('webapp_telegram_id', telegramId);
+    return { sourceChannel: 'webapp', telegramId: telegramId || undefined };
+  }
+
+  function resolveStartPayloadRedirect(payload) {
+    const routeByPayload = {
+      form_service: '/forms/service-request',
+      form_parts: '/forms/parts-request',
+      form_consultation: '/forms/consultation',
+      form_warranty: '/forms/warranty-request',
+      form_data_change: '/forms/data-change-request',
+      requests: '/requests'
+    };
+    return routeByPayload[payload] || '';
+  }
+
   function renderField(name) {
     if (name === 'wasClientBefore') {
       return `<fieldset data-field="wasClientBefore"><legend>${label(name)}</legend><label><input type="radio" name="wasClientBefore" value="yes"> Да</label><label><input type="radio" name="wasClientBefore" value="no"> Нет</label><small class="field-error"></small></fieldset>`;
@@ -101,6 +128,7 @@
 
     const payload = Object.fromEntries(new FormData(form).entries());
     payload.phone = onlyPhoneDigits(payload.phone);
+    Object.assign(payload, detectChannelIdentity());
 
     const errors = validatePayload(cfg.type, payload);
     if (errors.length) {
@@ -134,8 +162,12 @@
   }
 
   async function renderRecommendations() {
-    const telegramId = window.Telegram?.WebApp?.initDataUnsafe?.user?.id || localStorage.getItem('webapp_telegram_id') || '';
     mount.innerHTML = '<section><img class="brand-logo" src="/logo.png" alt="logo"/><h2>Рекомендации</h2><p id="auth"></p><ul id="recs"></ul></section>';
+    if (platform === 'max') {
+      document.getElementById('auth').textContent = 'Рекомендации в MAX пока не активированы. Раздел оставлен как неактивный foundation.';
+      return;
+    }
+    const telegramId = window.Telegram?.WebApp?.initDataUnsafe?.user?.id || localStorage.getItem('webapp_telegram_id') || '';
     if (!telegramId) {
       document.getElementById('auth').textContent = 'Раздел доступен только авторизованным пользователям Telegram WebApp.';
       return;
@@ -172,6 +204,17 @@
 
   if (path === '/requests') return renderRequests();
   if (path === '/recommendations') return renderRecommendations();
+
+  if (path === '/' && startAppPayload) {
+    const redirectPath = resolveStartPayloadRedirect(startAppPayload);
+    if (redirectPath) {
+      const next = new URL(redirectPath, window.location.origin);
+      next.searchParams.set('channel', platform);
+      if (startAppPayload) next.searchParams.set('startapp', startAppPayload);
+      window.location.replace(next.toString());
+      return;
+    }
+  }
 
   mount.innerHTML = '<section><img class="brand-logo" src="/logo.png" alt="logo"/><h1>Автосервис</h1><p>Создайте обращение, отследите статус и посмотрите рекомендации.</p></section>';
 })();
