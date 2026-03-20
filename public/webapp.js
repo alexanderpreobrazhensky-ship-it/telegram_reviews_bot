@@ -7,6 +7,9 @@
   const startAppPayload = params.get('startapp') || '';
   const channelLink = window.__WEBAPP_TELEGRAM_CHANNEL_LINK__ || '#';
   const logoSrc = '/logo.png';
+  const PHONE_MASK_TEMPLATE = '+7 (___) ___-__-__';
+  const PHONE_DIGIT_POSITIONS = [4, 5, 6, 9, 10, 11, 13, 14, 16, 17];
+  const PHONE_INPUT_TYPES = new Set(['insertText', 'insertFromPaste', 'deleteContentBackward', 'deleteContentForward', 'deleteByCut']);
 
   const requestTypeLabels = {
     service_request: 'Заявка на сервис',
@@ -33,24 +36,194 @@
   };
 
   function onlyPhoneDigits(value) {
-    const cleaned = String(value || '').replace(/\D/g, '');
-    if (cleaned.length === 11 && (cleaned.startsWith('7') || cleaned.startsWith('8'))) return cleaned.slice(1);
-    return cleaned.slice(0, 10);
+    const raw = String(value || '');
+    const cleaned = raw.replace(/\D/g, '');
+    if (!cleaned) return '';
+    if (cleaned.length === 1 && cleaned === '7' && /^\s*\+7(?:\D|$)/.test(raw)) return '';
+    if (cleaned.length === 1 && cleaned === '8' && /^\s*\+8(?:\D|$)/.test(raw)) return '';
+    const normalized = cleaned.length > 10 && (cleaned.startsWith('7') || cleaned.startsWith('8')) ? cleaned.slice(1) : cleaned;
+    return normalized.slice(0, 10);
   }
 
   function formatPhoneMask(rawValue) {
-    const digits = onlyPhoneDigits(rawValue).slice(0, 10);
-    const p1 = digits.slice(0, 3);
-    const p2 = digits.slice(3, 6);
-    const p3 = digits.slice(6, 8);
-    const p4 = digits.slice(8, 10);
-    let out = '+7';
-    if (p1) out += ` (${p1}`;
-    if (p1.length === 3) out += ')';
-    if (p2) out += ` ${p2}`;
-    if (p3) out += `-${p3}`;
-    if (p4) out += `-${p4}`;
-    return { masked: out, digits };
+    const digits = onlyPhoneDigits(rawValue);
+    const chars = PHONE_MASK_TEMPLATE.split('');
+    for (let index = 0; index < PHONE_DIGIT_POSITIONS.length; index += 1) {
+      chars[PHONE_DIGIT_POSITIONS[index]] = digits[index] || '_';
+    }
+    return { masked: chars.join(''), digits };
+  }
+
+  function clampPhoneDigitIndex(index) {
+    return Math.max(0, Math.min(PHONE_DIGIT_POSITIONS.length, Number(index) || 0));
+  }
+
+  function phoneDigitIndexFromCaret(caret) {
+    const safeCaret = Math.max(0, Number(caret) || 0);
+    return PHONE_DIGIT_POSITIONS.filter((position) => position < safeCaret).length;
+  }
+
+  function phoneCaretFromDigitIndex(index) {
+    const safeIndex = clampPhoneDigitIndex(index);
+    if (safeIndex >= PHONE_DIGIT_POSITIONS.length) return PHONE_MASK_TEMPLATE.length;
+    return PHONE_DIGIT_POSITIONS[safeIndex];
+  }
+
+  function resolvePhoneSelectionRange(input) {
+    const rawStart = typeof input.selectionStart === 'number' ? input.selectionStart : phoneCaretFromDigitIndex(0);
+    const rawEnd = typeof input.selectionEnd === 'number' ? input.selectionEnd : rawStart;
+    const start = clampPhoneDigitIndex(phoneDigitIndexFromCaret(rawStart));
+    const end = clampPhoneDigitIndex(phoneDigitIndexFromCaret(rawEnd));
+    return start <= end ? { start, end } : { start: end, end: start };
+  }
+
+  function applyPhoneEdit(digits, selection, inputType, text) {
+    const currentDigits = onlyPhoneDigits(digits);
+    const start = clampPhoneDigitIndex(selection?.start);
+    const end = clampPhoneDigitIndex(selection?.end);
+    let nextDigits = currentDigits;
+    let caretDigitIndex = start;
+
+    if (inputType === 'deleteContentBackward') {
+      if (start !== end) {
+        nextDigits = currentDigits.slice(0, start) + currentDigits.slice(end);
+      } else if (start > 0) {
+        nextDigits = currentDigits.slice(0, start - 1) + currentDigits.slice(start);
+        caretDigitIndex = start - 1;
+      }
+    } else if (inputType === 'deleteContentForward') {
+      if (start !== end) {
+        nextDigits = currentDigits.slice(0, start) + currentDigits.slice(end);
+      } else {
+        nextDigits = currentDigits.slice(0, start) + currentDigits.slice(start + 1);
+      }
+    } else if (inputType === 'deleteByCut') {
+      nextDigits = currentDigits.slice(0, start) + currentDigits.slice(end);
+    } else {
+      const insertedDigits = onlyPhoneDigits(text);
+      nextDigits = `${currentDigits.slice(0, start)}${insertedDigits}${currentDigits.slice(end)}`.slice(0, 10);
+      caretDigitIndex = Math.min(start + insertedDigits.length, nextDigits.length);
+    }
+
+    return {
+      digits: onlyPhoneDigits(nextDigits),
+      caret: phoneCaretFromDigitIndex(caretDigitIndex)
+    };
+  }
+
+  function createPhoneInputController(input) {
+    if (!input) return null;
+
+    let digits = onlyPhoneDigits(input.value);
+
+    function render(caret) {
+      const { masked, digits: normalizedDigits } = formatPhoneMask(digits);
+      digits = normalizedDigits;
+      input.value = masked;
+      input.dataset.phoneDigits = digits;
+      const nextCaret = typeof caret === 'number' ? caret : phoneCaretFromDigitIndex(Math.min(digits.length, PHONE_DIGIT_POSITIONS.length));
+      if (typeof input.setSelectionRange === 'function') {
+        input.setSelectionRange(nextCaret, nextCaret);
+      }
+    }
+
+    function syncFromDom() {
+      digits = onlyPhoneDigits(input.value);
+      const selection = resolvePhoneSelectionRange(input);
+      render(phoneCaretFromDigitIndex(Math.min(selection.start, digits.length)));
+    }
+
+    function applyEdit(inputType, text) {
+      const selection = resolvePhoneSelectionRange(input);
+      const result = applyPhoneEdit(digits, selection, inputType, text);
+      digits = result.digits;
+      render(result.caret);
+    }
+
+    function ensureCaretAfterPrefix() {
+      if (typeof input.selectionStart !== 'number' || typeof input.setSelectionRange !== 'function') return;
+      if (input.selectionStart < phoneCaretFromDigitIndex(0) || input.selectionEnd < phoneCaretFromDigitIndex(0)) {
+        const caret = phoneCaretFromDigitIndex(Math.min(digits.length, PHONE_DIGIT_POSITIONS.length));
+        input.setSelectionRange(caret, caret);
+      }
+    }
+
+    function onBeforeInput(event) {
+      if (!PHONE_INPUT_TYPES.has(event.inputType)) return;
+      event.preventDefault();
+      const text = event.inputType === 'insertFromPaste'
+        ? (event.dataTransfer?.getData('text') || event.data || '')
+        : (event.data || '');
+      applyEdit(event.inputType, text);
+    }
+
+    function onInput() {
+      syncFromDom();
+    }
+
+    function onPaste(event) {
+      event.preventDefault();
+      applyEdit('insertFromPaste', (event.clipboardData || window.clipboardData)?.getData('text') || '');
+    }
+
+    function onKeyDown(event) {
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
+      if (/^\d$/.test(event.key)) {
+        event.preventDefault();
+        applyEdit('insertText', event.key);
+        return;
+      }
+      if (event.key === 'Backspace') {
+        event.preventDefault();
+        applyEdit('deleteContentBackward');
+        return;
+      }
+      if (event.key === 'Delete') {
+        event.preventDefault();
+        applyEdit('deleteContentForward');
+        return;
+      }
+      if (event.key === 'Home') {
+        event.preventDefault();
+        const caret = phoneCaretFromDigitIndex(0);
+        input.setSelectionRange(caret, caret);
+      }
+    }
+
+    function onFocus() {
+      render(phoneCaretFromDigitIndex(Math.min(digits.length, PHONE_DIGIT_POSITIONS.length)));
+    }
+
+    function onClick() {
+      ensureCaretAfterPrefix();
+    }
+
+    input.addEventListener('beforeinput', onBeforeInput);
+    input.addEventListener('input', onInput);
+    input.addEventListener('paste', onPaste);
+    input.addEventListener('keydown', onKeyDown);
+    input.addEventListener('focus', onFocus);
+    input.addEventListener('click', onClick);
+
+    render(phoneCaretFromDigitIndex(Math.min(digits.length, PHONE_DIGIT_POSITIONS.length)));
+
+    return {
+      getDigits: () => digits,
+      setDigits(value) {
+        digits = onlyPhoneDigits(value);
+        render(phoneCaretFromDigitIndex(Math.min(digits.length, PHONE_DIGIT_POSITIONS.length)));
+      },
+      syncFromDom,
+      applyEdit,
+      destroy() {
+        input.removeEventListener('beforeinput', onBeforeInput);
+        input.removeEventListener('input', onInput);
+        input.removeEventListener('paste', onPaste);
+        input.removeEventListener('keydown', onKeyDown);
+        input.removeEventListener('focus', onFocus);
+        input.removeEventListener('click', onClick);
+      }
+    };
   }
 
   function label(name) {
@@ -151,13 +324,22 @@
   }
 
   async function renderRequests() {
-    mount.innerHTML = '<section><img class="brand-logo" src="/logo.png" alt="logo"/><h2>Мои обращения</h2><p><input id="phone" placeholder="+7 (___) ___-__-__"/> <button id="load" class="inline">Показать</button></p><ul id="list"></ul></section>';
+    mount.innerHTML = '<section><img class="brand-logo" src="/logo.png" alt="logo"/><h2>Мои обращения</h2><p><label data-field="phone"><input id="phone" inputmode="numeric" autocomplete="tel" placeholder="+7 (___) ___-__-__"/><small class="field-error"></small></label> <button id="load" class="inline">Показать</button></p><ul id="list"></ul></section>';
     const input = document.getElementById('phone');
-    input.addEventListener('input', () => { input.value = formatPhoneMask(input.value).masked; });
+    const phoneMask = createPhoneInputController(input);
+    const list = document.getElementById('list');
+    const error = mount.querySelector('[data-field="phone"] .field-error');
     document.getElementById('load').onclick = async () => {
-      const response = await fetch(`/api/client/requests?phone=${encodeURIComponent(onlyPhoneDigits(input.value))}`);
+      const digits = phoneMask.getDigits();
+      error.textContent = '';
+      if (!/^\d{10}$/.test(digits)) {
+        error.textContent = 'Телефон должен содержать 10 цифр после +7';
+        list.innerHTML = '';
+        return;
+      }
+      const response = await fetch(`/api/client/requests?phone=${encodeURIComponent(digits)}`);
       const data = await response.json();
-      document.getElementById('list').innerHTML = data.items.map((item) => `<li>${requestTypeLabels[item.requestType] || item.requestType} | ${item.status} | ${new Date(item.createdAt).toLocaleString()} | ${item.summary}</li>`).join('') || '<li>Ничего не найдено</li>';
+      list.innerHTML = data.items.map((item) => `<li>${requestTypeLabels[item.requestType] || item.requestType} | ${item.status} | ${new Date(item.createdAt).toLocaleString()} | ${item.summary}</li>`).join('') || '<li>Ничего не найдено</li>';
     };
   }
 
@@ -189,15 +371,22 @@
     });
   }
 
+  window.__WEBAPP_TEST_API__ = {
+    PHONE_MASK_TEMPLATE,
+    PHONE_DIGIT_POSITIONS,
+    onlyPhoneDigits,
+    formatPhoneMask,
+    phoneDigitIndexFromCaret,
+    phoneCaretFromDigitIndex,
+    applyPhoneEdit,
+    createPhoneInputController,
+    validatePayload
+  };
+
   if (forms[path]) {
     const cfg = forms[path];
-    mount.innerHTML = `<section><img class="brand-logo" src="/logo.png" alt="logo"/><h2>${cfg.title}</h2><form id="request-form"><p class="form-error"></p>${cfg.fields.map(renderField).join('')}<button type="submit">Отправить</button></form></section>`;
-    const phoneInput = mount.querySelector('input[name="phone"]');
-    phoneInput.addEventListener('input', () => { phoneInput.value = formatPhoneMask(phoneInput.value).masked; });
-    phoneInput.addEventListener('paste', (event) => {
-      event.preventDefault();
-      phoneInput.value = formatPhoneMask((event.clipboardData || window.clipboardData).getData('text')).masked;
-    });
+    mount.innerHTML = `<section><img class="brand-logo" src="${logoSrc}" alt="logo"/><h2>${cfg.title}</h2><form id="request-form"><p class="form-error"></p>${cfg.fields.map(renderField).join('')}<button type="submit">Отправить</button></form></section>`;
+    createPhoneInputController(mount.querySelector('input[name="phone"]'));
     document.getElementById('request-form').addEventListener('submit', (e) => submitForm(e, cfg));
     return;
   }
