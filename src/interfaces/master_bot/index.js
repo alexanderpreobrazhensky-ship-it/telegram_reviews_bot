@@ -189,13 +189,13 @@ async function handleMasterWebhook({ body, config, headers = {}, rawHeaders = []
   const sessionKey = `${channel}:${channelUserId}`;
   const text = String(event.text || '').trim();
 
-  if (text === '/whoami') {
+  if (channel === 'max' && text === '/whoami') {
     logger.info('master_bot handler branch selected', { channel, pathname, branch: '/whoami', channelUserId, recipientId });
     return respondWithMessage({
       channel,
       token,
       recipientId,
-      text: `Ваш MAX user_id: ${channelUserId || '-'}. Добавьте это значение в MAX_MASTER_BOT_ADMIN_IDS при необходимости.`,
+      text: `Ваш MAX user_id: ${channelUserId || '-'}`,
       payload: { ok: true, action: 'whoami', channelUserId, channel }
     });
   }

@@ -73,7 +73,10 @@ function buildHelpText(channel) {
     '/help — подсказка по сценариям',
     'Сценарии: запись на сервис, запчасти, вопрос мастеру, гарантия, изменение данных, mini app'
   ];
-  if (channel === 'max') base.push('MAX deep links: form_service, form_parts, form_consultation, form_warranty, form_data_change, requests');
+  if (channel === 'max') {
+    base.push('/whoami — показать ваш MAX user_id');
+    base.push('MAX deep links: form_service, form_parts, form_consultation, form_warranty, form_data_change, requests');
+  }
   return base.join('\n');
 }
 
@@ -190,6 +193,13 @@ async function handleClientWebhook({ body, config, headers = {}, rawHeaders = []
       const text = buildHelpText(channel);
       await sendBotMessage({ channel, config, recipientId, text });
       return { ok: true, action: 'help', channel };
+    }
+
+    if (channel === 'max' && command === '/whoami') {
+      logger.info('client_bot handler branch selected', { channel, pathname, branch: '/whoami', userId, recipientId });
+      const text = `Ваш MAX user_id: ${userId || '-'}`;
+      await sendBotMessage({ channel, config, recipientId, text });
+      return { ok: true, action: 'whoami', channel, userId, text };
     }
 
     const callbackQuick = callbackData.startsWith('quick:') ? QUICK_TYPE_BY_KEY[callbackData.split(':')[1]] : null;

@@ -48,6 +48,11 @@ test('MAX client bot supports start help quick flow and stores max_chat source',
     const help = await post(base, '/max/client_bot/webhook', { message: { body: { text: '/help' }, chat_id: 'chat-1', from: { user_id: 'mx-client-1', first_name: 'Max' } } }, webhookHeaders);
     assert.equal(help.data.action, 'help');
 
+    const whoami = await post(base, '/max/client_bot/webhook', { message: { body: { text: '/whoami' }, chat_id: 'chat-1', from: { user_id: 'mx-client-1', first_name: 'Max' } } }, webhookHeaders);
+    assert.equal(whoami.data.action, 'whoami');
+    assert.equal(whoami.data.userId, 'mx-client-1');
+    assert.equal(whoami.data.text, 'Ваш MAX user_id: mx-client-1');
+
     await post(base, '/max/client_bot/webhook', { callback: { callback_id: 'cb-1', payload: 'quick:service', message: { chat_id: 'chat-1' }, from: { user_id: 'mx-client-1', first_name: 'Max' } } }, webhookHeaders);
     await post(base, '/max/client_bot/webhook', { message: { body: { text: 'Макс Клиент' }, chat_id: 'chat-1', from: { user_id: 'mx-client-1', first_name: 'Max' } } }, webhookHeaders);
     await post(base, '/max/client_bot/webhook', { message: { body: { text: '+79990000066' }, chat_id: 'chat-1', from: { user_id: 'mx-client-1', first_name: 'Max' } } }, webhookHeaders);
@@ -74,6 +79,7 @@ test('MAX master bot enforces access, works with roles and sends clarification f
     const whoami = await post(base, '/max/master_bot/webhook', { message: { body: { text: '/whoami' }, chat_id: 'staff-chat', from: { user_id: 'unknown-max', first_name: 'NoAccess' } } }, webhookHeaders);
     assert.equal(whoami.data.action, 'whoami');
     assert.equal(whoami.data.channelUserId, 'unknown-max');
+    assert.equal(whoami.data.text, 'Ваш MAX user_id: unknown-max');
 
     const grant = await post(base, '/max/master_bot/webhook', { message: { body: { text: '/access_grant mx-master-2 master Макс Мастер' }, chat_id: 'admin-chat', from: { user_id: 'mx-admin-1', first_name: 'Admin' } } }, webhookHeaders);
     assert.equal(grant.data.ok, true);
