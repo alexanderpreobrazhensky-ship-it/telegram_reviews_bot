@@ -1,4 +1,5 @@
 const MAX_API_BASE_URL = 'https://platform-api.max.ru';
+const logger = require('../logging/logger');
 
 function safeUrl(value) {
   try {
@@ -81,29 +82,55 @@ function buildMaxAttachments(extra = {}) {
 }
 
 async function sendTelegramMessage(token, chatId, text, extra = {}) {
-  if (!token || !chatId) return false;
-  await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ chat_id: chatId, text, ...extra })
-  }).catch(() => {});
-  return true;
+  if (!token || !chatId) {
+    logger.warn('telegram sendMessage skipped: missing token or chatId', { hasToken: Boolean(token), chatIdPresent: Boolean(chatId) });
+    return false;
+  }
+  try {
+    const response = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, text, ...extra })
+    });
+    if (!response.ok) {
+      const responseText = await response.text().catch(() => '');
+      logger.error('telegram sendMessage failed', { status: response.status, chatId, responseText: responseText.slice(0, 500) });
+      return false;
+    }
+    return true;
+  } catch (error) {
+    logger.error('telegram sendMessage exception', { chatId, error: String(error?.message || error) });
+    return false;
+  }
 }
 
 async function sendMaxMessage(token, userId, text, extra = {}) {
-  if (!token || !userId) return false;
+  if (!token || !userId) {
+    logger.warn('MAX sendMessage skipped: missing token or userId', { hasToken: Boolean(token), userIdPresent: Boolean(userId) });
+    return false;
+  }
   const attachments = buildMaxAttachments(extra);
   const payload = { text };
   if (attachments.length) payload.attachments = attachments;
-  await fetch(`${MAX_API_BASE_URL}/messages?user_id=${encodeURIComponent(String(userId))}`, {
-    method: 'POST',
-    headers: {
-      Authorization: token,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify(payload)
-  }).catch(() => {});
-  return true;
+  try {
+    const response = await fetch(`${MAX_API_BASE_URL}/messages?user_id=${encodeURIComponent(String(userId))}`, {
+      method: 'POST',
+      headers: {
+        Authorization: token,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(payload)
+    });
+    if (!response.ok) {
+      const responseText = await response.text().catch(() => '');
+      logger.error('MAX sendMessage failed', { status: response.status, userId, responseText: responseText.slice(0, 500) });
+      return false;
+    }
+    return true;
+  } catch (error) {
+    logger.error('MAX sendMessage exception', { userId, error: String(error?.message || error) });
+    return false;
+  }
 }
 
 async function sendChannelMessage({ channel = 'telegram', token, recipientId, text, extra = {} }) {
@@ -112,26 +139,52 @@ async function sendChannelMessage({ channel = 'telegram', token, recipientId, te
 }
 
 async function answerTelegramCallback(token, callbackId, text) {
-  if (!token || !callbackId) return false;
-  await fetch(`https://api.telegram.org/bot${token}/answerCallbackQuery`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ callback_query_id: callbackId, text })
-  }).catch(() => {});
-  return true;
+  if (!token || !callbackId) {
+    logger.warn('telegram answerCallback skipped: missing token or callbackId', { hasToken: Boolean(token), callbackIdPresent: Boolean(callbackId) });
+    return false;
+  }
+  try {
+    const response = await fetch(`https://api.telegram.org/bot${token}/answerCallbackQuery`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ callback_query_id: callbackId, text })
+    });
+    if (!response.ok) {
+      const responseText = await response.text().catch(() => '');
+      logger.error('telegram answerCallback failed', { status: response.status, callbackId, responseText: responseText.slice(0, 500) });
+      return false;
+    }
+    return true;
+  } catch (error) {
+    logger.error('telegram answerCallback exception', { callbackId, error: String(error?.message || error) });
+    return false;
+  }
 }
 
 async function answerMaxCallback(token, callbackId, text) {
-  if (!token || !callbackId) return false;
-  await fetch(`${MAX_API_BASE_URL}/answers?callback_id=${encodeURIComponent(String(callbackId))}`, {
-    method: 'POST',
-    headers: {
-      Authorization: token,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({ notification: text })
-  }).catch(() => {});
-  return true;
+  if (!token || !callbackId) {
+    logger.warn('MAX answerCallback skipped: missing token or callbackId', { hasToken: Boolean(token), callbackIdPresent: Boolean(callbackId) });
+    return false;
+  }
+  try {
+    const response = await fetch(`${MAX_API_BASE_URL}/answers?callback_id=${encodeURIComponent(String(callbackId))}`, {
+      method: 'POST',
+      headers: {
+        Authorization: token,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ notification: text })
+    });
+    if (!response.ok) {
+      const responseText = await response.text().catch(() => '');
+      logger.error('MAX answerCallback failed', { status: response.status, callbackId, responseText: responseText.slice(0, 500) });
+      return false;
+    }
+    return true;
+  } catch (error) {
+    logger.error('MAX answerCallback exception', { callbackId, error: String(error?.message || error) });
+    return false;
+  }
 }
 
 async function answerChannelCallback({ channel = 'telegram', token, callbackId, text }) {
