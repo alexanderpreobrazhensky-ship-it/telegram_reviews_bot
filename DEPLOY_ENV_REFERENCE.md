@@ -1,139 +1,281 @@
 # DEPLOY_ENV_REFERENCE.md
 
-Актуальный практический реестр ENV по результатам полного аудита кода, deploy-контракта и документации.
+Полный реестр ENV по результатам code-first аудита. Этот файл разделяет:
 
-## Scope и метод
-- Проверены runtime-контуры: `app.js`, `src/**`, `public/**`, `Dockerfile`, `.bothost/entrypoint.conf`, `package.json`, `tests/**`.
-- Отдельно проверен legacy-контур: `bots/**`, `services/**`, `shared/**` (Python-исторический слой).
-- Статусы ниже:
-  - `required` — реально обязателен для рабочего production-path (Node-first).
-  - `recommended` — не обязателен для старта процесса, но обязателен для полноценного прод-использования.
-  - `optional` — имеет рабочий default и не блокирует runtime.
-  - `legacy/dead` — относится к legacy-контуру или не влияет на фактический Node runtime.
+- **Node production path** — реально активный runtime на BotHost.
+- **Legacy Python contour** — переменные, которые всё ещё читаются в репозитории, но не входят в текущий production-path.
+- **Documented-only / dead** — переменные, которые читаются или документированы, но фактически не меняют поведение активного Node runtime.
 
----
+Статусы:
 
-## 1) Node production path (актуальный runtime)
+- `required` — нужен для рабочего контура или платформенного контракта.
+- `recommended` — процесс может стартовать и без него, но прод-сценарий будет частично деградирован.
+- `optional` — есть рабочий default или это тюнинг.
+- `legacy/dead` — относится к legacy-контуру либо не влияет на активный runtime.
 
-| ENV | Статус | Default | Где используется | Назначение | Нужен для production deploy | Нужен для BotHost deploy | Комментарий |
-|---|---|---|---|---|---|---|---|
-| `PORT` | required | `3000` (fallback) | `src/infrastructure/config/index.js`, `app.js` | Порт HTTP runtime | Да (порт-контракт) | Да (BotHost передаёт) | Без `PORT` локально берётся `3000`; на BotHost задаётся платформой. |
-| `TELEGRAM_CLIENT_BOT_TOKEN` | recommended | `''` | `src/infrastructure/config/index.js`, `src/interfaces/client_bot/index.js`, `app.js` | Client bot webhook + исходящие сообщения | Для полного прод-флоу — да | Рекомендуется как обязательный | Процесс стартует и без него, но клиентские уведомления деградируют. |
-| `TELEGRAM_MASTER_BOT_TOKEN` | recommended | `''` | `src/infrastructure/config/index.js`, `src/interfaces/master_bot/index.js`, `src/server/index.js` | Master bot webhook/ответы | Для полного прод-флоу — да | Рекомендуется как обязательный | Без токена ветка master bot нерабочая. |
-| `TELEGRAM_INTEGRATION_BOT_TOKEN` | recommended | `''` | `src/infrastructure/config/index.js`, `src/interfaces/integration_bot/index.js` | Integration bot webhook/операторские команды | Для полного прод-флоу — да | Рекомендуется как обязательный | Без токена интеграционный бот недоступен. |
-| `MASTER_BOT_ADMIN_IDS` | recommended | `''` | `src/infrastructure/config/index.js`, `src/core/application/masterService.js` | Bootstrap admin-доступа master bot | Сильно рекомендуется | Сильно рекомендуется | Без него не назначается env-driven admin bootstrap. |
-| `WEBAPP_URL` | recommended | `https://example.com` | `src/infrastructure/config/index.js`, `src/interfaces/client_bot/index.js` | URL Mini App кнопки в client bot | Да (если используется WebApp) | Да (практически) | Дефолт технический, не production-safe. |
-| `DB_FILE_PATH` | recommended | `data/db.json` | `src/infrastructure/db/index.js` | Путь к file DB | Рекомендуется | Рекомендуется | Для устойчивого deploy лучше указывать persistent путь явно. |
-| `TELEGRAM_MASTERS_CHAT_ID` | optional | `''` | `src/infrastructure/config/index.js`, `src/server/index.js` | Дубли заявок в общий чат мастеров | Не обязательно | Не обязательно | Активирует masters-chat notifications. |
-| `WEBAPP_TELEGRAM_CHANNEL_LINK` | optional | `''` | `src/infrastructure/config/index.js`, `src/server/index.js`, `public/webapp.js` | Ссылка на канал в WebApp | Не обязательно | Не обязательно | Канал не показывается при пустом значении. |
-| `WEBAPP_DEDUPE_WINDOW_MS` | optional | `45000` | `src/infrastructure/config/index.js`, `src/server/index.js` | Дедупликация WebApp submit | Нет | Нет | Тюнинг anti-duplicate окна. |
-| `NODE_ENV` | optional | `development` | `src/infrastructure/config/index.js` | Режим окружения | Нет | Нет | В коде не влияет на ветвление критических фич. |
-| `SCHEDULER_INTERVAL_MS` | optional | `15000` | `src/infrastructure/config/index.js`, `app.js` | Интервал scheduler loop | Нет | Нет | Имеет clamp/валидацию. |
-| `SCHEDULER_BATCH_SIZE` | optional | `10` | `src/infrastructure/config/index.js`, `app.js` | Размер batch задач | Нет | Нет | Имеет clamp/валидацию. |
-| `SCHEDULER_MAX_ATTEMPTS` | optional | `3` | `src/infrastructure/config/index.js`, `app.js` | Лимит retry задач | Нет | Нет | Имеет clamp/валидацию. |
-| `SCHEDULER_STUCK_TIMEOUT_MS` | optional | `300000` | `src/infrastructure/config/index.js`, `app.js` | Recovery stuck processing задач | Нет | Нет | Имеет clamp/валидацию. |
-| `FEEDBACK_REQUEST_DELAY_MINUTES` | optional | `5` | `src/infrastructure/config/index.js`, `src/infrastructure/db/index.js` | Отложенная задача фидбека | Нет | Нет | Тюнинг SLA напоминаний. |
-| `INTEGRATION_RETRY_MAX` | legacy/dead | `3` | `src/infrastructure/config/index.js` | Задекларированный retry лимит интеграций | Нет | Нет | В Node runtime практически не применяется отдельным worker-пайплайном. |
-| `INTEGRATION_RETRY_DELAY_SECONDS` | legacy/dead | `60` | `src/infrastructure/config/index.js` | Задекларированный retry delay | Нет | Нет | Аналогично, декларативно. |
-| `DB_URL` | legacy/dead | `postgres://localhost:5432/telegram_reviews` | `src/infrastructure/config/index.js` | Декларация SQL-подключения | Нет | Нет | Фактический runtime работает на file DB. |
-| `QUEUE_DRIVER` | legacy/dead | `memory` | `src/infrastructure/config/index.js` | Декларация queue backend | Нет | Нет | Реального внешнего queue driver нет. |
-| `ENABLE_INTEGRATION_WORKER` | legacy/dead | `true` | `src/infrastructure/config/index.js` | Feature toggle worker | Нет | Нет | Отдельный worker-процесс отсутствует. |
-| `ONE_C_SYNC_ENABLED` | legacy/dead | `false` | `src/infrastructure/config/index.js` | Toggle 1C sync | Нет | Нет | Не гейтит фактические route execution paths. |
-| `EMAIL_IMPORT_ENABLED` | legacy/dead | `true` | `src/infrastructure/config/index.js` | Toggle email import | Нет | Нет | Роут email не отключается этим флагом. |
-| `ONE_C_WEBHOOK_SECRET` | legacy/dead | `''` | `src/infrastructure/config/index.js` | Секрет webhook 1C | Нет | Нет | В HTTP route не валидируется. |
+## 1) Node production path (активный runtime)
 
----
+| ENV | Статус | Default | Где читается / реально используется | Зачем нужна | Prod | BotHost | Telegram / MAX / common | Комментарий |
+|---|---|---|---|---|---|---|---|---|
+| `PORT` | required | `3000` fallback | `src/infrastructure/config/index.js`, `app.js` | Порт HTTP listener | yes | yes | common | На BotHost должен приходить от платформы. |
+| `NODE_ENV` | optional | `development` | `src/infrastructure/config/index.js`, `/health` payload | Маркер окружения | no | no | common | Не гейтит бизнес-ветвление. |
+| `DB_FILE_PATH` | required | `data/db.json` | `src/infrastructure/db/index.js` | Путь к JSON DB | yes | yes | common | Практически обязателен для persistent storage на BotHost. |
+| `TELEGRAM_CLIENT_BOT_TOKEN` | required | empty | `src/infrastructure/config/index.js`, `app.js`, `src/interfaces/client_bot/index.js`, `src/interfaces/master_bot/index.js` | Входящие/исходящие сообщения client bot и clarifications | yes | yes | telegram | Без него Telegram client contour деградирует. |
+| `TELEGRAM_MASTER_BOT_TOKEN` | required | empty | `src/infrastructure/config/index.js`, `src/interfaces/master_bot/index.js`, `src/server/index.js` | Telegram master bot webhook/outbound и masters notifications | yes | yes | telegram | Без него ветка master bot нерабочая. |
+| `TELEGRAM_INTEGRATION_BOT_TOKEN` | recommended | empty | `src/infrastructure/config/index.js`, `src/interfaces/integration_bot/index.js` | Telegram integration bot | recommended | recommended | telegram | Нужен для полного текущего Telegram-контура. |
+| `MASTER_BOT_ADMIN_IDS` | required | empty | `src/infrastructure/config/index.js`, `src/interfaces/master_bot/index.js`, `src/core/application/masterService.js`, `src/infrastructure/db/index.js` | Bootstrap admin access для Telegram master bot | yes | yes | telegram | CSV id list. |
+| `TELEGRAM_MASTERS_CHAT_ID` | recommended | empty | `src/infrastructure/config/index.js`, `src/server/index.js` | Дублирование новых заявок в Telegram masters chat | optional | optional | telegram | Не требуется для старта, но полезно в работе. |
+| `WEBAPP_URL` | required | `https://example.com` | `src/infrastructure/config/index.js`, `src/interfaces/client_bot/index.js`, `src/interfaces/shared/channelAdapters.js`, `src/server/index.js` | Основной URL shared WebApp / Mini App | yes | yes | common | Технический default не пригоден для production. |
+| `WEBAPP_TELEGRAM_CHANNEL_LINK` | optional | empty | `src/infrastructure/config/index.js`, `src/server/index.js`, `public/webapp.js` | Ссылка на Telegram-канал внутри WebApp | no | no | telegram/common | Используется только если задана. |
+| `TELEGRAM_CHANNEL_URL` | optional | empty | `src/infrastructure/config/index.js`, `src/server/index.js`, `public/webapp.js` | Alias для ссылки на Telegram-канал | no | no | telegram/common | Имеет приоритет над `WEBAPP_TELEGRAM_CHANNEL_LINK`. |
+| `WEBAPP_DEDUPE_WINDOW_MS` | optional | `45000` | `src/infrastructure/config/index.js`, `src/server/index.js` | Окно дедупликации повторных WebApp submit | no | no | common | Влияет только на WebApp request create. |
+| `FEEDBACK_REQUEST_DELAY_MINUTES` | optional | `5` | `src/infrastructure/config/index.js`, `src/infrastructure/db/index.js` | Отложенная постановка feedback task | no | no | common | Влияет на scheduler-driven feedback. |
+| `SCHEDULER_INTERVAL_MS` | optional | `15000` | `src/infrastructure/config/index.js`, `app.js` | Интервал scheduler loop | no | no | common | Clamp/validation есть. |
+| `SCHEDULER_BATCH_SIZE` | optional | `10` | `src/infrastructure/config/index.js`, `app.js` | Размер пачки задач | no | no | common | Clamp/validation есть. |
+| `SCHEDULER_MAX_ATTEMPTS` | optional | `3` | `src/infrastructure/config/index.js`, `app.js` | Retry budget задач scheduler | no | no | common | Clamp/validation есть. |
+| `SCHEDULER_STUCK_TIMEOUT_MS` | optional | `300000` | `src/infrastructure/config/index.js`, `app.js` | Recovery stuck processing tasks | no | no | common | Clamp/validation есть. |
+| `MAX_ENABLED` | recommended | `false` | `src/infrastructure/config/index.js` | Operator-facing feature flag for MAX | recommended if MAX | recommended if MAX | max | Читается, но не гейтит route wiring. |
+| `MAX_CLIENT_BOT_TOKEN` | required | empty | `src/infrastructure/config/index.js`, `app.js`, `src/interfaces/client_bot/index.js`, `src/interfaces/master_bot/index.js` | MAX client bot inbound/outbound foundation | yes if MAX | yes if MAX | max | Нужен для chat flow и outbound. |
+| `MAX_MASTER_BOT_TOKEN` | required | empty | `src/infrastructure/config/index.js`, `src/interfaces/master_bot/index.js` | MAX master bot inbound/outbound | yes if MAX | yes if MAX | max | Нужен для staff contour в MAX. |
+| `MAX_MASTER_BOT_ADMIN_IDS` | required | empty | `src/infrastructure/config/index.js`, `src/interfaces/master_bot/index.js`, `src/core/application/masterService.js`, `src/infrastructure/db/index.js` | Bootstrap admin access для MAX master bot | yes if MAX | yes if MAX | max | CSV id list. |
+| `MAX_WEBHOOK_SECRET` | recommended | empty | `src/infrastructure/config/index.js`, `src/interfaces/client_bot/index.js`, `src/interfaces/master_bot/index.js` | Проверка заголовка `x-max-bot-api-secret` | recommended if MAX | recommended if MAX | max | Если пусто, MAX webhook secret-check не работает. |
+| `MAX_WEBAPP_URL` | recommended | fallback to `WEBAPP_URL` | `src/infrastructure/config/index.js`, `src/interfaces/shared/channelAdapters.js`, `src/server/index.js` | Отдельный MAX Mini App URL | optional | optional | max | Если не задан, используется `WEBAPP_URL`. |
+| `MAX_BOT_NAME` | recommended | empty | `src/infrastructure/config/index.js`, `src/interfaces/shared/channelAdapters.js`, `src/infrastructure/messaging/index.js` | Построение MAX bot/deep links | recommended if MAX | recommended if MAX | max | Без него deep-link foundation ограничен. |
+| `MAX_DEEPLINK_BASE_URL` | optional | empty | `src/infrastructure/config/index.js`, `src/server/index.js` | Доп. metadata для MAX deep links | optional | optional | max | Сейчас только инжектится в HTML runtime metadata. |
+| `ONE_C_WEBHOOK_SECRET` | legacy/dead | empty | `src/infrastructure/config/index.js` | Декларируемая проверка webhook 1C | no | no | integrations | В active HTTP route не валидируется. |
+| `ENABLE_INTEGRATION_WORKER` | legacy/dead | `true` | `src/infrastructure/config/index.js` | Декларируемый toggle worker | no | no | integrations | Отдельного worker процесса нет. |
+| `ONE_C_SYNC_ENABLED` | legacy/dead | `false` | `src/infrastructure/config/index.js` | Декларируемый toggle 1C sync | no | no | integrations | Не блокирует активные 1C routes. |
+| `EMAIL_IMPORT_ENABLED` | legacy/dead | `true` | `src/infrastructure/config/index.js` | Декларируемый toggle email import | no | no | integrations | Email route не gated этим флагом. |
+| `INTEGRATION_RETRY_MAX` | legacy/dead | `3` | `src/infrastructure/config/index.js` | Retry knob для интеграций | no | no | integrations | В active integration runtime не используется как отдельный retry pipeline. |
+| `INTEGRATION_RETRY_DELAY_SECONDS` | legacy/dead | `60` | `src/infrastructure/config/index.js` | Retry delay knob для интеграций | no | no | integrations | Аналогично, декларативно. |
+| `DB_URL` | legacy/dead | `postgres://localhost:5432/telegram_reviews` | `src/infrastructure/config/index.js` | SQL URL placeholder | no | no | common | Фактический runtime работает на file DB. |
+| `QUEUE_DRIVER` | legacy/dead | `memory` | `src/infrastructure/config/index.js` | Queue backend placeholder | no | no | common | Реального queue backend нет. |
 
-## 2) Integration-related ENV
-- Активно влияющие: `TELEGRAM_INTEGRATION_BOT_TOKEN`.
-- Технический тюнинг scheduler/inbox: `SCHEDULER_*`, `FEEDBACK_REQUEST_DELAY_MINUTES`.
-- Декларативные/legacy: `ONE_C_WEBHOOK_SECRET`, `ONE_C_SYNC_ENABLED`, `ENABLE_INTEGRATION_WORKER`, `INTEGRATION_RETRY_*`, `EMAIL_IMPORT_ENABLED`, `DB_URL`, `QUEUE_DRIVER`.
+## 2) Legacy Python contour (читается в репозитории, но не в Node production path)
 
-## 3) Bot-related ENV
-- Client bot (Node path): `TELEGRAM_CLIENT_BOT_TOKEN`, `WEBAPP_URL`.
-- Master bot (Node path): `TELEGRAM_MASTER_BOT_TOKEN`, `MASTER_BOT_ADMIN_IDS`, `TELEGRAM_MASTERS_CHAT_ID`.
-- Integration bot (Node path): `TELEGRAM_INTEGRATION_BOT_TOKEN`.
+| ENV | Статус | Default | Где читается | Зачем нужна / на что похожа | Node prod path | Комментарий |
+|---|---|---|---|---|---|---|
+| `CLIENT_TELEGRAM_BOT_TOKEN` | legacy/dead | empty | `bots/client_bot/main.py` | Основной Python client bot token alias | no | Не нужен для Node runtime. |
+| `TELEGRAM_BOT_TOKEN` | legacy/dead | empty | `bots/client_bot/main.py` | Token alias | no | Не нужен для Node runtime. |
+| `BOT_API_TOKEN` | legacy/dead | empty | `bots/client_bot/main.py` | Token alias | no | Не нужен для Node runtime. |
+| `API_TOKEN` | legacy/dead | empty | `bots/client_bot/main.py` | Token alias | no | Не нужен для Node runtime. |
+| `BOT_TOKEN` | legacy/dead | empty | `bots/client_bot/main.py` | Token alias | no | Не нужен для Node runtime. |
+| `TOKEN` | legacy/dead | empty | `bots/client_bot/main.py` | Token alias | no | Не нужен для Node runtime. |
+| `CLIENT_WEBAPP_URL` | legacy/dead | empty | `bots/client_bot/main.py` | Python WebApp URL | no | Node runtime использует `WEBAPP_URL` / `MAX_WEBAPP_URL`. |
+| `WEBAPP_ENABLED` | legacy/dead | `1` | `bots/client_bot/main.py` | Python toggle WebApp | no | Node path не использует. |
+| `CLIENT_WEBAPP_ENABLED` | legacy/dead | `1` | `bots/client_bot/main.py` | Python toggle WebApp | no | Node path не использует. |
+| `CLIENT_WEBAPP_INITDATA_MAX_AGE_SECONDS` | legacy/dead | `86400` | `bots/client_bot/main.py` | TTL для Telegram WebApp initData | no | В Node WebApp auth не реализован. |
+| `CLIENT_WEBAPP_SESSION_SECRET` | legacy/dead | empty | `bots/client_bot/main.py` | Session signing secret | no | В Node contour нет аналога. |
+| `CLIENT_WEBAPP_TEST_MODE` | legacy/dead | empty | `bots/client_bot/main.py` | WebApp test mode | no | В Node contour нет аналога. |
+| `WEBAPP_PATH` | legacy/dead | empty | `bots/client_bot/main.py` | Python web route path | no | Node path использует hardcoded routes. |
+| `WEBHOOK_URL` | legacy/dead | empty | `bots/client_bot/main.py` | Python webhook base URL | no | Node runtime routes fixed in server. |
+| `PUBLIC_BASE_URL` | legacy/dead | empty | `bots/client_bot/main.py` | Python public base URL | no | Node runtime routes fixed in server. |
+| `DOMAIN` | legacy/dead | empty | `bots/client_bot/main.py` | Python domain helper | no | Node runtime не использует. |
+| `BOT_PATH_SECRET` | legacy/dead | empty | `bots/client_bot/main.py` | Python path/session secret | no | Не относится к Node runtime. |
+| `CLIENT_BOT_MODE` | legacy/dead | empty | `bots/client_bot/main.py` | Python run mode | no | Не относится к Node runtime. |
+| `CLIENT_RUN_MODE` | legacy/dead | empty | `bots/client_bot/main.py` | Python run mode | no | Не относится к Node runtime. |
+| `RUN_MODE` | legacy/dead | empty | `bots/client_bot/main.py` | Python run mode | no | Не относится к Node runtime. |
+| `CLIENT_SERVICE_PORT` | legacy/dead | empty | `services/client_bot_service/app/config.py` | Порт Python сервиса | no | Не относится к Node runtime. |
+| `CLIENT_SERVICE_HOST` | legacy/dead | empty | `services/client_bot_service/app/config.py` | Хост Python сервиса | no | Не относится к Node runtime. |
+| `CLIENT_MASTERS_CHAT_ID` | legacy/dead | empty | `bots/client_bot/main.py` | Python masters chat id | no | В Node path используется `TELEGRAM_MASTERS_CHAT_ID`. |
+| `CLIENT_MASTER_CHAT_ID` | legacy/dead | empty | `bots/client_bot/main.py` | Python masters chat id alias | no | Не относится к Node runtime. |
+| `CLIENT_MASTER_CHAT_MODE` | legacy/dead | `OFF` | `bots/client_bot/main.py` | Python masters chat mode | no | Не относится к Node runtime. |
+| `MASTER_CHAT_MODE` | legacy/dead | `OFF` | `bots/client_bot/main.py` | Python masters chat mode alias | no | Не относится к Node runtime. |
+| `CLIENT_MASTER_USER_IDS` | legacy/dead | empty | `bots/client_bot/main.py` | Python staff ids | no | Node path uses DB roles instead. |
+| `CLIENT_MASTER_IDS` | legacy/dead | empty | `bots/client_bot/main.py` | Python staff ids alias | no | Не относится к Node runtime. |
+| `CLIENT_CHAT_ID` | legacy/dead | empty | `bots/client_bot/main.py` | Python fallback chat id | no | Не относится к Node runtime. |
+| `CLIENT_NOTIFY_MODE` | legacy/dead | `dm_then_chat` | `bots/client_bot/main.py` | Python notification policy | no | Не относится к Node runtime. |
+| `CLIENT_ADMIN_IDS` | legacy/dead | empty | `bots/client_bot/main.py` | Python admin ids | no | Node path uses `MASTER_BOT_ADMIN_IDS`. |
+| `ADMIN_IDS` | legacy/dead | empty | `bots/client_bot/main.py` | Python admin ids alias | no | Не относится к Node runtime. |
+| `SUPERADMIN_ID` | legacy/dead | empty | `bots/client_bot/main.py` | Python superadmin id | no | Не относится к Node runtime. |
+| `SUPERADMIN_IDS` | legacy/dead | empty | `bots/client_bot/main.py` | Python superadmin ids | no | Не относится к Node runtime. |
+| `MASTER_USERNAMES` | legacy/dead | empty | `bots/client_bot/main.py` | Python staff username ACL | no | Не относится к Node runtime. |
+| `REPORT_CHAT_IDS` | legacy/dead | empty | `bots/client_bot/main.py` | Python reporting chats | no | Не относится к Node runtime. |
+| `CLIENT_CHANNEL_ID` | legacy/dead | empty | `bots/client_bot/main.py` | Python channel binding | no | Не относится к Node runtime. |
+| `CLIENT_POST_TARGET_ID` | legacy/dead | empty | `bots/client_bot/main.py` | Python post target | no | Не относится к Node runtime. |
+| `CLIENT_POST_CHAT_ID` | legacy/dead | empty | `bots/client_bot/main.py` | Python post target alias | no | Не относится к Node runtime. |
+| `CLIENT_BOT_USERNAME` | legacy/dead | empty | `bots/client_bot/main.py` | Python bot username | no | Не относится к Node runtime. |
+| `TELEGRAM_BOT_USERNAME` | legacy/dead | empty | `bots/client_bot/main.py` | Python bot username alias | no | Не относится к Node runtime. |
+| `BOT_USERNAME` | legacy/dead | empty | `bots/client_bot/main.py` | Python bot username alias | no | Не относится к Node runtime. |
+| `TIMEZONE` | legacy/dead | `Europe/Moscow` | `bots/client_bot/main.py` | Python UI/report timezone | no | Node path не использует. |
+| `LIRA_PHONE` | legacy/dead | empty | `bots/client_bot/main.py` | Python business contact data | no | Node path не использует. |
+| `LIRA_ADDRESS` | legacy/dead | `Удмуртская 10` | `bots/client_bot/main.py` | Python business contact data | no | Node path не использует. |
+| `LIRA_MAP_URL` | legacy/dead | empty | `bots/client_bot/main.py` | Python map link | no | Node path не использует. |
+| `SHOW_ROUTE_IMAGE` | legacy/dead | empty | `bots/client_bot/main.py` | Python UI flag | no | Не относится к Node runtime. |
+| `CLIENT_SHOW_REGLAMENT_PHRASE` | legacy/dead | empty | `bots/client_bot/main.py` | Python UI flag | no | Не относится к Node runtime. |
+| `SHOW_REGLAMENT_PHRASE` | legacy/dead | empty | `bots/client_bot/main.py` | Python UI flag alias | no | Не относится к Node runtime. |
+| `PIN_TEMPLATE_VERSION` | legacy/dead | `v1` | `bots/client_bot/main.py` | Python pin template version | no | Не относится к Node runtime. |
+| `CLIENT_AUTO_PIN_ON_START` | legacy/dead | empty | `bots/client_bot/main.py` | Python startup behavior | no | Не относится к Node runtime. |
+| `CLIENT_AUTO_PIN_ON_DEPLOY` | legacy/dead | empty | `bots/client_bot/main.py` | Python deploy behavior | no | Не относится к Node runtime. |
+| `AUTO_PIN_ON_START` | legacy/dead | empty | `bots/client_bot/main.py` | Python startup behavior alias | no | Не относится к Node runtime. |
+| `AUTO_PIN_ON_DEPLOY` | legacy/dead | empty | `bots/client_bot/main.py` | Python deploy behavior alias | no | Не относится к Node runtime. |
+| `CLIENT_ACTIVE_TICKET_TTL_HOURS` | legacy/dead | empty | `bots/client_bot/main.py` | Python ticket TTL | no | Не относится к Node runtime. |
+| `AI_FALLBACK_THRESHOLD` | legacy/dead | empty | `bots/client_bot/main.py` | Python AI fallback tuning | no | Не относится к Node runtime. |
+| `AI_FALLBACK_TTL_SECONDS` | legacy/dead | empty | `bots/client_bot/main.py` | Python AI fallback tuning | no | Не относится к Node runtime. |
+| `AI_FALLBACK_WINDOW_SECONDS` | legacy/dead | empty | `bots/client_bot/main.py` | Python AI fallback tuning | no | Не относится к Node runtime. |
+| `ROUTE_URL` | legacy/dead | empty | `bots/client_bot/main.py` | Python route link | no | Не относится к Node runtime. |
+| `DATABASE_URL` | legacy/dead | empty | `bots/client_bot/main.py` | Python DB connection candidate | no | Не относится к Node runtime. |
+| `POSTGRES_URL` | legacy/dead | empty | `bots/client_bot/main.py` | Python DB connection candidate | no | Не относится к Node runtime. |
+| `POSTGRESQL_URL` | legacy/dead | empty | `bots/client_bot/main.py` | Python DB connection candidate | no | Не относится к Node runtime. |
+| `CLIENTS_REGISTRY_PATH` | legacy/dead | repo-local file | `bots/client_bot/main.py` | Python clients registry path | no | Не относится к Node runtime. |
+| `CLIENTS_REGISTRY_LOCK_TIMEOUT_SECONDS` | legacy/dead | empty | `shared/clients_registry.py` | Python lock tuning | no | Не относится к Node runtime. |
+| `CLIENT_GITHUB_TOKEN` | legacy/dead | empty | `bots/client_bot/main.py`, `bots/client_bot/storage.py` | Python GitHub storage integration | no | Не относится к Node runtime. |
+| `GITHUB_TOKEN` | legacy/dead | empty | `bots/client_bot/main.py`, `bots/client_bot/storage.py` | Python GitHub storage integration alias | no | Не относится к Node runtime. |
+| `CLIENT_GITHUB_REPO` | legacy/dead | empty | `bots/client_bot/main.py`, `bots/client_bot/storage.py` | Python GitHub storage integration | no | Не относится к Node runtime. |
+| `GITHUB_REPO` | legacy/dead | empty | `bots/client_bot/main.py`, `bots/client_bot/storage.py` | Python GitHub storage integration alias | no | Не относится к Node runtime. |
+| `CLIENT_GITHUB_BRANCH` | legacy/dead | `main` | `bots/client_bot/storage.py` | Python GitHub storage integration | no | Не относится к Node runtime. |
+| `GITHUB_BRANCH` | legacy/dead | `main` | `bots/client_bot/storage.py` | Python GitHub storage integration alias | no | Не относится к Node runtime. |
+| `CLIENT_TG_TIMEOUT_SECONDS` | legacy/dead | empty | `bots/client_bot/services/telegram_api.py` | Python Telegram API timeout | no | Не относится к Node runtime. |
+| `CLIENT_TG_RETRY_MAX` | legacy/dead | empty | `bots/client_bot/services/telegram_api.py` | Python Telegram retry tuning | no | Не относится к Node runtime. |
+| `CLIENT_TG_RETRY_BASE_SLEEP_SECONDS` | legacy/dead | empty | `bots/client_bot/services/telegram_api.py` | Python Telegram retry tuning | no | Не относится к Node runtime. |
+| `CLIENT_TG_QUEUE_ENABLED` | legacy/dead | `1` | `bots/client_bot/services/outgoing_queue.py` | Python outgoing queue toggle | no | Не относится к Node runtime. |
+| `CLIENT_DEEPSEEK_API_KEY` | legacy/dead | empty | `bots/client_bot/main.py`, `bots/client_bot/services/ai_service.py` | Python AI integration key | no | Не относится к Node runtime. |
 
-## 4) Scheduler-related ENV
-- `SCHEDULER_INTERVAL_MS`, `SCHEDULER_BATCH_SIZE`, `SCHEDULER_MAX_ATTEMPTS`, `SCHEDULER_STUCK_TIMEOUT_MS`, `FEEDBACK_REQUEST_DELAY_MINUTES`.
+## 3) Минимальный обязательный набор ENV для production deploy
 
-## 5) Reporting-related ENV
-- Прямых отдельных ENV для Node reporting-эндпоинтов не найдено.
-
----
-
-## 6) Legacy Python contour ENV (не обязателен для Node production path)
-Эти переменные реально читаются в `bots/**`, `services/**`, `shared/**`, но относятся к историческому/альтернативному контуру:
-
-- Токены/алиасы: `CLIENT_TELEGRAM_BOT_TOKEN`, `TELEGRAM_BOT_TOKEN`, `BOT_API_TOKEN`, `API_TOKEN`, `BOT_TOKEN`, `TOKEN`, `TELEGRAM_BOT_TOKEN_CLIENT`.
-- Webhook/WebApp: `WEBHOOK_URL`, `PUBLIC_BASE_URL`, `DOMAIN`, `WEBAPP_PATH`, `CLIENT_WEBAPP_URL`, `CLIENT_WEBAPP_ENABLED`, `WEBAPP_ENABLED`, `CLIENT_WEBAPP_SESSION_SECRET`, `CLIENT_WEBAPP_INITDATA_MAX_AGE_SECONDS`, `CLIENT_WEBAPP_TEST_MODE`, `BOT_PATH_SECRET`.
-- Режимы запуска: `CLIENT_BOT_MODE`, `CLIENT_RUN_MODE`, `RUN_MODE`, `CLIENT_SERVICE_PORT`, `CLIENT_SERVICE_HOST`.
-- Доступ/админы/чаты: `CLIENT_ADMIN_IDS`, `CLIENT_MASTERS_CHAT_ID`, `CLIENT_MASTER_CHAT_ID`, `CLIENT_MASTER_USER_IDS`, `CLIENT_MASTER_IDS`, `CLIENT_CHAT_ID`, `CLIENT_MASTER_CHAT_MODE`, `MASTER_CHAT_MODE`, `CLIENT_NOTIFY_MODE`, `MASTER_USERNAMES`, `REPORT_CHAT_IDS`, `SUPERADMIN_ID`.
-- Прочее функциональное: `CLIENT_CHANNEL_ID`, `CLIENT_POST_TARGET_ID`, `CLIENT_POST_CHAT_ID`, `CLIENT_BOT_USERNAME`, `TELEGRAM_BOT_USERNAME`, `BOT_USERNAME`, `TIMEZONE`, `LIRA_PHONE`, `LIRA_ADDRESS`, `LIRA_MAP_URL`, `SHOW_ROUTE_IMAGE`, `CLIENT_SHOW_REGLAMENT_PHRASE`, `SHOW_REGLAMENT_PHRASE`, `PIN_TEMPLATE_VERSION`, `CLIENT_AUTO_PIN_ON_START`, `CLIENT_AUTO_PIN_ON_DEPLOY`, `AUTO_PIN_ON_START`, `AUTO_PIN_ON_DEPLOY`, `CLIENT_ACTIVE_TICKET_TTL_HOURS`, `AI_FALLBACK_THRESHOLD`, `AI_FALLBACK_TTL_SECONDS`, `AI_FALLBACK_WINDOW_SECONDS`, `ROUTE_URL`.
-- Legacy persistence/integration: `DATABASE_URL`, `POSTGRES_URL`, `POSTGRESQL_URL`, `CLIENTS_REGISTRY_PATH`, `CLIENTS_REGISTRY_LOCK_TIMEOUT_SECONDS`, `CLIENT_GITHUB_TOKEN`, `GITHUB_TOKEN`, `CLIENT_GITHUB_REPO`, `GITHUB_REPO`, `CLIENT_GITHUB_BRANCH`, `GITHUB_BRANCH`, `CLIENT_TG_TIMEOUT_SECONDS`, `CLIENT_TG_RETRY_MAX`, `CLIENT_TG_RETRY_BASE_SLEEP_SECONDS`, `CLIENT_TG_QUEUE_ENABLED`.
-
-Статус legacy-контура: `legacy/dead` для текущего Node-first deploy; применим только если осознанно запускается старый Python стек.
-
----
-
-## 7) Минимальные наборы ENV
-
-### 7.1 Минимум для рабочего production deploy (Node-first, полный функционал)
 ```env
 PORT=3000
-TELEGRAM_CLIENT_BOT_TOKEN=<token>
-TELEGRAM_MASTER_BOT_TOKEN=<token>
-TELEGRAM_INTEGRATION_BOT_TOKEN=<token>
-MASTER_BOT_ADMIN_IDS=123456789
+DB_FILE_PATH=/persistent/path/db.json
 WEBAPP_URL=https://<your-domain>
-DB_FILE_PATH=data/db.json
-```
-
-### 7.2 Минимум именно для BotHost
-```env
-# PORT задаётся BotHost автоматически
-TELEGRAM_CLIENT_BOT_TOKEN=<token>
-TELEGRAM_MASTER_BOT_TOKEN=<token>
-TELEGRAM_INTEGRATION_BOT_TOKEN=<token>
+TELEGRAM_CLIENT_BOT_TOKEN=<telegram-client-token>
+TELEGRAM_MASTER_BOT_TOKEN=<telegram-master-token>
 MASTER_BOT_ADMIN_IDS=123456789
-WEBAPP_URL=https://<login>.bothost.ru
-DB_FILE_PATH=data/db.json
 ```
 
-### 7.3 ENV для мастер-чата/канала/доступа (если фича нужна)
+> Для полного текущего продукта практически нужен ещё и `TELEGRAM_INTEGRATION_BOT_TOKEN`.
+
+## 4) Минимальный обязательный набор ENV именно для BotHost
+
 ```env
+# PORT обычно задаётся BotHost автоматически
+DB_FILE_PATH=/persistent/path/db.json
+WEBAPP_URL=https://<login>.bothost.ru
+TELEGRAM_CLIENT_BOT_TOKEN=<telegram-client-token>
+TELEGRAM_MASTER_BOT_TOKEN=<telegram-master-token>
+MASTER_BOT_ADMIN_IDS=123456789
+```
+
+Рекомендуется сразу добавить:
+
+```env
+TELEGRAM_INTEGRATION_BOT_TOKEN=<telegram-integration-token>
 TELEGRAM_MASTERS_CHAT_ID=-1001234567890
 WEBAPP_TELEGRAM_CHANNEL_LINK=https://t.me/<channel>
-MASTER_BOT_ADMIN_IDS=123456789,987654321
 ```
 
-### 7.4 Рекомендуемый расширенный пример ручного заполнения
-```env
-PORT=3000
-NODE_ENV=production
+## 5) Текущий набор ENV для Telegram-контура
 
-TELEGRAM_CLIENT_BOT_TOKEN=<token>
-TELEGRAM_MASTER_BOT_TOKEN=<token>
-TELEGRAM_INTEGRATION_BOT_TOKEN=<token>
+```env
+TELEGRAM_CLIENT_BOT_TOKEN=<telegram-client-token>
+TELEGRAM_MASTER_BOT_TOKEN=<telegram-master-token>
+TELEGRAM_INTEGRATION_BOT_TOKEN=<telegram-integration-token>
 MASTER_BOT_ADMIN_IDS=123456789
 TELEGRAM_MASTERS_CHAT_ID=-1001234567890
+WEBAPP_URL=https://<login>.bothost.ru
+WEBAPP_TELEGRAM_CHANNEL_LINK=https://t.me/<channel>
+DB_FILE_PATH=/persistent/path/db.json
+```
 
+## 6) Рекомендуемый набор ENV для будущего MAX-контура
+
+```env
+MAX_ENABLED=true
+MAX_CLIENT_BOT_TOKEN=<max-client-token>
+MAX_MASTER_BOT_TOKEN=<max-master-token>
+MAX_MASTER_BOT_ADMIN_IDS=mx-admin-1,mx-admin-2
+MAX_WEBHOOK_SECRET=<secret>
+MAX_BOT_NAME=<bot-name>
+MAX_WEBAPP_URL=https://<login>.bothost.ru
+MAX_DEEPLINK_BASE_URL=https://<custom-max-base>
+```
+
+### Что из этого реально обязательно для MAX
+
+- `MAX_CLIENT_BOT_TOKEN`
+- `MAX_MASTER_BOT_TOKEN`
+- `MAX_MASTER_BOT_ADMIN_IDS`
+- `MAX_WEBHOOK_SECRET` — практически обязателен по security-модели webhook
+- `MAX_BOT_NAME` — практически обязателен для удобных deep links
+
+## 7) Пример готового набора ENV для ручного заполнения
+
+```env
+NODE_ENV=production
+DB_FILE_PATH=/persistent/path/db.json
 WEBAPP_URL=https://<login>.bothost.ru
 WEBAPP_TELEGRAM_CHANNEL_LINK=https://t.me/<channel>
 WEBAPP_DEDUPE_WINDOW_MS=45000
 
-DB_FILE_PATH=data/db.json
+TELEGRAM_CLIENT_BOT_TOKEN=<telegram-client-token>
+TELEGRAM_MASTER_BOT_TOKEN=<telegram-master-token>
+TELEGRAM_INTEGRATION_BOT_TOKEN=<telegram-integration-token>
+MASTER_BOT_ADMIN_IDS=123456789
+TELEGRAM_MASTERS_CHAT_ID=-1001234567890
 
 SCHEDULER_INTERVAL_MS=15000
 SCHEDULER_BATCH_SIZE=10
 SCHEDULER_MAX_ATTEMPTS=3
 SCHEDULER_STUCK_TIMEOUT_MS=300000
 FEEDBACK_REQUEST_DELAY_MINUTES=5
+
+MAX_ENABLED=false
+# MAX_CLIENT_BOT_TOKEN=
+# MAX_MASTER_BOT_TOKEN=
+# MAX_MASTER_BOT_ADMIN_IDS=
+# MAX_WEBHOOK_SECRET=
+# MAX_BOT_NAME=
+# MAX_WEBAPP_URL=
+# MAX_DEEPLINK_BASE_URL=
 ```
 
----
+## 8) Категории ENV по итогам аудита
 
-## 8) Drift notes (docs vs code)
-- `README.md` частично относит часть legacy/declarative ENV к runtime optional, хотя часть из них в Node path фактически не влияет.
-- `PROJECT_AUDIT.md` в целом ближе к фактическому состоянию, но содержит исторические формулировки и может устаревать по мере изменений кода.
+### Required
 
+- `PORT`
+- `DB_FILE_PATH`
+- `WEBAPP_URL`
+- `TELEGRAM_CLIENT_BOT_TOKEN`
+- `TELEGRAM_MASTER_BOT_TOKEN`
+- `MASTER_BOT_ADMIN_IDS`
+- MAX-only required when MAX is enabled: `MAX_CLIENT_BOT_TOKEN`, `MAX_MASTER_BOT_TOKEN`, `MAX_MASTER_BOT_ADMIN_IDS`
+
+### Recommended
+
+- `TELEGRAM_INTEGRATION_BOT_TOKEN`
+- `TELEGRAM_MASTERS_CHAT_ID`
+- `WEBAPP_TELEGRAM_CHANNEL_LINK` / `TELEGRAM_CHANNEL_URL`
+- `MAX_ENABLED`
+- `MAX_WEBHOOK_SECRET`
+- `MAX_WEBAPP_URL`
+- `MAX_BOT_NAME`
+
+### Optional
+
+- `NODE_ENV`
+- `WEBAPP_DEDUPE_WINDOW_MS`
+- `FEEDBACK_REQUEST_DELAY_MINUTES`
+- `SCHEDULER_INTERVAL_MS`
+- `SCHEDULER_BATCH_SIZE`
+- `SCHEDULER_MAX_ATTEMPTS`
+- `SCHEDULER_STUCK_TIMEOUT_MS`
+- `MAX_DEEPLINK_BASE_URL`
+
+### Legacy / dead / documented-only
+
+- `ONE_C_WEBHOOK_SECRET`
+- `ENABLE_INTEGRATION_WORKER`
+- `ONE_C_SYNC_ENABLED`
+- `EMAIL_IMPORT_ENABLED`
+- `INTEGRATION_RETRY_MAX`
+- `INTEGRATION_RETRY_DELAY_SECONDS`
+- `DB_URL`
+- `QUEUE_DRIVER`
+- весь Python-only ENV contour из раздела 2
+
+## 9) Короткие выводы
+
+- Для BotHost самый чувствительный ENV — `DB_FILE_PATH`, потому что от него зависит сохранность базы на фоне redeploy.
+- Для Telegram обязательны токены client/master bot и bootstrap admins.
+- Для MAX foundation уже подготовлена, но recommendations/auth и operator parity ещё не доведены до готового production-level состояния.
+- Legacy Python ENV нельзя выдавать за обязательные для текущего Node-first deploy.
