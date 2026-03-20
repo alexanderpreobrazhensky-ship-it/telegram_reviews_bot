@@ -122,6 +122,33 @@ function collectWebhookHeaders(headers = {}, rawHeaders = []) {
   };
 }
 
+function findHeaderValue(headers = {}, rawHeaders = [], targetName = '') {
+  const normalizedTarget = String(targetName || '').toLowerCase();
+  for (const [name, value] of Object.entries(headers || {})) {
+    if (String(name).toLowerCase() === normalizedTarget) return String(value || '');
+  }
+  if (Array.isArray(rawHeaders)) {
+    for (let index = 0; index < rawHeaders.length; index += 2) {
+      if (String(rawHeaders[index] || '').toLowerCase() === normalizedTarget) return String(rawHeaders[index + 1] || '');
+    }
+  }
+  return '';
+}
+
+function buildSenderSnapshot({ body, event }) {
+  return event.callback
+    ? {
+        callbackUser: body?.callback?.from || body?.callback?.sender || body?.callback?.user || body?.message_callback?.from || body?.message_callback?.sender || null,
+        callbackMessage: body?.callback?.message || body?.message_callback?.message || null
+      }
+    : event.message?.from || event.message?.sender || body?.sender || body?.user || null;
+}
+
+function resolveRecipientId(channel, primaryId, fallbackId) {
+  if (channel === 'max') return primaryId || fallbackId || null;
+  return fallbackId || primaryId || null;
+}
+
 function registerMasterBotRoutes(router) {
   router.push({ method: 'POST', path: '/telegram/master_bot/webhook', handler: (ctx) => handleMasterWebhook({ ...ctx, channel: 'telegram' }) });
   router.push({ method: 'POST', path: '/max/master_bot/webhook', handler: (ctx) => handleMasterWebhook({ ...ctx, channel: 'max' }) });
@@ -137,14 +164,15 @@ async function respondWithMessage({ channel, token, recipientId, text, payload =
   return text ? { ...payload, text } : payload;
 }
 
-async function handleMasterWebhook({ body, config, headers = {}, rawHeaders = [], pathname = '', channel = 'telegram' }) {
+async function handleMasterWebhook({ body, config, headers = {}, rawHeaders = [], pathname = '', method = 'POST', channel = 'telegram' }) {
   const headerInfo = collectWebhookHeaders(headers, rawHeaders);
   const expectedSecret = config.maxWebhookSecret || '';
-  const receivedSecret = String(headers['x-max-bot-api-secret'] || '');
+  const receivedSecret = findHeaderValue(headers, rawHeaders, 'x-max-bot-api-secret');
   const secretCheckPassed = channel !== 'max' || !expectedSecret || receivedSecret === expectedSecret;
   logger.info('master_bot webhook received', {
     channel,
     pathname,
+    method,
     headers: headerInfo.sanitized,
     hasSecretHeader: headerInfo.hasSecretHeader,
     actualSecretHeaderName: headerInfo.actualSecretHeaderName,
@@ -163,107 +191,116 @@ async function handleMasterWebhook({ body, config, headers = {}, rawHeaders = []
     return { ok: false, error: 'INVALID_WEBHOOK_SECRET', statusCode: 403 };
   }
 
-  const event = extractIncomingEvent({ body, channel });
-  const updateType = event.callback ? 'callback' : (event.message ? 'message' : 'unknown');
-  logger.info('master_bot webhook parsed update', {
-    channel,
-    pathname,
-    updateType,
-    hasMessage: Boolean(event.message),
-    hasSender: Boolean(event.message?.from || body?.sender || body?.user || event.callback),
-    userId: event.callback?.userId || event.userId || null,
-    text: String(event.callback ? event.callback.data || '' : event.text || '').slice(0, 500)
-  });
-  if (!event.message && !event.callback) {
-    logger.warn('master_bot unknown update without message/callback', { channel, pathname, body });
-    return { ok: true, action: 'ignored_unknown_update', updateType };
-  }
-
-  const token = masterToken(config, channel);
-  const masterService = createMasterService({ db, sendClientMessage: sendChannelMessage, adminIds: adminIds(config, channel), actorChannel: channel });
-  const reportingService = createReportingService({ db });
-  const channelUserId = event.callback?.userId || event.userId;
-  const fullName = event.callback?.fullName || event.fullName;
-  const actor = masterService.resolveActor({ channelUserId, telegramId: channel === 'telegram' ? channelUserId : null, maxId: channel === 'max' ? channelUserId : null, fullName });
-  const recipientId = event.callback?.chatId || event.chatId || channelUserId;
-  const sessionKey = `${channel}:${channelUserId}`;
-  const text = String(event.text || '').trim();
-
-  if (text === '/whoami') {
-    logger.info('master_bot handler branch selected', { channel, pathname, branch: '/whoami', channelUserId, recipientId });
-    return respondWithMessage({
-      channel,
-      token,
-      recipientId,
-      text: `Ваш MAX user_id: ${channelUserId || '-'}. Добавьте это значение в MAX_MASTER_BOT_ADMIN_IDS при необходимости.`,
-      payload: { ok: true, action: 'whoami', channelUserId, channel }
-    });
-  }
-
-  if (!actor) {
-    logger.warn('master_bot access denied', {
+  try {
+    const event = extractIncomingEvent({ body, channel });
+    const updateType = event.callback ? 'callback' : (event.message ? 'message' : 'unknown');
+    const senderBlock = buildSenderSnapshot({ body, event });
+    logger.info('master_bot webhook parsed update', {
       channel,
       pathname,
-      reason: 'ACTOR_NOT_FOUND_OR_NOT_ALLOWED',
-      channelUserId,
-      recipientId,
-      configuredAdminIds: adminIds(config, channel)
+      method,
+      updateType,
+      hasMessage: Boolean(event.message),
+      hasSender: Boolean(event.message?.from || body?.sender || body?.user || event.callback),
+      senderBlock,
+      userId: event.callback?.userId || event.userId || null,
+      text: String(event.callback ? event.callback.data || '' : event.text || '').slice(0, 500)
     });
-    if (recipientId) {
-      await respondWithMessage({
+    if (!event.message && !event.callback) {
+      logger.warn('master_bot unknown update without message/callback', {
+        channel,
+        pathname,
+        method,
+        reason: 'NO_MESSAGE_AND_NO_CALLBACK',
+        body
+      });
+      return { ok: true, action: 'ignored_unknown_update', updateType };
+    }
+
+    const token = masterToken(config, channel);
+    const masterService = createMasterService({ db, sendClientMessage: sendChannelMessage, adminIds: adminIds(config, channel), actorChannel: channel });
+    const reportingService = createReportingService({ db });
+    const channelUserId = event.callback?.userId || event.userId;
+    const fullName = event.callback?.fullName || event.fullName;
+    const actor = masterService.resolveActor({ channelUserId, telegramId: channel === 'telegram' ? channelUserId : null, maxId: channel === 'max' ? channelUserId : null, fullName });
+    const recipientId = resolveRecipientId(channel, channelUserId, event.callback?.chatId || event.chatId);
+    const sessionKey = `${channel}:${channelUserId}`;
+    const text = String(event.text || '').trim();
+
+    if (text === '/whoami') {
+      logger.info('master_bot handler branch selected', { channel, pathname, branch: '/whoami', channelUserId, recipientId });
+      return respondWithMessage({
         channel,
         token,
         recipientId,
-        text: `Доступ запрещён: user_id ${channelUserId || '-' } не найден в staff/admin. Используйте /whoami и добавьте ID в MAX_MASTER_BOT_ADMIN_IDS или выдайте доступ через /access_grant.`,
-        payload: { ok: false, error: 'ACCESS_DENIED', channelUserId, reason: 'ACTOR_NOT_FOUND_OR_NOT_ALLOWED' }
+        text: `Ваш MAX user_id: ${channelUserId || '-'}. Добавьте это значение в MAX_MASTER_BOT_ADMIN_IDS при необходимости.`,
+        payload: { ok: true, action: 'whoami', channelUserId, channel }
       });
     }
-    return { ok: false, error: 'ACCESS_DENIED', channelUserId, reason: 'ACTOR_NOT_FOUND_OR_NOT_ALLOWED' };
-  }
 
-  if (event.callback?.id) {
-    const data = String(event.callback.data || '');
-    logger.info('master_bot callback received', { channel, pathname, channelUserId, recipientId, data });
-    if (data.startsWith('card:')) {
-      const requestId = data.split(':')[1];
-      const card = masterService.getRequestCard(requestId);
-      await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: card ? 'Открываю карточку' : 'Заявка не найдена' });
-      if (!card) return { ok: false, error: 'REQUEST_NOT_FOUND' };
-      return respondWithMessage({ channel, token, recipientId, text: buildRequestCardText(card), payload: { ok: true, card }, extra: { reply_markup: buildRequestActionsKeyboard(requestId) } });
-    }
-    if (data.startsWith('req:')) {
-      const [, requestId, toStatus] = data.split(':');
-      if (toStatus === 'comment') {
-        sessions.set(sessionKey, { step: 'request_comment', requestId });
-        const answered = await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: 'Введите комментарий' });
-        if (!answered) logger.error('master_bot callback answer failed', { channel, callbackId: event.callback.id, recipientId });
-        return respondWithMessage({ channel, token, recipientId, text: `Введите внутренний комментарий по заявке ${requestId}` });
-      }
-      if (toStatus === 'lost') {
-        sessions.set(sessionKey, { step: 'lost_reason', requestId });
-        const answered = await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: 'Укажите причину' });
-        if (!answered) logger.error('master_bot callback answer failed', { channel, callbackId: event.callback.id, recipientId });
-        return respondWithMessage({ channel, token, recipientId, text: `Укажите причину для статуса "Потеряно" по заявке ${requestId}` });
-      }
-      const result = masterService.changeRequestStatus({ requestId, toStatus, actorId: actor.id, actorRole: actor.role });
-      if (!result?.error && toStatus === 'waiting_data') {
-        await masterService.requestClientClarification({
-          requestId,
-          actorId: actor.id,
-          actorRole: actor.role,
-          text: 'Пожалуйста, уточните недостающие данные по вашему обращению.',
-          telegramClientBotToken: config.telegramClientBotToken,
-          maxClientBotToken: config.maxClientBotToken
+    if (!actor) {
+      logger.warn('master_bot access denied', {
+        channel,
+        pathname,
+        reason: 'ACTOR_NOT_FOUND_OR_NOT_ALLOWED',
+        channelUserId,
+        recipientId,
+        configuredAdminIds: adminIds(config, channel)
+      });
+      if (recipientId) {
+        await respondWithMessage({
+          channel,
+          token,
+          recipientId,
+          text: `Доступ запрещён: user_id ${channelUserId || '-'} не найден в staff/admin. Используйте /whoami и добавьте ID в MAX_MASTER_BOT_ADMIN_IDS или выдайте доступ через /access_grant.`,
+          payload: { ok: false, error: 'ACCESS_DENIED', channelUserId, reason: 'ACTOR_NOT_FOUND_OR_NOT_ALLOWED' }
         });
       }
-      const answered = await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: result?.error ? 'Ошибка' : 'Готово' });
-      if (!answered) logger.error('master_bot callback answer failed', { channel, callbackId: event.callback.id, recipientId });
-      return respondWithMessage({ channel, token, recipientId, text: result?.error ? `Ошибка: ${result.error}` : `Статус заявки ${requestId}: ${toStatus}`, payload: { ok: !result?.error, ...result } });
+      return { ok: false, error: 'ACCESS_DENIED', channelUserId, reason: 'ACTOR_NOT_FOUND_OR_NOT_ALLOWED' };
     }
-  }
 
-  logger.info('master_bot incoming text', { channel, channelUserId, recipientId, text });
-  try {
+    if (event.callback?.id) {
+      const data = String(event.callback.data || '');
+      logger.info('master_bot callback received', { channel, pathname, channelUserId, recipientId, data });
+      if (data.startsWith('card:')) {
+        const requestId = data.split(':')[1];
+        const card = masterService.getRequestCard(requestId);
+        await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: card ? 'Открываю карточку' : 'Заявка не найдена' });
+        if (!card) return { ok: false, error: 'REQUEST_NOT_FOUND' };
+        return respondWithMessage({ channel, token, recipientId, text: buildRequestCardText(card), payload: { ok: true, card }, extra: { reply_markup: buildRequestActionsKeyboard(requestId) } });
+      }
+      if (data.startsWith('req:')) {
+        const [, requestId, toStatus] = data.split(':');
+        if (toStatus === 'comment') {
+          sessions.set(sessionKey, { step: 'request_comment', requestId });
+          const answered = await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: 'Введите комментарий' });
+          if (!answered) logger.error('master_bot callback answer failed', { channel, callbackId: event.callback.id, recipientId });
+          return respondWithMessage({ channel, token, recipientId, text: `Введите внутренний комментарий по заявке ${requestId}` });
+        }
+        if (toStatus === 'lost') {
+          sessions.set(sessionKey, { step: 'lost_reason', requestId });
+          const answered = await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: 'Укажите причину' });
+          if (!answered) logger.error('master_bot callback answer failed', { channel, callbackId: event.callback.id, recipientId });
+          return respondWithMessage({ channel, token, recipientId, text: `Укажите причину для статуса "Потеряно" по заявке ${requestId}` });
+        }
+        const result = masterService.changeRequestStatus({ requestId, toStatus, actorId: actor.id, actorRole: actor.role });
+        if (!result?.error && toStatus === 'waiting_data') {
+          await masterService.requestClientClarification({
+            requestId,
+            actorId: actor.id,
+            actorRole: actor.role,
+            text: 'Пожалуйста, уточните недостающие данные по вашему обращению.',
+            telegramClientBotToken: config.telegramClientBotToken,
+            maxClientBotToken: config.maxClientBotToken
+          });
+        }
+        const answered = await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: result?.error ? 'Ошибка' : 'Готово' });
+        if (!answered) logger.error('master_bot callback answer failed', { channel, callbackId: event.callback.id, recipientId });
+        return respondWithMessage({ channel, token, recipientId, text: result?.error ? `Ошибка: ${result.error}` : `Статус заявки ${requestId}: ${toStatus}`, payload: { ok: !result?.error, ...result } });
+      }
+    }
+
+    logger.info('master_bot incoming text', { channel, channelUserId, recipientId, text });
     if (text === '/start') {
       logger.info('master_bot handler branch selected', { channel, pathname, branch: '/start', channelUserId, recipientId, actorRole: actor.role });
       const baseKeyboard = [['Новые заявки', 'В работе'], ['Поиск', 'Quality Cases'], ['/help']];
@@ -435,8 +472,22 @@ async function handleMasterWebhook({ body, config, headers = {}, rawHeaders = []
     logger.info('master_bot handler branch selected', { channel, pathname, branch: 'fallback', channelUserId, recipientId, actorRole: actor.role });
     return respondWithMessage({ channel, token, recipientId, text: 'Используйте /help для списка команд.', payload: { ok: true, action: 'fallback' } });
   } catch (error) {
-    logger.error('master_bot handler error', { channel, channelUserId, recipientId, text, error: String(error?.message || error) });
-    return respondWithMessage({ channel, token, recipientId, text: 'Внутренняя ошибка master bot.', payload: { ok: false, error: 'MASTER_BOT_ERROR' } });
+    logger.error('master_bot handler error', { channel, pathname, method, error: String(error?.message || error), body });
+    const fallbackUserId = String(
+      body?.message?.from?.user_id || body?.message?.from?.id || body?.callback?.from?.user_id || body?.callback?.from?.id || body?.user?.user_id || body?.user?.id || ''
+    );
+    const fallbackChatId = body?.message?.chat_id || body?.message?.chat?.id || body?.callback?.message?.chat_id || body?.callback?.message?.chat?.id || null;
+    const recipientId = resolveRecipientId(channel, fallbackUserId, fallbackChatId);
+    if (recipientId) {
+      await respondWithMessage({
+        channel,
+        token: masterToken(config, channel),
+        recipientId,
+        text: 'Внутренняя ошибка master bot.',
+        payload: { ok: false, error: 'MASTER_BOT_ERROR' }
+      });
+    }
+    return { ok: false, error: 'MASTER_BOT_ERROR', statusCode: 500 };
   }
 }
 
