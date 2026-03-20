@@ -103,6 +103,24 @@ function ensureStore() {
     }
   }
 
+  for (const client of store.clients || []) {
+    if (!Object.hasOwn(client, 'maxId')) {
+      client.maxId = null;
+      changed = true;
+    }
+    if (!client.preferredChannel) {
+      client.preferredChannel = client.maxId ? 'max' : 'telegram';
+      changed = true;
+    }
+  }
+
+  for (const staffUser of store.staffUsers || []) {
+    if (!Object.hasOwn(staffUser, 'maxId')) {
+      staffUser.maxId = null;
+      changed = true;
+    }
+  }
+
   if (changed) {
     fs.writeFileSync(DB_PATH, JSON.stringify(store, null, 2));
   }
@@ -119,16 +137,17 @@ function writeStore(store) {
   fs.renameSync(tempPath, DB_PATH);
 }
 
-function upsertClient({ fullName, phone, telegramId }) {
+function upsertClient({ fullName, phone, telegramId, maxId = null, preferredChannel = null }) {
   const store = readStore();
-  let client = store.clients.find((c) => (telegramId && c.telegramId === telegramId) || (phone && c.phone === phone));
+  let client = store.clients.find((c) => (telegramId && c.telegramId === telegramId) || (maxId && c.maxId === maxId) || (phone && c.phone === phone));
   if (!client) {
     client = {
       id: crypto.randomUUID(),
       fullName,
       phone,
       telegramId: telegramId || null,
-      preferredChannel: 'telegram',
+      maxId: maxId || null,
+      preferredChannel: preferredChannel || (maxId ? 'max' : 'telegram'),
       externalIds: {},
       sourceSystem: 'system',
       sourceOfTruth: 'local',
@@ -142,6 +161,8 @@ function upsertClient({ fullName, phone, telegramId }) {
     client.fullName = fullName || client.fullName;
     client.phone = phone || client.phone;
     client.telegramId = telegramId || client.telegramId;
+    client.maxId = maxId || client.maxId || null;
+    client.preferredChannel = preferredChannel || client.preferredChannel || (client.maxId ? 'max' : 'telegram');
     client.updatedAt = nowIso();
   }
   writeStore(store);
@@ -216,9 +237,18 @@ function createRequest({ clientId, vehicleId, requestType, description, sourceCh
   return request;
 }
 
-function createCommunicationEvent({ clientId, requestId, source, payload }) {
+function createCommunicationEvent({ clientId, requestId, source, payload, channel = null, direction = null }) {
   const store = readStore();
-  const event = { id: crypto.randomUUID(), clientId: clientId || null, requestId: requestId || null, source, payload, createdAt: nowIso() };
+  const event = {
+    id: crypto.randomUUID(),
+    clientId: clientId || null,
+    requestId: requestId || null,
+    source,
+    channel: channel || source || null,
+    direction: direction || null,
+    payload,
+    createdAt: nowIso()
+  };
   store.communicationEvents.push(event);
   writeStore(store);
   return event;
@@ -232,21 +262,32 @@ function recordMasterAction({ actorId, role, action, requestId = null, clientId 
   return item;
 }
 
-function resolveStaffUser({ telegramId, fullName, adminTelegramIds = [] }) {
+function resolveStaffUser({ channel = 'telegram', channelUserId = '', telegramId, maxId, fullName, adminIds = [], adminTelegramIds = [] }) {
   const store = readStore();
-  const tid = String(telegramId || '').trim();
-  if (!tid) return null;
-  const adminSet = new Set((adminTelegramIds || []).map((id) => String(id).trim()).filter(Boolean));
-  const isEnvAdmin = adminSet.has(tid);
-  let user = store.staffUsers.find((u) => u.telegramId === tid) || null;
+  const resolvedChannel = channel === 'max' ? 'max' : 'telegram';
+  const externalId = String(channelUserId || (resolvedChannel === 'max' ? maxId : telegramId) || '').trim();
+  if (!externalId) return null;
+  const adminSet = new Set([...(adminIds || []), ...(resolvedChannel === 'telegram' ? adminTelegramIds : [])].map((id) => String(id).trim()).filter(Boolean));
+  const isEnvAdmin = adminSet.has(externalId);
+  const field = resolvedChannel === 'max' ? 'maxId' : 'telegramId';
+  let user = store.staffUsers.find((u) => String(u[field] || '') === externalId) || null;
 
   if (isEnvAdmin) {
     if (!user) {
-      user = { id: crypto.randomUUID(), telegramId: tid, fullName: fullName || `admin_${tid}`, role: 'admin', createdAt: nowIso(), updatedAt: nowIso() };
+      user = {
+        id: crypto.randomUUID(),
+        telegramId: resolvedChannel === 'telegram' ? externalId : null,
+        maxId: resolvedChannel === 'max' ? externalId : null,
+        fullName: fullName || `admin_${externalId}`,
+        role: 'admin',
+        createdAt: nowIso(),
+        updatedAt: nowIso()
+      };
       store.staffUsers.push(user);
       writeStore(store);
-    } else if (user.role !== 'admin') {
+    } else if (user.role !== 'admin' || (fullName && user.fullName !== fullName)) {
       user.role = 'admin';
+      user[field] = externalId;
       user.updatedAt = nowIso();
       if (fullName) user.fullName = fullName;
       writeStore(store);
@@ -255,8 +296,9 @@ function resolveStaffUser({ telegramId, fullName, adminTelegramIds = [] }) {
   }
 
   if (!user) return null;
-  if (fullName && fullName !== user.fullName) {
-    user.fullName = fullName;
+  if (user[field] !== externalId || (fullName && fullName !== user.fullName)) {
+    user[field] = externalId;
+    user.fullName = fullName || user.fullName;
     user.updatedAt = nowIso();
     writeStore(store);
   }
@@ -268,21 +310,32 @@ function listStaffUsers() {
   return [...store.staffUsers].sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
 }
 
-function createStaffUser({ telegramId, fullName, role, actorId = null, actorRole = null }) {
+function createStaffUser({ channel = 'telegram', channelUserId = '', telegramId, maxId, fullName, role, actorId = null, actorRole = null }) {
   const allowedRoles = new Set(['master', 'manager']);
   if (!allowedRoles.has(role)) return { error: 'INVALID_ROLE' };
-  const tid = String(telegramId || '').trim();
-  if (!tid) return { error: 'TELEGRAM_ID_REQUIRED' };
+  const resolvedChannel = channel === 'max' ? 'max' : 'telegram';
+  const externalId = String(channelUserId || (resolvedChannel === 'max' ? maxId : telegramId) || '').trim();
+  if (!externalId) return { error: resolvedChannel === 'max' ? 'MAX_ID_REQUIRED' : 'TELEGRAM_ID_REQUIRED' };
 
   const store = readStore();
-  let user = store.staffUsers.find((item) => item.telegramId === tid) || null;
+  const field = resolvedChannel === 'max' ? 'maxId' : 'telegramId';
+  let user = store.staffUsers.find((item) => String(item[field] || '') === externalId) || null;
   if (user) {
     if (user.role === 'admin') return { error: 'ADMIN_ROLE_IMMUTABLE' };
     user.role = role;
-    user.fullName = fullName || user.fullName || `staff_${tid}`;
+    user[field] = externalId;
+    user.fullName = fullName || user.fullName || `staff_${externalId}`;
     user.updatedAt = nowIso();
   } else {
-    user = { id: crypto.randomUUID(), telegramId: tid, fullName: fullName || `staff_${tid}`, role, createdAt: nowIso(), updatedAt: nowIso() };
+    user = {
+      id: crypto.randomUUID(),
+      telegramId: resolvedChannel === 'telegram' ? externalId : null,
+      maxId: resolvedChannel === 'max' ? externalId : null,
+      fullName: fullName || `staff_${externalId}`,
+      role,
+      createdAt: nowIso(),
+      updatedAt: nowIso()
+    };
     store.staffUsers.push(user);
   }
 
@@ -293,7 +346,7 @@ function createStaffUser({ telegramId, fullName, role, actorId = null, actorRole
     action: 'staff_user_upserted',
     requestId: null,
     clientId: null,
-    payload: { staffUserId: user.id, telegramId: tid, role },
+    payload: { staffUserId: user.id, channel: resolvedChannel, channelUserId: externalId, role },
     createdAt: nowIso()
   });
 
@@ -301,11 +354,13 @@ function createStaffUser({ telegramId, fullName, role, actorId = null, actorRole
   return { user };
 }
 
-function revokeStaffUser({ telegramId, actorId = null, actorRole = null }) {
-  const tid = String(telegramId || '').trim();
-  if (!tid) return { error: 'TELEGRAM_ID_REQUIRED' };
+function revokeStaffUser({ channel = 'telegram', channelUserId = '', telegramId, maxId, actorId = null, actorRole = null }) {
+  const resolvedChannel = channel === 'max' ? 'max' : 'telegram';
+  const externalId = String(channelUserId || (resolvedChannel === 'max' ? maxId : telegramId) || '').trim();
+  if (!externalId) return { error: resolvedChannel === 'max' ? 'MAX_ID_REQUIRED' : 'TELEGRAM_ID_REQUIRED' };
   const store = readStore();
-  const index = store.staffUsers.findIndex((item) => item.telegramId === tid);
+  const field = resolvedChannel === 'max' ? 'maxId' : 'telegramId';
+  const index = store.staffUsers.findIndex((item) => String(item[field] || '') === externalId);
   if (index === -1) return { error: 'STAFF_USER_NOT_FOUND' };
   if (store.staffUsers[index].role === 'admin') return { error: 'ADMIN_ROLE_IMMUTABLE' };
   const [removed] = store.staffUsers.splice(index, 1);
@@ -316,18 +371,18 @@ function revokeStaffUser({ telegramId, actorId = null, actorRole = null }) {
     action: 'staff_user_revoked',
     requestId: null,
     clientId: null,
-    payload: { staffUserId: removed.id, telegramId: tid },
+    payload: { staffUserId: removed.id, channel: resolvedChannel, channelUserId: externalId },
     createdAt: nowIso()
   });
   writeStore(store);
   return { user: removed };
 }
 
-function listRequests({ phone, telegramId, statuses }) {
+function listRequests({ phone, telegramId, maxId, statuses }) {
   const store = readStore();
   let requests = store.requests;
-  if (phone || telegramId) {
-    const client = store.clients.find((c) => (phone && c.phone === phone) || (telegramId && c.telegramId === telegramId));
+  if (phone || telegramId || maxId) {
+    const client = store.clients.find((c) => (phone && c.phone === phone) || (telegramId && c.telegramId === telegramId) || (maxId && c.maxId === maxId));
     if (!client) return [];
     requests = requests.filter((r) => r.clientId === client.id);
   }
@@ -337,12 +392,12 @@ function listRequests({ phone, telegramId, statuses }) {
   return requests.map((r) => ({ ...r, summary: r.description.slice(0, 120) }));
 }
 
-function listRecommendations({ phone, telegramId, clientId = null, includeHistory = false, requireSynced = false }) {
+function listRecommendations({ phone, telegramId, maxId, clientId = null, includeHistory = false, requireSynced = false }) {
   const store = readStore();
   if (requireSynced && !store.recommendationSync?.lastSyncAt) return [];
   let resolvedClientId = clientId;
-  if (!resolvedClientId && (phone || telegramId)) {
-    const client = store.clients.find((c) => (phone && c.phone === phone) || (telegramId && c.telegramId === telegramId));
+  if (!resolvedClientId && (phone || telegramId || maxId)) {
+    const client = store.clients.find((c) => (phone && c.phone === phone) || (telegramId && c.telegramId === telegramId) || (maxId && c.maxId === maxId));
     resolvedClientId = client?.id || null;
   }
   return store.recommendations.filter((r) => {
@@ -525,6 +580,7 @@ function getClientCard(clientId) {
   return {
     client,
     telegramBinding: client.telegramId || null,
+    maxBinding: client.maxId || null,
     vehicles: store.vehicles.filter((v) => v.clientId === clientId),
     requests: store.requests.filter((r) => r.clientId === clientId),
     recommendations: store.recommendations.filter((r) => !r.clientId || r.clientId === clientId),
@@ -578,6 +634,11 @@ function createQualityCase({ requestId, status = 'new', assignedTo = null, summa
 function findClientByTelegramId(telegramId) {
   const store = readStore();
   return store.clients.find((item) => item.telegramId === String(telegramId || '')) || null;
+}
+
+function findClientByMaxId(maxId) {
+  const store = readStore();
+  return store.clients.find((item) => item.maxId === String(maxId || '')) || null;
 }
 
 function findRequestById(requestId) {
@@ -949,6 +1010,7 @@ module.exports = {
   addQualityCaseComment,
   getQualityCaseCard,
   findClientByTelegramId,
+  findClientByMaxId,
   findRequestById,
   findRecentDuplicateRequest,
   createFeedback,

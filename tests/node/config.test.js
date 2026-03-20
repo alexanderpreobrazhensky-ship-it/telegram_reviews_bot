@@ -12,6 +12,9 @@ test('config loads defaults', () => {
   assert.equal(Object.hasOwn(config, 'integrationRetryMax'), true);
   assert.equal(Object.hasOwn(config, 'oneCSyncEnabled'), true);
   assert.equal(Object.hasOwn(config, 'emailImportEnabled'), true);
+  assert.equal(Object.hasOwn(config, 'maxEnabled'), true);
+  assert.equal(Object.hasOwn(config, 'maxClientBotToken'), true);
+  assert.equal(Object.hasOwn(config, 'maxMasterBotAdminIds'), true);
 });
 
 

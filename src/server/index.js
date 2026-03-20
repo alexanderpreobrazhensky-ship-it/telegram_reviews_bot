@@ -41,7 +41,12 @@ function serveFile(res, filePath, contentType) {
 }
 
 function injectConfigIntoHtml(html, config) {
-  const script = `<script>window.__WEBAPP_TELEGRAM_CHANNEL_LINK__=${JSON.stringify(config.webappTelegramChannelLink || '')};</script>`;
+  const script = `<script>window.__WEBAPP_TELEGRAM_CHANNEL_LINK__=${JSON.stringify(config.webappTelegramChannelLink || '')};window.__WEBAPP_RUNTIME__=${JSON.stringify({
+    webAppUrl: config.webAppUrl || '',
+    maxWebAppUrl: config.maxWebAppUrl || config.webAppUrl || '',
+    maxBotName: config.maxBotName || '',
+    maxDeepLinkBaseUrl: config.maxDeepLinkBaseUrl || ''
+  })};</script>`;
   return html.includes('</body>') ? html.replace('</body>', `${script}</body>`) : `${html}${script}`;
 }
 
@@ -105,7 +110,13 @@ async function duplicateToMastersChat({ config, request, payload }) {
 
 function createClientRequest({ body, type, sourceChannel = 'webapp' }) {
   const normalizedPhone = normalizePhone10(body.phone);
-  const client = db.upsertClient({ fullName: body.fullName, phone: normalizedPhone, telegramId: body.telegramId ? String(body.telegramId) : null });
+  const client = db.upsertClient({
+    fullName: body.fullName,
+    phone: normalizedPhone,
+    telegramId: body.telegramId ? String(body.telegramId) : null,
+    maxId: body.maxId ? String(body.maxId) : null,
+    preferredChannel: sourceChannel.startsWith('max_') ? 'max' : (body.telegramId ? 'telegram' : null)
+  });
   const vehicle = db.upsertVehicle({
     clientId: client.id,
     brand: body.brand,
@@ -128,7 +139,14 @@ function createClientRequest({ body, type, sourceChannel = 'webapp' }) {
       changeDetails: body.changeDetails || ''
     }
   });
-  db.createCommunicationEvent({ clientId: client.id, requestId: request.id, source: sourceChannel === 'webapp' ? 'webapp' : 'bot', payload: { action: 'request_created', type } });
+  db.createCommunicationEvent({
+    clientId: client.id,
+    requestId: request.id,
+    source: sourceChannel === 'webapp' || sourceChannel === 'max_webapp' ? 'webapp' : 'bot',
+    channel: sourceChannel,
+    direction: 'inbound',
+    payload: { action: 'request_created', type }
+  });
   return { client, vehicle, request };
 }
 
@@ -201,7 +219,8 @@ function createServer({ config, logger }) {
       });
       if (duplicate) return sendJson(res, 200, { ...duplicate, deduplicated: true });
 
-      const created = createClientRequest({ body, type }).request;
+      const sourceChannel = body.sourceChannel === 'max_webapp' ? 'max_webapp' : 'webapp';
+      const created = createClientRequest({ body, type, sourceChannel }).request;
       await duplicateToMastersChat({ config, request: created, payload: body });
       if (created.requestType === REQUEST_TYPES.COMPLAINT) {
         await duplicateToMastersChat({ config, request: created, payload: body });
@@ -210,7 +229,7 @@ function createServer({ config, logger }) {
     }
 
     if (req.method === 'GET' && pathname === '/api/client/requests') {
-      return sendJson(res, 200, { items: db.listRequests({ phone: requestUrl.searchParams.get('phone'), telegramId: requestUrl.searchParams.get('telegramId') }) });
+      return sendJson(res, 200, { items: db.listRequests({ phone: requestUrl.searchParams.get('phone'), telegramId: requestUrl.searchParams.get('telegramId'), maxId: requestUrl.searchParams.get('maxId') }) });
     }
 
     if (req.method === 'GET' && pathname === '/api/client/recommendations') {
@@ -235,7 +254,7 @@ function createServer({ config, logger }) {
         vehicleId: null,
         requestType: REQUEST_TYPES.SERVICE,
         description: `Клиент хочет устранить рекомендацию: ${updated.text}`,
-        sourceChannel: 'webapp',
+        sourceChannel: body.sourceChannel === 'max_webapp' ? 'max_webapp' : 'webapp',
         payload: { recommendationId: updated.id, recommendationInterest: true }
       });
       await duplicateToMastersChat({ config, request, payload: { phone: client.phone, vin: '', description: request.description } });
@@ -345,9 +364,9 @@ function createServer({ config, logger }) {
     if (matched) {
       const { body, invalidJson } = await readBody(req);
       if (invalidJson) return sendJson(res, 400, { error: 'Invalid JSON payload' });
-      const payload = matched.handler ? await matched.handler({ body, config }) : { accepted: true };
+      const payload = matched.handler ? await matched.handler({ body, config, headers: req.headers, pathname }) : { accepted: true };
       logger.info(`Accepted route: ${req.method} ${pathname}`);
-      return sendJson(res, 200, payload);
+      return sendJson(res, payload?.statusCode || 200, payload);
     }
 
     return sendJson(res, 404, { error: 'Not found' });

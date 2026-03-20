@@ -23,6 +23,10 @@ function loadConfig() {
     .split(',')
     .map((id) => id.trim())
     .filter(Boolean);
+  const maxMasterBotAdminIds = String(process.env.MAX_MASTER_BOT_ADMIN_IDS || '')
+    .split(',')
+    .map((id) => id.trim())
+    .filter(Boolean);
 
   return {
     nodeEnv: process.env.NODE_ENV || 'development',
@@ -30,6 +34,13 @@ function loadConfig() {
     telegramClientBotToken: process.env.TELEGRAM_CLIENT_BOT_TOKEN || '',
     telegramMasterBotToken: process.env.TELEGRAM_MASTER_BOT_TOKEN || '',
     telegramIntegrationBotToken: process.env.TELEGRAM_INTEGRATION_BOT_TOKEN || '',
+    maxEnabled: parseBoolean(process.env.MAX_ENABLED, false),
+    maxClientBotToken: process.env.MAX_CLIENT_BOT_TOKEN || '',
+    maxMasterBotToken: process.env.MAX_MASTER_BOT_TOKEN || '',
+    maxWebhookSecret: process.env.MAX_WEBHOOK_SECRET || '',
+    maxWebAppUrl: process.env.MAX_WEBAPP_URL || process.env.WEBAPP_URL || 'https://example.com',
+    maxBotName: process.env.MAX_BOT_NAME || '',
+    maxDeepLinkBaseUrl: process.env.MAX_DEEPLINK_BASE_URL || '',
     dbUrl: process.env.DB_URL || 'postgres://localhost:5432/telegram_reviews',
     queueDriver: process.env.QUEUE_DRIVER || 'memory',
     oneCWebhookSecret: process.env.ONE_C_WEBHOOK_SECRET || '',
@@ -47,7 +58,8 @@ function loadConfig() {
     webappDedupeWindowMs,
     telegramMastersChatId: process.env.TELEGRAM_MASTERS_CHAT_ID || '',
     webappTelegramChannelLink: process.env.TELEGRAM_CHANNEL_URL || process.env.WEBAPP_TELEGRAM_CHANNEL_LINK || '',
-    masterBotAdminIds
+    masterBotAdminIds,
+    maxMasterBotAdminIds
   };
 }
 

@@ -164,13 +164,13 @@ function buildMasterMetrics(store, filters, requestsMetrics) {
 }
 
 function normalizeSource(channel) {
-  const known = new Set(['telegram_chat', 'webapp', 'email', 'manual_import', 'one_c']);
+  const known = new Set(['telegram_chat', 'webapp', 'max_chat', 'max_webapp', 'email', 'manual_import', 'one_c']);
   return known.has(channel) ? channel : 'other';
 }
 
 function buildSourceMetrics(store, filters) {
   const requests = filterRequests(store, filters);
-  const sourceStats = { telegram_chat: 0, webapp: 0, email: 0, manual_import: 0, one_c: 0, other: 0 };
+  const sourceStats = { telegram_chat: 0, webapp: 0, max_chat: 0, max_webapp: 0, email: 0, manual_import: 0, one_c: 0, other: 0 };
   for (const request of requests) {
     sourceStats[normalizeSource(request.sourceChannel || request.sourceSystem)] += 1;
   }

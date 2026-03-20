@@ -53,6 +53,7 @@ const QUALITY_CASE_STATUSES = Object.freeze({
 const SOURCE_SYSTEM = Object.freeze({
   PLATFORM: 'platform',
   TELEGRAM: 'telegram',
+  MAX: 'max',
   WEBAPP: 'webapp',
   EMAIL: 'email',
   ONE_C: 'one_c'
