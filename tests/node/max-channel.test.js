@@ -4,6 +4,8 @@ const { createServer } = require('../../src/server');
 const { loadConfig } = require('../../src/infrastructure/config');
 const logger = require('../../src/infrastructure/logging/logger');
 const db = require('../../src/infrastructure/db');
+const { handleClientWebhook } = require('../../src/interfaces/client_bot');
+const { handleMasterWebhook } = require('../../src/interfaces/master_bot');
 
 async function withServer(run, env = {}) {
   db.resetStore();
@@ -34,6 +36,25 @@ async function post(base, path, body, headers = {}) {
     body: JSON.stringify(body)
   });
   return { response, data: await response.json() };
+}
+
+async function withMockedFetch(run) {
+  const calls = [];
+  const originalFetch = global.fetch;
+  global.fetch = async (url, options = {}) => {
+    calls.push({ url: String(url), options });
+    return {
+      ok: true,
+      status: 200,
+      text: async () => '',
+      json: async () => ({ ok: true })
+    };
+  };
+  try {
+    await run(calls);
+  } finally {
+    global.fetch = originalFetch;
+  }
 }
 
 test('MAX client bot supports start help quick flow and stores max_chat source', async () => {
@@ -105,4 +126,83 @@ test('MAX master bot enforces access, works with roles and sends clarification f
     assert.equal(state.staffUsers.some((item) => item.maxId === 'mx-master-2' && item.role === 'master'), true);
     assert.equal(state.communicationEvents.some((item) => item.payload?.action === 'client_clarification_requested' && item.channel === 'max' && item.direction === 'outbound'), true);
   }, { MAX_WEBHOOK_SECRET: 'secret-max', MAX_MASTER_BOT_ADMIN_IDS: 'mx-admin-1' });
+});
+
+test('MAX webhook secret check reads env secret and accepts header name casing from runtime', async () => {
+  await withMockedFetch(async () => {
+    const config = loadConfig();
+    config.maxWebhookSecret = 'secret-max';
+    config.maxClientBotToken = 'max-client-token';
+    config.maxMasterBotToken = 'max-master-token';
+
+    const clientResult = await handleClientWebhook({
+      body: { message: { body: { text: '/help' }, chat_id: 'chat-1', from: { user_id: 'mx-client-1', first_name: 'Max' } } },
+      config,
+      headers: { 'X-Max-Bot-Api-Secret': 'secret-max' },
+      rawHeaders: ['X-Max-Bot-Api-Secret', 'secret-max'],
+      pathname: '/max/client_bot/webhook',
+      method: 'POST',
+      channel: 'max'
+    });
+    assert.equal(clientResult.ok, true);
+    assert.equal(clientResult.action, 'help');
+
+    const masterResult = await handleMasterWebhook({
+      body: { message: { body: { text: '/whoami' }, chat_id: 'chat-2', from: { user_id: 'mx-master-1', first_name: 'Master' } } },
+      config,
+      headers: { 'X-Max-Bot-Api-Secret': 'secret-max' },
+      rawHeaders: ['X-Max-Bot-Api-Secret', 'secret-max'],
+      pathname: '/max/master_bot/webhook',
+      method: 'POST',
+      channel: 'max'
+    });
+    assert.equal(masterResult.ok, true);
+    assert.equal(masterResult.action, 'whoami');
+    assert.equal(masterResult.channelUserId, 'mx-master-1');
+  });
+});
+
+test('MAX outbound replies target user_id instead of chat_id for client and master bots', async () => {
+  await withMockedFetch(async (calls) => {
+    const config = {
+      maxWebhookSecret: 'secret-max',
+      maxClientBotToken: 'max-client-token',
+      maxMasterBotToken: 'max-master-token',
+      maxMasterBotAdminIds: ['mx-admin-1'],
+      masterBotAdminIds: [],
+      webAppUrl: 'https://example.com',
+      maxWebAppUrl: 'https://example.com/max',
+      maxBotName: 'test_bot',
+      maxDeepLinkBaseUrl: 'https://max.ru/test_bot'
+    };
+
+    const clientResult = await handleClientWebhook({
+      body: { message: { body: { text: '/start' }, chat_id: 'chat-123', from: { user_id: 'mx-client-42', first_name: 'Client' } } },
+      config,
+      headers: { 'x-max-bot-api-secret': 'secret-max' },
+      rawHeaders: ['x-max-bot-api-secret', 'secret-max'],
+      pathname: '/max/client_bot/webhook',
+      method: 'POST',
+      channel: 'max'
+    });
+    assert.equal(clientResult.action, 'start');
+
+    const masterResult = await handleMasterWebhook({
+      body: { message: { body: { text: '/whoami' }, chat_id: 'chat-999', from: { user_id: 'mx-admin-1', first_name: 'Admin' } } },
+      config,
+      headers: { 'x-max-bot-api-secret': 'secret-max' },
+      rawHeaders: ['x-max-bot-api-secret', 'secret-max'],
+      pathname: '/max/master_bot/webhook',
+      method: 'POST',
+      channel: 'max'
+    });
+    assert.equal(masterResult.action, 'whoami');
+
+    const messageUrls = calls.map((item) => item.url).filter((value) => value.includes('/messages?user_id='));
+    assert.equal(messageUrls.length >= 2, true);
+    assert.equal(messageUrls.some((value) => value.includes('user_id=mx-client-42')), true);
+    assert.equal(messageUrls.some((value) => value.includes('user_id=mx-admin-1')), true);
+    assert.equal(messageUrls.some((value) => value.includes('user_id=chat-123')), false);
+    assert.equal(messageUrls.some((value) => value.includes('user_id=chat-999')), false);
+  });
 });

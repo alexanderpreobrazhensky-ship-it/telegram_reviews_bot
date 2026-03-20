@@ -111,14 +111,42 @@ function collectWebhookHeaders(headers = {}, rawHeaders = []) {
   };
 }
 
-async function handleClientWebhook({ body, config, headers = {}, rawHeaders = [], pathname = '', channel = 'telegram' }) {
+function findHeaderValue(headers = {}, rawHeaders = [], targetName = '') {
+  const normalizedTarget = String(targetName || '').toLowerCase();
+  for (const [name, value] of Object.entries(headers || {})) {
+    if (String(name).toLowerCase() === normalizedTarget) return String(value || '');
+  }
+  if (Array.isArray(rawHeaders)) {
+    for (let index = 0; index < rawHeaders.length; index += 2) {
+      if (String(rawHeaders[index] || '').toLowerCase() === normalizedTarget) return String(rawHeaders[index + 1] || '');
+    }
+  }
+  return '';
+}
+
+function buildSenderSnapshot({ body, event }) {
+  return event.callback
+    ? {
+        callbackUser: body?.callback?.from || body?.callback?.sender || body?.callback?.user || body?.message_callback?.from || body?.message_callback?.sender || null,
+        callbackMessage: body?.callback?.message || body?.message_callback?.message || null
+      }
+    : event.message?.from || event.message?.sender || body?.sender || body?.user || null;
+}
+
+function resolveRecipientId(channel, primaryId, fallbackId) {
+  if (channel === 'max') return primaryId || fallbackId || null;
+  return fallbackId || primaryId || null;
+}
+
+async function handleClientWebhook({ body, config, headers = {}, rawHeaders = [], pathname = '', method = 'POST', channel = 'telegram' }) {
   const headerInfo = collectWebhookHeaders(headers, rawHeaders);
   const expectedSecret = config.maxWebhookSecret || '';
-  const receivedSecret = String(headers['x-max-bot-api-secret'] || '');
+  const receivedSecret = findHeaderValue(headers, rawHeaders, 'x-max-bot-api-secret');
   const secretCheckPassed = channel !== 'max' || !expectedSecret || receivedSecret === expectedSecret;
   logger.info('client_bot webhook received', {
     channel,
     pathname,
+    method,
     headers: headerInfo.sanitized,
     hasSecretHeader: headerInfo.hasSecretHeader,
     actualSecretHeaderName: headerInfo.actualSecretHeaderName,
@@ -140,23 +168,32 @@ async function handleClientWebhook({ body, config, headers = {}, rawHeaders = []
   try {
     const event = extractIncomingEvent({ body, channel });
     const updateType = event.callback ? 'callback' : (event.message ? 'message' : 'unknown');
+    const senderBlock = buildSenderSnapshot({ body, event });
     logger.info('client_bot webhook parsed update', {
       channel,
       pathname,
+      method,
       updateType,
       hasMessage: Boolean(event.message),
       hasSender: Boolean(event.message?.from || body?.sender || body?.user || event.callback),
+      senderBlock,
       userId: event.callback?.userId || event.userId || null,
       messagePresent: Boolean(event.message),
       text: String(event.callback ? event.callback.data || '' : event.text || '').slice(0, 500)
     });
     if (!event.message && !event.callback) {
-      logger.warn('client_bot unknown update without message/callback', { channel, pathname, body });
+      logger.warn('client_bot unknown update without message/callback', {
+        channel,
+        pathname,
+        method,
+        reason: 'NO_MESSAGE_AND_NO_CALLBACK',
+        body
+      });
       return { ok: true, action: 'ignored_unknown_update', updateType };
     }
 
     const userId = event.callback?.userId || event.userId;
-    const recipientId = event.callback?.chatId || event.chatId || userId;
+    const recipientId = resolveRecipientId(channel, userId, event.callback?.chatId || event.chatId);
     const sessionKey = `${channel}:${userId}`;
     const callbackData = event.callback?.data || '';
     const incomingText = event.callback ? callbackData : event.text;
