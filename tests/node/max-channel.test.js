@@ -57,6 +57,10 @@ test('MAX client bot supports start help quick flow and stores max_chat source',
     assert.equal(state.requests[0].sourceChannel, 'max_chat');
     assert.equal(state.clients[0].maxId, 'mx-client-1');
     assert.equal(state.clients[0].preferredChannel, 'max');
+
+    const unknown = await post(base, '/max/client_bot/webhook', { event_id: 'evt-1', payload: { unsupported: true } }, webhookHeaders);
+    assert.equal(unknown.response.status, 200);
+    assert.equal(unknown.data.action, 'ignored_unknown_update');
   }, { MAX_WEBHOOK_SECRET: 'secret-max' });
 });
 
@@ -65,6 +69,11 @@ test('MAX master bot enforces access, works with roles and sends clarification f
     const webhookHeaders = { 'x-max-bot-api-secret': 'secret-max' };
     const denied = await post(base, '/max/master_bot/webhook', { message: { body: { text: '/start' }, chat_id: 'staff-chat', from: { user_id: 'unknown-max', first_name: 'NoAccess' } } }, webhookHeaders);
     assert.equal(denied.data.error, 'ACCESS_DENIED');
+    assert.equal(denied.data.reason, 'ACTOR_NOT_FOUND_OR_NOT_ALLOWED');
+
+    const whoami = await post(base, '/max/master_bot/webhook', { message: { body: { text: '/whoami' }, chat_id: 'staff-chat', from: { user_id: 'unknown-max', first_name: 'NoAccess' } } }, webhookHeaders);
+    assert.equal(whoami.data.action, 'whoami');
+    assert.equal(whoami.data.channelUserId, 'unknown-max');
 
     const grant = await post(base, '/max/master_bot/webhook', { message: { body: { text: '/access_grant mx-master-2 master Макс Мастер' }, chat_id: 'admin-chat', from: { user_id: 'mx-admin-1', first_name: 'Admin' } } }, webhookHeaders);
     assert.equal(grant.data.ok, true);
