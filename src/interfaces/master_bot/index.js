@@ -77,6 +77,7 @@ function helpText(channel) {
   return [
     '/start',
     '/help',
+    '/whoami',
     '/search <query>',
     '/request <id>',
     '/set_status <requestId> <status> [reason]',
@@ -95,23 +96,88 @@ function adminIds(config, channel) {
   return channel === 'max' ? config.maxMasterBotAdminIds : config.masterBotAdminIds;
 }
 
+function sanitizeHeaderValue(name, value) {
+  const lower = String(name || '').toLowerCase();
+  if (['authorization', 'x-max-bot-api-secret'].includes(lower)) {
+    const raw = String(value || '');
+    if (!raw) return '';
+    if (raw.length <= 8) return `${raw.slice(0, 2)}***`;
+    return `${raw.slice(0, 4)}***${raw.slice(-2)}`;
+  }
+  return value;
+}
+
+function collectWebhookHeaders(headers = {}, rawHeaders = []) {
+  const sanitized = {};
+  for (const [name, value] of Object.entries(headers || {})) {
+    sanitized[name] = sanitizeHeaderValue(name, value);
+  }
+  const actualSecretHeaderName = Array.isArray(rawHeaders)
+    ? rawHeaders.find((value, index) => index % 2 === 0 && String(value).toLowerCase() === 'x-max-bot-api-secret') || null
+    : null;
+  return {
+    sanitized,
+    hasSecretHeader: Object.prototype.hasOwnProperty.call(headers || {}, 'x-max-bot-api-secret'),
+    actualSecretHeaderName
+  };
+}
+
 function registerMasterBotRoutes(router) {
   router.push({ method: 'POST', path: '/telegram/master_bot/webhook', handler: (ctx) => handleMasterWebhook({ ...ctx, channel: 'telegram' }) });
   router.push({ method: 'POST', path: '/max/master_bot/webhook', handler: (ctx) => handleMasterWebhook({ ...ctx, channel: 'max' }) });
 }
 
 async function respondWithMessage({ channel, token, recipientId, text, payload = {}, extra = {} }) {
-  if (text) await sendChannelMessage({ channel, token, recipientId, text, extra });
+  if (text) {
+    const delivered = await sendChannelMessage({ channel, token, recipientId, text, extra });
+    if (!delivered) {
+      logger.error('master_bot outbound sendMessage failed', { channel, recipientId, textPreview: String(text || '').slice(0, 200) });
+    }
+  }
   return text ? { ...payload, text } : payload;
 }
 
-async function handleMasterWebhook({ body, config, headers = {}, channel = 'telegram' }) {
-  if (channel === 'max' && config.maxWebhookSecret && headers['x-max-bot-api-secret'] !== config.maxWebhookSecret) {
+async function handleMasterWebhook({ body, config, headers = {}, rawHeaders = [], pathname = '', channel = 'telegram' }) {
+  const headerInfo = collectWebhookHeaders(headers, rawHeaders);
+  const expectedSecret = config.maxWebhookSecret || '';
+  const receivedSecret = String(headers['x-max-bot-api-secret'] || '');
+  const secretCheckPassed = channel !== 'max' || !expectedSecret || receivedSecret === expectedSecret;
+  logger.info('master_bot webhook received', {
+    channel,
+    pathname,
+    headers: headerInfo.sanitized,
+    hasSecretHeader: headerInfo.hasSecretHeader,
+    actualSecretHeaderName: headerInfo.actualSecretHeaderName,
+    usesEnvMaxWebhookSecret: Boolean(expectedSecret),
+    secretCheckPassed
+  });
+  if (channel === 'max' && !secretCheckPassed) {
+    logger.warn('master_bot secret check failed', {
+      channel,
+      pathname,
+      hasSecretHeader: headerInfo.hasSecretHeader,
+      actualSecretHeaderName: headerInfo.actualSecretHeaderName,
+      receivedSecretPreview: sanitizeHeaderValue('x-max-bot-api-secret', receivedSecret),
+      expectedSecretPreview: sanitizeHeaderValue('x-max-bot-api-secret', expectedSecret)
+    });
     return { ok: false, error: 'INVALID_WEBHOOK_SECRET', statusCode: 403 };
   }
 
   const event = extractIncomingEvent({ body, channel });
-  if (!event.message && !event.callback) return { ok: true };
+  const updateType = event.callback ? 'callback' : (event.message ? 'message' : 'unknown');
+  logger.info('master_bot webhook parsed update', {
+    channel,
+    pathname,
+    updateType,
+    hasMessage: Boolean(event.message),
+    hasSender: Boolean(event.message?.from || body?.sender || body?.user || event.callback),
+    userId: event.callback?.userId || event.userId || null,
+    text: String(event.callback ? event.callback.data || '' : event.text || '').slice(0, 500)
+  });
+  if (!event.message && !event.callback) {
+    logger.warn('master_bot unknown update without message/callback', { channel, pathname, body });
+    return { ok: true, action: 'ignored_unknown_update', updateType };
+  }
 
   const token = masterToken(config, channel);
   const masterService = createMasterService({ db, sendClientMessage: sendChannelMessage, adminIds: adminIds(config, channel), actorChannel: channel });
@@ -121,14 +187,43 @@ async function handleMasterWebhook({ body, config, headers = {}, channel = 'tele
   const actor = masterService.resolveActor({ channelUserId, telegramId: channel === 'telegram' ? channelUserId : null, maxId: channel === 'max' ? channelUserId : null, fullName });
   const recipientId = event.callback?.chatId || event.chatId || channelUserId;
   const sessionKey = `${channel}:${channelUserId}`;
+  const text = String(event.text || '').trim();
+
+  if (text === '/whoami') {
+    logger.info('master_bot handler branch selected', { channel, pathname, branch: '/whoami', channelUserId, recipientId });
+    return respondWithMessage({
+      channel,
+      token,
+      recipientId,
+      text: `Ваш MAX user_id: ${channelUserId || '-'}. Добавьте это значение в MAX_MASTER_BOT_ADMIN_IDS при необходимости.`,
+      payload: { ok: true, action: 'whoami', channelUserId, channel }
+    });
+  }
 
   if (!actor) {
-    if (recipientId) await sendChannelMessage({ channel, token, recipientId, text: 'Доступ запрещён. Обратитесь к администратору.' });
-    return { ok: false, error: 'ACCESS_DENIED' };
+    logger.warn('master_bot access denied', {
+      channel,
+      pathname,
+      reason: 'ACTOR_NOT_FOUND_OR_NOT_ALLOWED',
+      channelUserId,
+      recipientId,
+      configuredAdminIds: adminIds(config, channel)
+    });
+    if (recipientId) {
+      await respondWithMessage({
+        channel,
+        token,
+        recipientId,
+        text: `Доступ запрещён: user_id ${channelUserId || '-' } не найден в staff/admin. Используйте /whoami и добавьте ID в MAX_MASTER_BOT_ADMIN_IDS или выдайте доступ через /access_grant.`,
+        payload: { ok: false, error: 'ACCESS_DENIED', channelUserId, reason: 'ACTOR_NOT_FOUND_OR_NOT_ALLOWED' }
+      });
+    }
+    return { ok: false, error: 'ACCESS_DENIED', channelUserId, reason: 'ACTOR_NOT_FOUND_OR_NOT_ALLOWED' };
   }
 
   if (event.callback?.id) {
     const data = String(event.callback.data || '');
+    logger.info('master_bot callback received', { channel, pathname, channelUserId, recipientId, data });
     if (data.startsWith('card:')) {
       const requestId = data.split(':')[1];
       const card = masterService.getRequestCard(requestId);
@@ -140,12 +235,14 @@ async function handleMasterWebhook({ body, config, headers = {}, channel = 'tele
       const [, requestId, toStatus] = data.split(':');
       if (toStatus === 'comment') {
         sessions.set(sessionKey, { step: 'request_comment', requestId });
-        await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: 'Введите комментарий' });
+        const answered = await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: 'Введите комментарий' });
+        if (!answered) logger.error('master_bot callback answer failed', { channel, callbackId: event.callback.id, recipientId });
         return respondWithMessage({ channel, token, recipientId, text: `Введите внутренний комментарий по заявке ${requestId}` });
       }
       if (toStatus === 'lost') {
         sessions.set(sessionKey, { step: 'lost_reason', requestId });
-        await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: 'Укажите причину' });
+        const answered = await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: 'Укажите причину' });
+        if (!answered) logger.error('master_bot callback answer failed', { channel, callbackId: event.callback.id, recipientId });
         return respondWithMessage({ channel, token, recipientId, text: `Укажите причину для статуса "Потеряно" по заявке ${requestId}` });
       }
       const result = masterService.changeRequestStatus({ requestId, toStatus, actorId: actor.id, actorRole: actor.role });
@@ -159,15 +256,16 @@ async function handleMasterWebhook({ body, config, headers = {}, channel = 'tele
           maxClientBotToken: config.maxClientBotToken
         });
       }
-      await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: result?.error ? 'Ошибка' : 'Готово' });
+      const answered = await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: result?.error ? 'Ошибка' : 'Готово' });
+      if (!answered) logger.error('master_bot callback answer failed', { channel, callbackId: event.callback.id, recipientId });
       return respondWithMessage({ channel, token, recipientId, text: result?.error ? `Ошибка: ${result.error}` : `Статус заявки ${requestId}: ${toStatus}`, payload: { ok: !result?.error, ...result } });
     }
   }
 
-  const text = String(event.text || '').trim();
   logger.info('master_bot incoming text', { channel, channelUserId, recipientId, text });
   try {
     if (text === '/start') {
+      logger.info('master_bot handler branch selected', { channel, pathname, branch: '/start', channelUserId, recipientId, actorRole: actor.role });
       const baseKeyboard = [['Новые заявки', 'В работе'], ['Поиск', 'Quality Cases'], ['/help']];
       if (canManageAccess(actor)) baseKeyboard.push(['Доступы']);
       await sendChannelMessage({ channel, token, recipientId, text: `Master Bot запущен. Роль: ${actor.role}.`, extra: { reply_markup: { keyboard: baseKeyboard, resize_keyboard: true } } });
@@ -176,10 +274,12 @@ async function handleMasterWebhook({ body, config, headers = {}, channel = 'tele
     }
 
     if (text === '/help') {
+      logger.info('master_bot handler branch selected', { channel, pathname, branch: '/help', channelUserId, recipientId, actorRole: actor.role });
       return respondWithMessage({ channel, token, recipientId, text: helpText(channel), payload: { ok: true, action: 'help' } });
     }
 
     if (text === 'Новые заявки' || text === 'В работе') {
+      logger.info('master_bot handler branch selected', { channel, pathname, branch: text, channelUserId, recipientId, actorRole: actor.role });
       const status = text === 'Новые заявки' ? 'new' : 'in_progress';
       const items = masterService.listRequestsByStatus(status);
       const lines = items.map(formatRequestLine);
@@ -191,23 +291,27 @@ async function handleMasterWebhook({ body, config, headers = {}, channel = 'tele
     }
 
     if (text === 'Поиск') {
+      logger.info('master_bot handler branch selected', { channel, pathname, branch: 'Поиск', channelUserId, recipientId, actorRole: actor.role });
       sessions.set(sessionKey, { step: 'search_query' });
       return respondWithMessage({ channel, token, recipientId, text: 'Введите строку для поиска (ФИО, телефон, VIN или номер).' });
     }
 
     if (text === 'Доступы') {
+      logger.info('master_bot handler branch selected', { channel, pathname, branch: 'Доступы', channelUserId, recipientId, actorRole: actor.role });
       if (!canManageAccess(actor)) return respondWithMessage({ channel, token, recipientId, text: 'Недостаточно прав.' });
       sessions.set(sessionKey, { step: 'access_menu' });
       return respondWithMessage({ channel, token, recipientId, text: `Раздел доступов:\n/access_list\n/access_grant <${channel === 'max' ? 'maxId' : 'telegramId'}> <master|manager> [ФИО]\n/access_revoke <${channel === 'max' ? 'maxId' : 'telegramId'}>\n/access_role <${channel === 'max' ? 'maxId' : 'telegramId'}> <master|manager>` });
     }
 
     if (text === 'Quality Cases' || text === '/quality_cases') {
+      logger.info('master_bot handler branch selected', { channel, pathname, branch: 'quality_cases', channelUserId, recipientId, actorRole: actor.role });
       const items = masterService.listQualityCases();
       return respondWithMessage({ channel, token, recipientId, text: qualityCasesText(items), payload: { ok: true, items } });
     }
 
     const session = sessions.get(sessionKey);
     if (session?.step === 'search_query') {
+      logger.info('master_bot handler branch selected', { channel, pathname, branch: 'search_query', channelUserId, recipientId, actorRole: actor.role });
       sessions.delete(sessionKey);
       const results = masterService.search(text);
       if (results.requests[0]) {
@@ -218,24 +322,28 @@ async function handleMasterWebhook({ body, config, headers = {}, channel = 'tele
     }
 
     if (session?.step === 'lost_reason') {
+      logger.info('master_bot handler branch selected', { channel, pathname, branch: 'lost_reason', channelUserId, recipientId, actorRole: actor.role });
       sessions.delete(sessionKey);
       const result = masterService.changeRequestStatus({ requestId: session.requestId, toStatus: 'lost', actorId: actor.id, actorRole: actor.role, lostReason: text });
       return respondWithMessage({ channel, token, recipientId, text: result?.error ? `Ошибка: ${result.error}` : `Заявка ${session.requestId} переведена в потерянные`, payload: { ok: !result?.error, ...result } });
     }
 
     if (session?.step === 'request_comment') {
+      logger.info('master_bot handler branch selected', { channel, pathname, branch: 'request_comment', channelUserId, recipientId, actorRole: actor.role });
       sessions.delete(sessionKey);
       const comment = masterService.addInternalComment({ requestId: session.requestId, actorId: actor.id, actorRole: actor.role, text });
       return comment ? respondWithMessage({ channel, token, recipientId, text: 'Комментарий добавлен', payload: { ok: true, comment } }) : respondWithMessage({ channel, token, recipientId, text: 'Заявка не найдена', payload: { ok: false } });
     }
 
     if (text.startsWith('/access_list')) {
+      logger.info('master_bot handler branch selected', { channel, pathname, branch: '/access_list', channelUserId, recipientId, actorRole: actor.role });
       if (!canManageAccess(actor)) return respondWithMessage({ channel, token, recipientId, text: 'Недостаточно прав.' });
       const items = masterService.listStaffUsers();
       return respondWithMessage({ channel, token, recipientId, text: items.map((u) => `${staffIdentity(u)} | ${u.role} | ${u.fullName || '-'}`).join('\n') || 'Список пуст', payload: { ok: true, items } });
     }
 
     if (text.startsWith('/access_grant ') || text.startsWith('/access_role ')) {
+      logger.info('master_bot handler branch selected', { channel, pathname, branch: text.startsWith('/access_grant ') ? '/access_grant' : '/access_role', channelUserId, recipientId, actorRole: actor.role });
       if (!canManageAccess(actor)) return respondWithMessage({ channel, token, recipientId, text: 'Недостаточно прав.' });
       const [, externalId, role, ...nameParts] = text.split(' ');
       const result = masterService.grantStaffAccess({ channelUserId: externalId, telegramId: channel === 'telegram' ? externalId : null, maxId: channel === 'max' ? externalId : null, fullName: nameParts.join(' ').trim(), role, actorId: actor.id, actorRole: actor.role });
@@ -243,6 +351,7 @@ async function handleMasterWebhook({ body, config, headers = {}, channel = 'tele
     }
 
     if (text.startsWith('/access_revoke ')) {
+      logger.info('master_bot handler branch selected', { channel, pathname, branch: '/access_revoke', channelUserId, recipientId, actorRole: actor.role });
       if (!canManageAccess(actor)) return respondWithMessage({ channel, token, recipientId, text: 'Недостаточно прав.' });
       const [, externalId] = text.split(' ');
       const result = masterService.revokeStaffAccess({ channelUserId: externalId, telegramId: channel === 'telegram' ? externalId : null, maxId: channel === 'max' ? externalId : null, actorId: actor.id, actorRole: actor.role });
@@ -250,6 +359,7 @@ async function handleMasterWebhook({ body, config, headers = {}, channel = 'tele
     }
 
     if (text.startsWith('/search ')) {
+      logger.info('master_bot handler branch selected', { channel, pathname, branch: '/search', channelUserId, recipientId, actorRole: actor.role });
       const results = masterService.search(text.slice(8));
       if (results.requests[0]) {
         const card = masterService.getRequestCard(results.requests[0].id);
@@ -259,16 +369,19 @@ async function handleMasterWebhook({ body, config, headers = {}, channel = 'tele
     }
 
     if (text.startsWith('/client ')) {
+      logger.info('master_bot handler branch selected', { channel, pathname, branch: '/client', channelUserId, recipientId, actorRole: actor.role });
       const card = masterService.getClientCard(text.split(' ')[1]);
       return card ? { ok: true, card } : { ok: false, error: 'CLIENT_NOT_FOUND' };
     }
 
     if (text.startsWith('/request ')) {
+      logger.info('master_bot handler branch selected', { channel, pathname, branch: '/request', channelUserId, recipientId, actorRole: actor.role });
       const card = masterService.getRequestCard(text.split(' ')[1]);
       return card ? respondWithMessage({ channel, token, recipientId, text: buildRequestCardText(card), payload: { ok: true, card }, extra: { reply_markup: buildRequestActionsKeyboard(card.request.id) } }) : { ok: false, error: 'REQUEST_NOT_FOUND' };
     }
 
     if (text.startsWith('/set_status ')) {
+      logger.info('master_bot handler branch selected', { channel, pathname, branch: '/set_status', channelUserId, recipientId, actorRole: actor.role });
       const [, requestId, toStatus, ...reasonParts] = text.split(' ');
       const lostReason = reasonParts.join(' ');
       const result = masterService.changeRequestStatus({ requestId, toStatus, actorId: actor.id, actorRole: actor.role, lostReason });
@@ -276,18 +389,21 @@ async function handleMasterWebhook({ body, config, headers = {}, channel = 'tele
     }
 
     if (text.startsWith('/comment ')) {
+      logger.info('master_bot handler branch selected', { channel, pathname, branch: '/comment', channelUserId, recipientId, actorRole: actor.role });
       const [, requestId, ...commentParts] = text.split(' ');
       const comment = masterService.addInternalComment({ requestId, actorId: actor.id, actorRole: actor.role, text: commentParts.join(' ') });
       return comment ? respondWithMessage({ channel, token, recipientId, text: 'Комментарий добавлен', payload: { ok: true, comment } }) : { ok: false, error: 'REQUEST_NOT_FOUND' };
     }
 
     if (text.startsWith('/ask_client ')) {
+      logger.info('master_bot handler branch selected', { channel, pathname, branch: '/ask_client', channelUserId, recipientId, actorRole: actor.role });
       const [, requestId, ...textParts] = text.split(' ');
       const result = await masterService.requestClientClarification({ requestId, actorId: actor.id, actorRole: actor.role, text: textParts.join(' '), telegramClientBotToken: config.telegramClientBotToken, maxClientBotToken: config.maxClientBotToken });
       return respondWithMessage({ channel, token, recipientId, text: result.error ? `Ошибка: ${result.error}` : 'Запрос клиенту отправлен/зафиксирован', payload: result });
     }
 
     if (text === '/report_week' || text === '/report_month' || text === '/report_quarter' || text === '/report_stats') {
+      logger.info('master_bot handler branch selected', { channel, pathname, branch: text, channelUserId, recipientId, actorRole: actor.role });
       if (!canUseReports(actor)) {
         return respondWithMessage({ channel, token, recipientId, text: 'Недостаточно прав для отчётов.', payload: { ok: false, error: 'REPORT_ACCESS_DENIED', allowedRoles: ['manager', 'admin'] } });
       }
@@ -297,22 +413,26 @@ async function handleMasterWebhook({ body, config, headers = {}, channel = 'tele
     }
 
     if (text.startsWith('/quality_case ')) {
+      logger.info('master_bot handler branch selected', { channel, pathname, branch: '/quality_case', channelUserId, recipientId, actorRole: actor.role });
       const card = masterService.getQualityCaseCard(text.split(' ')[1]);
       return card ? { ok: true, card } : { ok: false, error: 'QUALITY_CASE_NOT_FOUND' };
     }
 
     if (text.startsWith('/quality_status ')) {
+      logger.info('master_bot handler branch selected', { channel, pathname, branch: '/quality_status', channelUserId, recipientId, actorRole: actor.role });
       const [, qualityCaseId, status] = text.split(' ');
       const qualityCase = masterService.changeQualityCaseStatus({ qualityCaseId, status, actorId: actor.id, actorRole: actor.role });
       return qualityCase ? { ok: true, qualityCase } : { ok: false, error: 'QUALITY_CASE_NOT_FOUND' };
     }
 
     if (text.startsWith('/quality_comment ')) {
+      logger.info('master_bot handler branch selected', { channel, pathname, branch: '/quality_comment', channelUserId, recipientId, actorRole: actor.role });
       const [, qualityCaseId, ...parts] = text.split(' ');
       const comment = masterService.addQualityCaseComment({ qualityCaseId, actorId: actor.id, actorRole: actor.role, text: parts.join(' ') });
       return comment ? { ok: true, comment } : { ok: false, error: 'QUALITY_CASE_NOT_FOUND' };
     }
 
+    logger.info('master_bot handler branch selected', { channel, pathname, branch: 'fallback', channelUserId, recipientId, actorRole: actor.role });
     return respondWithMessage({ channel, token, recipientId, text: 'Используйте /help для списка команд.', payload: { ok: true, action: 'fallback' } });
   } catch (error) {
     logger.error('master_bot handler error', { channel, channelUserId, recipientId, text, error: String(error?.message || error) });
