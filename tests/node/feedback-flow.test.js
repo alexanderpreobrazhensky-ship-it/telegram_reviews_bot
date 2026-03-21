@@ -49,8 +49,9 @@ test('processed request creates feedback task and low feedback creates quality c
     });
     const request = await reqResponse.json();
 
-    await sendMaster(base, `/set_status ${request.id} in_progress`);
-    await sendMaster(base, `/set_status ${request.id} processed`);
+    await sendMaster(base, `/set_status ${request.id} assigned`);
+    await sendMaster(base, `/set_status ${request.id} in_service`);
+    await sendMaster(base, `/set_status ${request.id} done`);
 
     const scheduled = db.listTasks(['scheduled']).filter((item) => item.taskType === 'feedback_request');
     assert.equal(scheduled.length, 1);

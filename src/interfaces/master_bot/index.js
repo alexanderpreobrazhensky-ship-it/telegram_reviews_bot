@@ -23,15 +23,18 @@ function buildRequestActionsKeyboard(requestId) {
   return {
     inline_keyboard: [
       [
-        { text: 'Взять в работу', callback_data: `req:${requestId}:in_progress` },
-        { text: 'Запросить данные', callback_data: `req:${requestId}:waiting_data` }
+        { text: 'Назначить', callback_data: `req:${requestId}:assigned` },
+        { text: 'Ждём клиента', callback_data: `req:${requestId}:awaiting_client` }
       ],
       [
-        { text: 'Завершить', callback_data: `req:${requestId}:processed` },
-        { text: 'Потеряно', callback_data: `req:${requestId}:lost` }
+        { text: 'Запланировать', callback_data: `req:${requestId}:scheduled` },
+        { text: 'В сервисе', callback_data: `req:${requestId}:in_service` }
       ],
       [
-        { text: 'Архивировать', callback_data: `req:${requestId}:archived` },
+        { text: 'Завершить', callback_data: `req:${requestId}:done` },
+        { text: 'Отменить', callback_data: `req:${requestId}:cancelled` }
+      ],
+      [
         { text: 'Комментарий', callback_data: `req:${requestId}:comment` }
       ],
       [{ text: 'Подробнее', callback_data: `card:${requestId}` }]
@@ -230,14 +233,14 @@ async function handleMasterWebhook({ body, config, headers = {}, rawHeaders = []
           if (!answered) logger.error('master_bot callback answer failed', { channel, callbackId: event.callback.id, recipientId });
           return respondWithMessage({ channel, token, recipientId, text: `Введите внутренний комментарий по заявке ${requestId}` });
         }
-        if (toStatus === 'lost') {
-          sessions.set(sessionKey, { step: 'lost_reason', requestId });
-          const answered = await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: 'Укажите причину' });
+        if (toStatus === 'cancelled') {
+          sessions.set(sessionKey, { step: 'cancel_comment', requestId });
+          const answered = await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: 'Укажите комментарий' });
           if (!answered) logger.error('master_bot callback answer failed', { channel, callbackId: event.callback.id, recipientId });
-          return respondWithMessage({ channel, token, recipientId, text: `Укажите причину для статуса "Потеряно" по заявке ${requestId}` });
+          return respondWithMessage({ channel, token, recipientId, text: `Укажите комментарий для отмены заявки ${requestId}` });
         }
         const result = masterService.changeRequestStatus({ requestId, toStatus, actorId: actor.id, actorRole: actor.role });
-        if (!result?.error && toStatus === 'waiting_data') {
+        if (!result?.error && toStatus === 'awaiting_client') {
           await masterService.requestClientClarification({
             requestId,
             actorId: actor.id,
@@ -270,10 +273,11 @@ async function handleMasterWebhook({ body, config, headers = {}, rawHeaders = []
 
     if (text === 'Новые заявки' || text === 'В работе') {
       logger.info('master_bot handler branch selected', { channel, pathname, branch: text, channelUserId, recipientId, actorRole: actor.role });
-      const status = text === 'Новые заявки' ? 'new' : 'in_progress';
-      const items = masterService.listRequestsByStatus(status);
+      const items = text === 'Новые заявки'
+        ? masterService.listRequestsByStatus('new')
+        : db.listRequests({ statuses: ['assigned', 'awaiting_client', 'scheduled', 'in_service'] });
       const lines = items.map(formatRequestLine);
-      await respondWithMessage({ channel, token, recipientId, text: lines.join('\n') || (status === 'new' ? 'Нет новых заявок' : 'Нет заявок в работе') });
+      await respondWithMessage({ channel, token, recipientId, text: lines.join('\n') || (text === 'Новые заявки' ? 'Нет новых заявок' : 'Нет заявок в работе') });
       for (const item of items.slice(0, 10)) {
         await sendChannelMessage({ channel, token, recipientId, text: `Заявка ${item.id}`, extra: { reply_markup: buildRequestActionsKeyboard(item.id) } });
       }
@@ -311,11 +315,11 @@ async function handleMasterWebhook({ body, config, headers = {}, rawHeaders = []
       return respondWithMessage({ channel, token, recipientId, text: 'Ничего не найдено', payload: { ok: true, action: 'search_results', ...results } });
     }
 
-    if (session?.step === 'lost_reason') {
-      logger.info('master_bot handler branch selected', { channel, pathname, branch: 'lost_reason', channelUserId, recipientId, actorRole: actor.role });
+    if (session?.step === 'cancel_comment') {
+      logger.info('master_bot handler branch selected', { channel, pathname, branch: 'cancel_comment', channelUserId, recipientId, actorRole: actor.role });
       sessions.delete(sessionKey);
-      const result = masterService.changeRequestStatus({ requestId: session.requestId, toStatus: 'lost', actorId: actor.id, actorRole: actor.role, lostReason: text });
-      return respondWithMessage({ channel, token, recipientId, text: result?.error ? `Ошибка: ${result.error}` : `Заявка ${session.requestId} переведена в потерянные`, payload: { ok: !result?.error, ...result } });
+      const result = masterService.changeRequestStatus({ requestId: session.requestId, toStatus: 'cancelled', actorId: actor.id, actorRole: actor.role, comment: text });
+      return respondWithMessage({ channel, token, recipientId, text: result?.error ? `Ошибка: ${result.error}` : `Заявка ${session.requestId} отменена`, payload: { ok: !result?.error, ...result } });
     }
 
     if (session?.step === 'request_comment') {
@@ -373,8 +377,8 @@ async function handleMasterWebhook({ body, config, headers = {}, rawHeaders = []
     if (text.startsWith('/set_status ')) {
       logger.info('master_bot handler branch selected', { channel, pathname, branch: '/set_status', channelUserId, recipientId, actorRole: actor.role });
       const [, requestId, toStatus, ...reasonParts] = text.split(' ');
-      const lostReason = reasonParts.join(' ');
-      const result = masterService.changeRequestStatus({ requestId, toStatus, actorId: actor.id, actorRole: actor.role, lostReason });
+      const comment = reasonParts.join(' ');
+      const result = masterService.changeRequestStatus({ requestId, toStatus, actorId: actor.id, actorRole: actor.role, comment, lostReason: comment });
       return respondWithMessage({ channel, token, recipientId, text: result?.error ? `Ошибка: ${result.error}` : `Статус обновлён: ${toStatus}`, payload: { ok: !result?.error, ...result } });
     }
 

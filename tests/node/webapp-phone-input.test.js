@@ -145,12 +145,15 @@ test('phone helpers normalize prefixes, formatting and length consistently', () 
   const dom = createDom({ route: '/' });
   const { PHONE_HINT, onlyPhoneDigits, normalizePhone10, formatPhoneMask, applyPhoneEdit } = dom.window.__WEBAPP_TEST_API__;
 
-  assert.equal(PHONE_HINT, 'Введите корректный номер: 10 цифр без +7/8');
+  assert.equal(PHONE_HINT, 'Введите 10 цифр');
   assert.equal(onlyPhoneDigits('+7 (999) 111-22-33'), '9991112233');
   assert.equal(onlyPhoneDigits('8 999 111 22 33'), '9991112233');
   assert.equal(onlyPhoneDigits('7 999 111 22 33'), '9991112233');
   assert.equal(onlyPhoneDigits('9991234567890'), '9991234567');
+  assert.equal(onlyPhoneDigits('тел: +7 (999) 111-22-33 доб. 55'), '9991112233');
   assert.equal(normalizePhone10('+7 999 111-22-33'), '9991112233');
+  assert.equal(normalizePhone10('8 999 111 22 33'), '9991112233');
+  assert.equal(normalizePhone10('7 999 111 22 33'), '9991112233');
   assert.equal(normalizePhone10('9991112233'), '9991112233');
   assert.equal(normalizePhone10('12345'), '12345');
   assert.equal(formatPhoneMask('+7 (999) 111-22-33').masked, '9991112233');
@@ -167,7 +170,7 @@ test('request form shows and clears client-side validation error for phone field
   editInput(phone, 'insertText', '9');
   submit(form);
   await flush();
-  assert.equal(form.querySelector('[data-field="phone"] .field-error').textContent, 'Введите корректный номер: 10 цифр без +7/8');
+  assert.equal(form.querySelector('[data-field="phone"] .field-error').textContent, 'Введите 10 цифр');
 
   phone.setSelectionRange(0, phone.value.length);
   paste(phone, '+7 (999) 123-45-67');
@@ -275,7 +278,7 @@ test('requests page sends a 10-digit phone and blocks invalid value', async () =
   editInput(phone, 'insertText', '9');
   button.click();
   await flush();
-  assert.equal(document.querySelector('[data-field="phone"] .field-error').textContent, 'Введите корректный номер: 10 цифр без +7/8');
+  assert.equal(document.querySelector('[data-field="phone"] .field-error').textContent, 'Введите 10 цифр');
   assert.equal(requests.length, 0);
 
   phone.setSelectionRange(0, phone.value.length);

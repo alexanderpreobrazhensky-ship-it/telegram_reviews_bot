@@ -69,15 +69,19 @@ test('sqlite persistence can create, read, and update clients and requests', () 
     sourceChannel: 'webapp'
   });
 
-  const progress = db.updateRequestStatus({ requestId: request.id, toStatus: 'in_progress', actorId: 'master-1', actorRole: 'master' });
-  assert.equal(progress.request.status, 'in_progress');
+  const progress = db.updateRequestStatus({ requestId: request.id, toStatus: 'assigned', actorId: 'master-1', actorRole: 'master' });
+  assert.equal(progress.request.status, 'assigned');
 
   const stored = db.readStore();
   assert.equal(stored.clients.length, 1);
   assert.equal(stored.requests.length, 1);
   assert.equal(stored.requestStatusHistory.length, 2);
   assert.equal(stored.clients[0].phone, '9991234567');
-  assert.equal(stored.requests[0].status, 'in_progress');
+  assert.equal(stored.requests[0].status, 'assigned');
+  assert.equal(stored.requestEvents.filter((item) => item.requestId === request.id && item.eventType === 'request_status_changed').length, 2);
+  const statusEvent = stored.requestStatusHistory.find((item) => item.requestId === request.id && item.newStatus === 'assigned');
+  assert.equal(statusEvent.oldStatus, 'new');
+  assert.equal(statusEvent.actor, 'master-1');
 }));
 
 test('sqlite migration imports legacy JSON store on init', () => withTempDb(({ jsonPath, sqlitePath }) => {

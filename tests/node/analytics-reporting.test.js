@@ -12,8 +12,9 @@ test('reporting service builds metrics and summaries for weekly/monthly/custom',
   db.resetStore();
   const client = db.upsertClient({ fullName: 'A', phone: '+79991112233', telegramId: '11' });
   const req = db.createRequest({ clientId: client.id, requestType: 'service', description: 'x', sourceChannel: 'webapp' });
-  db.updateRequestStatus({ requestId: req.id, toStatus: 'in_progress', actorId: 'm1', actorRole: 'master' });
-  db.updateRequestStatus({ requestId: req.id, toStatus: 'processed', actorId: 'm1', actorRole: 'master' });
+  db.updateRequestStatus({ requestId: req.id, toStatus: 'assigned', actorId: 'm1', actorRole: 'master' });
+  db.updateRequestStatus({ requestId: req.id, toStatus: 'in_service', actorId: 'm1', actorRole: 'master' });
+  db.updateRequestStatus({ requestId: req.id, toStatus: 'done', actorId: 'm1', actorRole: 'master' });
   db.createFeedback({ clientId: client.id, requestId: req.id, rating: 2, comment: 'bad' });
   db.upsertRecommendationFromSync({ clientId: client.id, externalId: 'r1', text: 'x', severity: 'critical', status: 'completed' });
 
