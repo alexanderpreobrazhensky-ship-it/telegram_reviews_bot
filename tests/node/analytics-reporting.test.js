@@ -1,6 +1,5 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
 const { createReportingService } = require('../../src/core/application');
 const db = require('../../src/infrastructure/db');
 const { createServer } = require('../../src/server');
@@ -8,23 +7,15 @@ const { loadConfig } = require('../../src/infrastructure/config');
 const logger = require('../../src/infrastructure/logging/logger');
 const { handleMasterWebhook } = require('../../src/interfaces/master_bot');
 
-function updateStore(mutator) {
-  const store = db.readStore();
-  mutator(store);
-  fs.writeFileSync(db.DB_PATH, JSON.stringify(store, null, 2));
-}
 
 test('reporting service builds metrics and summaries for weekly/monthly/custom', () => {
   db.resetStore();
-  const now = new Date().toISOString();
-  const client = db.upsertClient({ fullName: 'A', phone: '+1', telegramId: '11' });
+  const client = db.upsertClient({ fullName: 'A', phone: '+79991112233', telegramId: '11' });
   const req = db.createRequest({ clientId: client.id, requestType: 'service', description: 'x', sourceChannel: 'webapp' });
   db.updateRequestStatus({ requestId: req.id, toStatus: 'in_progress', actorId: 'm1', actorRole: 'master' });
   db.updateRequestStatus({ requestId: req.id, toStatus: 'processed', actorId: 'm1', actorRole: 'master' });
   db.createFeedback({ clientId: client.id, requestId: req.id, rating: 2, comment: 'bad' });
-  updateStore((store) => {
-    store.recommendations.push({ id: 'r1', clientId: client.id, text: 'x', severity: 'critical', status: 'completed', createdAt: now });
-  });
+  db.upsertRecommendationFromSync({ clientId: client.id, externalId: 'r1', text: 'x', severity: 'critical', status: 'completed' });
 
   const reporting = createReportingService({ db });
   const requests = reporting.buildRequestsMetrics({ period: 'weekly' });

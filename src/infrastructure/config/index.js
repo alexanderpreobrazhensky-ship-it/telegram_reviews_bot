@@ -42,6 +42,7 @@ function loadConfig() {
     maxBotName: process.env.MAX_BOT_NAME || '',
     maxDeepLinkBaseUrl: process.env.MAX_DEEPLINK_BASE_URL || '',
     dbUrl: process.env.DB_URL || 'postgres://localhost:5432/telegram_reviews',
+    dbSqlitePath: process.env.DB_SQLITE_PATH || process.env.DB_FILE_PATH || 'data/db.sqlite',
     queueDriver: process.env.QUEUE_DRIVER || 'memory',
     oneCWebhookSecret: process.env.ONE_C_WEBHOOK_SECRET || '',
     enableIntegrationWorker: parseBoolean(process.env.ENABLE_INTEGRATION_WORKER, true),

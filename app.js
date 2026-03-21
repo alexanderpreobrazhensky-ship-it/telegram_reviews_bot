@@ -9,11 +9,20 @@ function bootstrap() {
   const config = loadConfig();
   const dbRuntime = db.getDbRuntimeInfo();
   logger.info('DB runtime configured', {
-    dbFilePath: dbRuntime.path,
+    dbType: dbRuntime.type,
+    dbPath: dbRuntime.path,
     dbDirectory: dbRuntime.dir,
-    dbFileExistsAtBoot: dbRuntime.exists
+    dbFileExistsAtBoot: dbRuntime.exists,
+    configuredDbPath: dbRuntime.configuredPath,
+    legacyJsonPath: dbRuntime.legacyJsonPath
   });
-  db.initializeStore();
+  const initializedDb = db.initializeStore();
+  logger.info('DB startup init complete', {
+    dbType: initializedDb.type,
+    dbPath: initializedDb.path,
+    initStatus: initializedDb.initStatus,
+    migration: initializedDb.migration
+  });
   const server = createServer({ config, logger });
 
   if (!config.telegramClientBotToken) {

@@ -90,13 +90,13 @@ test('scheduler prevents double run and recovers stuck tasks', async () => {
   assert.equal(first.processed + second.processed, 1);
   assert.equal(executions, 1);
 
-  const store = db.readStore();
-  const task = store.tasks.find((item) => item.id === dueTask.id);
+  const stuckStore = db.readStore();
+  const task = stuckStore.tasks.find((item) => item.id === dueTask.id);
   task.status = 'processing';
   task.attemptCount = 0;
   task.processingStartedAt = new Date(Date.now() - 1000).toISOString();
   task.dueAt = new Date(Date.now() - 1000).toISOString();
-  fs.writeFileSync(db.DB_PATH, JSON.stringify(store, null, 2));
+  db.replaceStore(stuckStore);
 
   const recovered = db.claimDueTasks({ limit: 10, stuckTimeoutMs: 100 });
   assert.equal(recovered.some((item) => item.id === dueTask.id), true);
@@ -113,13 +113,16 @@ test('normalizePhone10 and server validation keep only 10-digit phones', () => {
   assert.ok(validateClientRequestPayload({ phone: '12345' }, 'service_request').includes('phone must normalize to exactly 10 digits without +7/8'));
 });
 
-test('db path follows env and initializes missing store explicitly', () => {
-  const original = process.env.DB_FILE_PATH;
+test('db path follows env and initializes missing sqlite store explicitly', () => {
+  const originalFile = process.env.DB_FILE_PATH;
+  const originalSqlite = process.env.DB_SQLITE_PATH;
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'telegram-reviews-bot-'));
-  const tempPath = path.join(tempDir, 'nested', 'db.json');
-  process.env.DB_FILE_PATH = tempPath;
+  const tempPath = path.join(tempDir, 'nested', 'db.sqlite');
+  process.env.DB_SQLITE_PATH = tempPath;
+  delete process.env.DB_FILE_PATH;
 
   try {
+    db.shutdown();
     const infoBefore = db.getDbRuntimeInfo();
     assert.equal(infoBefore.path, tempPath);
     assert.equal(infoBefore.exists, false);
@@ -127,28 +130,13 @@ test('db path follows env and initializes missing store explicitly', () => {
     const infoAfter = db.getDbRuntimeInfo();
     assert.equal(infoAfter.path, tempPath);
     assert.equal(infoAfter.exists, true);
-    const state = JSON.parse(fs.readFileSync(tempPath, 'utf8'));
-    assert.ok(Array.isArray(state.requests));
+    assert.ok(db.listTables().includes('clients'));
+    assert.ok(db.listTables().includes('analytics_events'));
   } finally {
-    if (original === undefined) delete process.env.DB_FILE_PATH;
-    else process.env.DB_FILE_PATH = original;
-  }
-});
-
-test('db read errors fall back to initial store shape instead of crashing', () => {
-  const original = process.env.DB_FILE_PATH;
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'telegram-reviews-bot-broken-'));
-  const tempPath = path.join(tempDir, 'db.json');
-  process.env.DB_FILE_PATH = tempPath;
-  fs.mkdirSync(path.dirname(tempPath), { recursive: true });
-  fs.writeFileSync(tempPath, '{broken');
-
-  try {
-    const state = db.readStore();
-    assert.ok(Array.isArray(state.requests));
-    assert.ok(Array.isArray(state.clients));
-  } finally {
-    if (original === undefined) delete process.env.DB_FILE_PATH;
-    else process.env.DB_FILE_PATH = original;
+    db.shutdown();
+    if (originalSqlite === undefined) delete process.env.DB_SQLITE_PATH;
+    else process.env.DB_SQLITE_PATH = originalSqlite;
+    if (originalFile === undefined) delete process.env.DB_FILE_PATH;
+    else process.env.DB_FILE_PATH = originalFile;
   }
 });
