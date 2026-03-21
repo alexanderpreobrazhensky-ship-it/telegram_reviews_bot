@@ -1,4 +1,5 @@
 const { REQUEST_TYPES } = require('../../core/domain');
+const { resolvePhoneInput } = require('../../core/shared/phone');
 const db = require('../../infrastructure/db');
 const logger = require('../../infrastructure/logging/logger');
 const { sendChannelMessage, answerChannelCallback } = require('../../infrastructure/messaging');
@@ -81,6 +82,20 @@ function buildHelpText(channel) {
   if (channel === 'max') base.push('MAX deep links: form_service, form_parts, form_consultation, form_warranty, form_data_change, requests');
   return base.join('\n');
 }
+
+function buildPhoneRequestMarkup(channel) {
+  if (channel === 'telegram') {
+    return {
+      reply_markup: {
+        keyboard: [[{ text: 'Отправить телефон', request_contact: true }]],
+        resize_keyboard: true,
+        one_time_keyboard: true
+      }
+    };
+  }
+  return {};
+}
+
 
 async function sendBotMessage({ channel, config, recipientId, text, extra = {} }) {
   const delivered = await sendChannelMessage({ channel, token: clientBotToken(config, channel), recipientId, text, extra });
@@ -218,15 +233,18 @@ async function handleClientWebhook({ body, config, headers = {}, rawHeaders = []
       session.fullName = effectiveText;
       session.step = 'phone';
       sessions.set(sessionKey, session);
-      await sendBotMessage({ channel, config, recipientId, text: 'Укажите телефон в формате +7...' });
+      await sendBotMessage({ channel, config, recipientId, text: channel === 'telegram' ? 'Отправьте телефон кнопкой ниже или введите вручную.' : 'Укажите телефон в формате +7... или продолжайте через mini app.', extra: buildPhoneRequestMarkup(channel) });
       return { ok: true, action: 'collect_phone', channel };
     }
 
     if (session?.step === 'phone') {
-      logger.info('client_bot handler branch selected', { channel, pathname, branch: 'collect_phone', userId, recipientId });
-      const normalizedPhone = normalizePhone10(effectiveText);
+      logger.info('client_bot handler branch selected', { channel, pathname, branch: 'collect_phone', userId, recipientId, hasNativeContact: Boolean(event.contact) });
+      const normalizedPhone = resolvePhoneInput({
+        phone: effectiveText,
+        nativeContact: event.contact ? { phoneNumber: event.contact.phoneNumber, source: `${channel}_native_contact` } : null
+      });
       if (!/^\d{10}$/.test(normalizedPhone)) {
-        await sendBotMessage({ channel, config, recipientId, text: 'Нужен корректный телефон: 10 цифр. Попробуйте ещё раз.' });
+        await sendBotMessage({ channel, config, recipientId, text: 'Нужен корректный телефон: 10 цифр. Попробуйте ещё раз.', extra: buildPhoneRequestMarkup(channel) });
         return { ok: false, action: 'invalid_phone', channel };
       }
       const client = db.upsertClient({
@@ -241,7 +259,8 @@ async function handleClientWebhook({ body, config, headers = {}, rawHeaders = []
         vehicleId: null,
         requestType: session.requestType,
         description: session.description,
-        sourceChannel: sourceChannelFor(channel)
+        sourceChannel: sourceChannelFor(channel),
+        payload: { contactSource: event.contact ? `${channel}_native_contact` : 'manual' }
       });
       db.createCommunicationEvent({
         clientId: client.id,

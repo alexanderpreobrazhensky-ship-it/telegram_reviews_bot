@@ -1,7 +1,7 @@
 # telegram_reviews_bot documentation contour
 
 ## Project purpose
-`telegram_reviews_bot` is a Node.js-first service platform for an auto-service business. One HTTP process serves the shared WebApp, accepts Telegram and MAX webhooks for the client and master bots, stores operational data in a JSON file database, exposes reporting and integration APIs, and runs an in-process scheduler for follow-up tasks.
+`telegram_reviews_bot` is a Node.js-first service platform for an auto-service business. One HTTP process serves the shared WebApp, accepts Telegram and MAX webhooks for the client and master bots, stores operational data in a SQLite database behind repository-style access modules, exposes reporting/integration/export APIs, and runs an in-process scheduler for follow-up tasks.
 
 The current production contour is **not** the legacy Python bot. The active deploy path is the Node application rooted at `app.js` and `package.json`.
 
@@ -12,7 +12,7 @@ The current production contour is **not** the legacy Python bot. The active depl
 - **Deploy manifest:** `package.json` + `package-lock.json`.
 - **BotHost entrypoint:** `.bothost/entrypoint.conf` points to `app.js` on branch `main`.
 - **Container contract:** `Dockerfile` installs with `npm ci --omit=dev` and starts `node app.js`.
-- **Persistence contract:** JSON file at `DB_FILE_PATH` or `data/db.json`.
+- **Persistence contract:** SQLite file at `DB_SQLITE_PATH` (legacy alias `DB_FILE_PATH` is still accepted).
 - **Protected files:** `review.html` and `public/index.html` must remain untouched.
 
 ## Runtime model
@@ -20,7 +20,7 @@ The current production contour is **not** the legacy Python bot. The active depl
 1. `app.js` loads runtime config from `src/infrastructure/config/index.js`.
 2. `app.js` creates the HTTP server from `src/server/index.js`.
 3. The server registers client, master, and integration bot webhook adapters.
-4. The same process initializes the JSON DB layer and the in-process scheduler.
+4. The same process initializes the SQLite DB layer, repository abstraction, and the in-process scheduler.
 5. After `server.listen()`, the scheduler starts polling due tasks.
 
 ### What runs inside the same process
@@ -85,11 +85,13 @@ The current production contour is **not** the legacy Python bot. The active depl
 - Manual import endpoint.
 - Email ingestion endpoint.
 - 1C placeholder sync endpoints for client, vehicle, visit, and recommendation events.
-- Reporting endpoints that build summaries and snapshots from the JSON store.
+- Reporting endpoints that build summaries and snapshots from the SQLite-backed store.
 
 ## Route inventory
 ### Static and WebApp routes
 - `GET /health`
+- `GET /health/db`
+- `GET /health/max`
 - `GET /styles.css`
 - `GET /webapp.js`
 - `GET /logo.png`
@@ -122,6 +124,11 @@ The current production contour is **not** the legacy Python bot. The active depl
 - `GET /api/integrations/events`
 - `GET /api/integrations/events/:id`
 - `POST /api/integrations/events/:id/retry`
+
+### Internal operations API
+- `GET /internal/requests`
+- `POST /internal/requests/:id/status`
+- `GET /internal/export`
 
 ### Reporting API
 - `GET /api/reports/summary`
@@ -157,15 +164,15 @@ python -m unittest discover -s tests -p 'test_*.py'
 The Python suite is currently historical-only and intentionally skipped, but it is retained as evidence of the legacy contour.
 
 ## Deploy / BotHost summary
-- Set `PORT`, Telegram bot tokens, `MASTER_BOT_ADMIN_IDS`, `WEBAPP_URL`, and `DB_FILE_PATH`.
+- Set `PORT`, Telegram bot tokens, admin allow-lists, `WEBAPP_URL`, and `DB_SQLITE_PATH` (or legacy `DB_FILE_PATH`).
 - Add MAX env only if MAX is enabled in the deploy contour.
-- Ensure `DB_FILE_PATH` points to persistent storage.
+- Ensure the SQLite path points to persistent storage and include internal/export admins in `INTERNAL_ADMIN_WHITELIST`.
 - Register Telegram and MAX webhooks manually outside the app.
 - After deploy, run the smoke checklist in `readme/DEPLOYMENT.md`.
 
 ## Current limitations that matter operationally
-- JSON-file persistence is single-instance oriented.
+- SQLite persistence is still single-instance oriented, but SQL is concentrated in the DB/repository layer for a future PostgreSQL swap.
 - Scheduler runs in-process and is not safe for multi-instance active-active deployment.
-- Manual/email/1C integration endpoints do not enforce auth in the current server router.
-- MAX recommendation UX and MAX integration bot parity are incomplete.
+- Manual/email/1C integration endpoints still need dedicated auth middleware before production exposure.
+- Native contact collection is best-effort: Telegram bot uses `request_contact`, MAX WebApp uses `requestContact()` when available, otherwise the existing WebApp input remains the fallback.
 - Legacy Python files still exist and can confuse maintainers if the documentation contour is ignored.

@@ -4,6 +4,11 @@ const path = require('path');
 const { URL } = require('url');
 const db = require('../infrastructure/db');
 const { REQUEST_TYPES } = require('../core/domain');
+const { normalizePhone10, isValidPhone10, resolvePhoneInput } = require('../core/shared/phone');
+const { validateClientRequestPayload: validateClientRequestPayloadDetailed } = require('../core/shared/requestValidation');
+const { createRateLimiter } = require('../infrastructure/rate_limit');
+const { filterRequestsForExport, mapRequestForExport, serializeCsv } = require('../infrastructure/export');
+const { createRepositories } = require('../infrastructure/repositories');
 const { ingestEmail } = require('../integrations/email');
 const { oneCSyncPlaceholder } = require('../integrations/one_c');
 const { integrationService, createReportingService } = require('../core/application');
@@ -49,6 +54,37 @@ function serveFile(res, filePath, contentType) {
   }
 }
 
+function sendText(res, status, body, contentType, headers = {}) {
+  res.writeHead(status, { 'Content-Type': `${contentType}; charset=utf-8`, ...headers });
+  res.end(body);
+}
+
+function requestIp(req) {
+  return String(req.headers['x-forwarded-for'] || req.socket?.remoteAddress || 'unknown').split(',')[0].trim();
+}
+
+function applyRateLimit(res, limiter, key, logger, context) {
+  const result = limiter.consume(key);
+  if (result.ok) return null;
+  logger.warn('rate limit exceeded', { ...context, key, retryAfterMs: result.retryAfterMs, limit: result.limit, windowMs: result.windowMs });
+  sendJson(res, 429, { error: 'RATE_LIMITED', retryAfterMs: result.retryAfterMs });
+  return result;
+}
+
+function exportFilename(format) {
+  const suffix = new Date().toISOString().replace(/[.:]/g, '-');
+  return `requests-export-${suffix}.${format === 'json' ? 'json' : 'csv'}`;
+}
+
+
+function validateClientRequestPayload(body = {}, type) {
+  return validateClientRequestPayloadDetailed(body, type).errors;
+}
+
+function validateClientRequestPayloadWithPhone(body = {}, type) {
+  return validateClientRequestPayloadDetailed(body, type);
+}
+
 function injectConfigIntoHtml(html, config) {
   const script = `<script>window.__WEBAPP_TELEGRAM_CHANNEL_LINK__=${JSON.stringify(config.webappTelegramChannelLink || '')};window.__WEBAPP_RUNTIME__=${JSON.stringify({
     webAppUrl: config.webAppUrl || '',
@@ -59,37 +95,6 @@ function injectConfigIntoHtml(html, config) {
   return html.includes('</body>') ? html.replace('</body>', `${script}</body>`) : `${html}${script}`;
 }
 
-function extractPhoneDigits(raw) {
-  return String(raw || '').replace(/\D/g, '');
-}
-
-function normalizePhone10(raw) {
-  const digits = extractPhoneDigits(raw);
-  if (!digits) return '';
-  if (digits.length === 10) return digits;
-  if (digits.length === 11 && (digits.startsWith('7') || digits.startsWith('8'))) return digits.slice(1);
-  return digits;
-}
-
-function isValidPhone10(raw) {
-  return /^\d{10}$/.test(normalizePhone10(raw));
-}
-
-function validateClientRequestPayload(body = {}, type) {
-  const errors = [];
-  const requiredByType = {
-    service_request: ['fullName', 'phone', 'wasClientBefore', 'brand', 'model', 'year', 'vin', 'description'],
-    parts_request: ['fullName', 'phone', 'wasClientBefore', 'year', 'vin', 'description'],
-    consultation_request: ['fullName', 'phone', 'wasClientBefore', 'car', 'vin', 'question'],
-    warranty_request: ['fullName', 'phone', 'visitDate', 'description'],
-    data_change_request: ['fullName', 'phone', 'changeDetails']
-  };
-  for (const field of requiredByType[type] || []) {
-    if (!String(body[field] || '').trim()) errors.push(`${field} is required`);
-  }
-  if (!isValidPhone10(body.phone)) errors.push('phone must normalize to exactly 10 digits without +7/8');
-  return errors;
-}
 
 async function sendTelegramMessage(token, chatId, text, extra = {}) {
   if (!token || !chatId) return false;
@@ -131,16 +136,16 @@ async function duplicateToMastersChat({ config, request, payload }) {
   });
 }
 
-function createClientRequest({ body, type, sourceChannel = 'webapp' }) {
-  const normalizedPhone = normalizePhone10(body.phone);
-  const client = db.upsertClient({
+function createClientRequest({ body, type, sourceChannel = 'webapp', repositories = createRepositories({ db }) }) {
+  const normalizedPhone = resolvePhoneInput(body);
+  const client = repositories.requests.createClient({
     fullName: body.fullName,
     phone: normalizedPhone,
     telegramId: body.telegramId ? String(body.telegramId) : null,
     maxId: body.maxId ? String(body.maxId) : null,
     preferredChannel: sourceChannel.startsWith('max_') ? 'max' : (body.telegramId ? 'telegram' : null)
   });
-  const vehicle = db.upsertVehicle({
+  const vehicle = repositories.requests.createVehicle({
     clientId: client.id,
     brand: body.brand,
     model: body.model || body.car,
@@ -148,7 +153,7 @@ function createClientRequest({ body, type, sourceChannel = 'webapp' }) {
     vin: body.vin,
     plateNumber: body.plateNumber
   });
-  const request = db.createRequest({
+  const request = repositories.requests.create({
     clientId: client.id,
     vehicleId: vehicle?.id || null,
     requestType: type,
@@ -159,7 +164,9 @@ function createClientRequest({ body, type, sourceChannel = 'webapp' }) {
       visitDate: body.visitDate || '',
       car: body.car || '',
       question: body.question || '',
-      changeDetails: body.changeDetails || ''
+      changeDetails: body.changeDetails || '',
+      contactSource: body.contactSource || body.nativeContact?.source || 'manual',
+      nativeContact: body.nativeContact || null
     }
   });
   db.createCommunicationEvent({
@@ -168,7 +175,7 @@ function createClientRequest({ body, type, sourceChannel = 'webapp' }) {
     source: sourceChannel === 'webapp' || sourceChannel === 'max_webapp' ? 'webapp' : 'bot',
     channel: sourceChannel,
     direction: 'inbound',
-    payload: { action: 'request_created', type }
+    payload: { action: 'request_created', type, contactSource: body.contactSource || body.nativeContact?.source || 'manual' }
   });
   return { client, vehicle, request };
 }
@@ -285,7 +292,8 @@ function buildHealthPayload(config) {
     status: 'ok',
     uptimeSeconds: Math.round(process.uptime()),
     env: config.nodeEnv,
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
+    envAudit: config.envAudit
   };
 }
 
@@ -325,7 +333,10 @@ function buildMaxHealthPayload(config) {
 
 function createServer({ config, logger }) {
   const router = [];
+  const repositories = createRepositories({ db });
   const reportingService = createReportingService({ db });
+  const webappLimiter = createRateLimiter({ windowMs: config.webappRateLimitWindowMs, limit: config.webappRateLimitMax });
+  const webhookLimiter = createRateLimiter({ windowMs: config.webhookRateLimitWindowMs, limit: config.webhookRateLimitMax });
   require('../interfaces/client_bot').registerClientBotRoutes(router);
   require('../interfaces/master_bot').registerMasterBotRoutes(router);
   require('../interfaces/integration_bot').registerIntegrationBotRoutes(router);
@@ -333,6 +344,7 @@ function createServer({ config, logger }) {
   return http.createServer(async (req, res) => {
     const requestUrl = new URL(req.url, 'http://localhost');
     const pathname = requestUrl.pathname;
+    logger.info('http request received', { method: req.method, pathname, ip: requestIp(req) });
 
     if (req.method === 'GET' && pathname === '/health') return sendJson(res, 200, buildHealthPayload(config));
     if (req.method === 'GET' && pathname === '/health/db') return sendJson(res, 200, buildDbHealthPayload());
@@ -353,6 +365,21 @@ function createServer({ config, logger }) {
       }).slice(-100).reverse();
       const requestCards = new Map(requests.map((item) => [item.id, db.getRequestCard(item.id)]));
       return sendHtml(res, 200, renderInternalRequestsPage({ requests, filters, adminId: auth.adminId, requestCards }));
+    }
+
+    if (req.method === 'GET' && pathname === '/internal/export') {
+      const auth = isInternalAuthorized(req, requestUrl, config);
+      if (!auth.ok) return sendJson(res, 403, { error: 'FORBIDDEN' });
+      const format = requestUrl.searchParams.get('format') === 'json' ? 'json' : 'csv';
+      const statuses = (requestUrl.searchParams.get('status') || '').split(',').map((item) => item.trim()).filter(Boolean);
+      const filters = { from: requestUrl.searchParams.get('from') || '', to: requestUrl.searchParams.get('to') || '', statuses };
+      const items = filterRequestsForExport(repositories.requests.list({ statuses: statuses.length ? statuses : undefined }), filters)
+        .map((request) => mapRequestForExport(request, repositories.requests.getCard(request.id) || {}));
+      logger.info('internal export generated', { adminId: auth.adminId, format, count: items.length, filters });
+      if (format === 'json') {
+        return sendText(res, 200, JSON.stringify({ items }, null, 2), 'application/json', { 'Content-Disposition': `attachment; filename="${exportFilename(format)}"` });
+      }
+      return sendText(res, 200, serializeCsv(items), 'text/csv', { 'Content-Disposition': `attachment; filename="${exportFilename(format)}"` });
     }
 
     if (req.method === 'POST' && /^\/internal\/requests\/[^/]+\/status$/.test(pathname)) {
@@ -404,6 +431,8 @@ function createServer({ config, logger }) {
     }
 
     if (req.method === 'POST' && pathname.startsWith('/api/client/requests/')) {
+      const limited = applyRateLimit(res, webappLimiter, `webapp:${requestIp(req)}`, logger, { pathname, channel: 'webapp' });
+      if (limited) return;
       const { body, invalidJson } = await readBody(req);
       if (invalidJson) return sendJson(res, 400, { error: 'Invalid JSON payload' });
 
@@ -417,9 +446,8 @@ function createServer({ config, logger }) {
       const type = typeMap[pathname];
       if (!type) return sendJson(res, 404, { error: 'Not found' });
 
-      const normalizedPhone = normalizePhone10(body.phone);
+      const { errors, normalizedPhone } = validateClientRequestPayloadWithPhone(body, type);
       body.phone = normalizedPhone;
-      const errors = validateClientRequestPayload(body, type);
       if (errors.length) {
         trackAnalytics({
           eventType: 'request_failed',
@@ -429,47 +457,36 @@ function createServer({ config, logger }) {
           status: 'validation_error',
           metaJson: { errors }
         });
+        logger.warn('client request validation failed', { pathname, errors, ip: requestIp(req) });
         return sendJson(res, 400, { error: 'Validation error', details: errors });
       }
 
-      const dedupeText = body.description || body.question || body.changeDetails || '';
-      const duplicate = db.findRecentDuplicateRequest({
+      const sourceChannel = body.sourceChannel === 'max_webapp' ? 'max_webapp' : 'webapp';
+      const duplicate = repositories.requests.findRecentDuplicate({
         requestType: type,
         phone: body.phone,
         vin: body.vin,
-        text: dedupeText,
+        text: body.description || body.question || body.changeDetails || '',
         withinMs: config.webappDedupeWindowMs
       });
-      if (duplicate) {
+      const { client, request: created } = createClientRequest({ body, type, sourceChannel, repositories });
+      if (duplicate && duplicate.id !== created.id) {
+        repositories.requests.markDuplicate({
+          requestId: created.id,
+          duplicateOfRequestId: duplicate.id,
+          metaJson: { sourceChannel, phone: body.phone }
+        });
         trackAnalytics({
-          eventType: 'request_failed',
-          channel: body.sourceChannel === 'max_webapp' ? 'max' : 'telegram',
-          platform: body.sourceChannel === 'max_webapp' ? 'max' : 'telegram',
+          eventType: 'request_duplicate_detected',
+          channel: sourceChannel === 'max_webapp' ? 'max' : 'telegram',
+          platform: sourceChannel === 'max_webapp' ? 'max' : 'telegram',
           requestType: type,
-          requestId: duplicate.id,
-          clientId: duplicate.clientId,
+          requestId: created.id,
+          clientId: client.id,
           status: 'duplicate_detected',
           metaJson: { duplicateRequestId: duplicate.id }
         });
-        db.recordRequestEvent({
-          requestId: duplicate.id,
-          clientId: duplicate.clientId,
-          eventType: 'duplicate_detected',
-          actorId: 'system',
-          actorRole: 'system',
-          actorType: 'system',
-          oldValue: duplicate.status || null,
-          newValue: duplicate.status || null,
-          metaJson: {
-            duplicateRequestId: duplicate.id,
-            sourceChannel: body.sourceChannel === 'max_webapp' ? 'max_webapp' : 'webapp'
-          }
-        });
-        return sendJson(res, 200, { ...duplicate, deduplicated: true });
       }
-
-      const sourceChannel = body.sourceChannel === 'max_webapp' ? 'max_webapp' : 'webapp';
-      const { client, request: created } = createClientRequest({ body, type, sourceChannel });
       trackAnalytics({
         eventType: 'request_created',
         channel: sourceChannel === 'max_webapp' ? 'max' : 'telegram',
@@ -484,7 +501,7 @@ function createServer({ config, logger }) {
       if (created.requestType === REQUEST_TYPES.COMPLAINT) {
         await duplicateToMastersChat({ config, request: created, payload: body });
       }
-      return sendJson(res, 201, created);
+      return sendJson(res, 201, duplicate ? { ...created, deduplicated: true, duplicateOfRequestId: duplicate.id } : created);
     }
 
     if (req.method === 'POST' && pathname === '/api/analytics/events') {
@@ -671,6 +688,10 @@ function createServer({ config, logger }) {
 
     const matched = router.find((item) => item.path === pathname && item.method === req.method);
     if (matched) {
+      if (pathname.includes('/webhook')) {
+        const limited = applyRateLimit(res, webhookLimiter, `webhook:${pathname}:${requestIp(req)}`, logger, { pathname, channel: 'webhook' });
+        if (limited) return;
+      }
       const { body, invalidJson } = await readBody(req);
       if (invalidJson) return sendJson(res, 400, { error: 'Invalid JSON payload' });
       const payload = matched.handler

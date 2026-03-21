@@ -10,6 +10,7 @@
   const PHONE_HINT = 'Введите 10 цифр';
   const PHONE_MAX_LENGTH = 10;
   let phoneValidityState = null;
+  let nativeContactState = null;
 
   const requestTypeLabels = {
     service_request: 'Заявка на сервис',
@@ -261,9 +262,54 @@
       return `<fieldset data-field="wasClientBefore"><legend>${label(name)}</legend><label><input type="radio" name="wasClientBefore" value="yes"> Да</label><label><input type="radio" name="wasClientBefore" value="no"> Нет</label><small class="field-error"></small></fieldset>`;
     }
     if (name === 'description' || name === 'question' || name === 'changeDetails') return `<label data-field="${name}">${label(name)}<textarea name="${name}"></textarea><small class="field-error"></small></label>`;
-    if (name === 'phone') return `<label data-field="phone">Телефон<input name="phone" inputmode="tel" autocomplete="tel" maxlength="10" placeholder="9991234567"/><small class="hint">Введите 10 цифр без кода страны.</small><small class="field-error"></small></label>`;
+    if (name === 'phone') return `<label data-field="phone">Телефон<input name="phone" inputmode="tel" autocomplete="tel" maxlength="10" placeholder="9991234567"/><button type="button" class="inline native-contact-btn" hidden>Заполнить из профиля</button><small class="hint">Введите 10 цифр без кода страны.</small><small class="field-error"></small></label>`;
     if (name === 'visitDate') return `<label data-field="visitDate">${label(name)}<input type="date" name="visitDate"/><small class="field-error"></small></label>`;
     return `<label data-field="${name}">${label(name)}<input name="${name}"/><small class="field-error"></small></label>`;
+  }
+
+
+  function getNativeContactRequester() {
+    const maxRequester = window.MAX?.WebApp?.requestContact;
+    if (typeof maxRequester === 'function') {
+      return {
+        source: 'max_webapp_requestContact',
+        request: () => maxRequester.call(window.MAX.WebApp)
+      };
+    }
+    const telegramRequester = window.Telegram?.WebApp?.requestContact;
+    if (typeof telegramRequester === 'function') {
+      return {
+        source: 'telegram_webapp_requestContact',
+        request: () => telegramRequester.call(window.Telegram.WebApp)
+      };
+    }
+    return null;
+  }
+
+  function normalizeNativeContactPayload(result, source) {
+    if (!result) return null;
+    if (typeof result === 'string') {
+      const phoneNumber = normalizePhone10(result);
+      return phoneNumber ? { phoneNumber, source } : null;
+    }
+    const phoneNumber = normalizePhone10(result.phoneNumber || result.phone_number || result.phone || result.contact?.phoneNumber || result.contact?.phone_number);
+    if (!phoneNumber) return null;
+    return {
+      phoneNumber,
+      source,
+      raw: result
+    };
+  }
+
+  async function requestNativeContact() {
+    const requester = getNativeContactRequester();
+    if (!requester) return null;
+    try {
+      const result = await requester.request();
+      return normalizeNativeContactPayload(result, requester.source);
+    } catch {
+      return null;
+    }
   }
 
   function clearErrors(form) {
@@ -319,6 +365,11 @@
 
     const payload = Object.fromEntries(new FormData(form).entries());
     payload.phone = normalizePhone10(payload.phone);
+    if (nativeContactState?.phoneNumber) {
+      payload.phone = nativeContactState.phoneNumber;
+      payload.contactSource = nativeContactState.source;
+      payload.nativeContact = nativeContactState;
+    }
     Object.assign(payload, detectChannelIdentity());
 
     const phoneIsValid = updatePhoneFieldState(form, payload.phone, { touched: true, forceError: !/^\d{10}$/.test(String(payload.phone || '')) });
@@ -417,11 +468,29 @@
     const form = document.getElementById('request-form');
     const phoneField = form.querySelector('input[name="phone"]');
     let phoneTouched = false;
-    createPhoneInputController(phoneField, {
+    const phoneController = createPhoneInputController(phoneField, {
       onChange(digits) {
+        if (nativeContactState?.phoneNumber !== digits) nativeContactState = null;
         updatePhoneFieldState(form, digits, { touched: phoneTouched });
       }
     });
+    const nativeContactButton = form.querySelector('.native-contact-btn');
+    const nativeContactRequester = getNativeContactRequester();
+    if (nativeContactButton && nativeContactRequester) {
+      nativeContactButton.hidden = false;
+      nativeContactButton.addEventListener('click', async () => {
+        nativeContactButton.disabled = true;
+        nativeContactButton.textContent = 'Запрашиваю...';
+        const contact = await requestNativeContact();
+        nativeContactButton.disabled = false;
+        nativeContactButton.textContent = contact ? 'Телефон получен' : 'Заполнить из профиля';
+        if (!contact) return;
+        nativeContactState = contact;
+        phoneController.setDigits(contact.phoneNumber);
+        phoneTouched = true;
+        updatePhoneFieldState(form, contact.phoneNumber, { touched: true });
+      });
+    }
     phoneField.addEventListener('blur', () => {
       phoneTouched = true;
       updatePhoneFieldState(form, phoneField.value, { touched: true });

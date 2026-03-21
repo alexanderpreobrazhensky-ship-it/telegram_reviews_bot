@@ -9,6 +9,13 @@ function parseNumber(value, fallback, { min = Number.NEGATIVE_INFINITY, max = Nu
   return Math.min(Math.max(parsed, min), max);
 }
 
+function parseList(value) {
+  return String(value || '')
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
 function loadConfig() {
   const port = parseNumber(process.env.PORT, 3000, { min: 1, max: 65535 });
   const integrationRetryMax = parseNumber(process.env.INTEGRATION_RETRY_MAX, 3, { min: 1, max: 20 });
@@ -19,25 +26,22 @@ function loadConfig() {
   const schedulerMaxAttempts = parseNumber(process.env.SCHEDULER_MAX_ATTEMPTS, 3, { min: 1, max: 10 });
   const schedulerStuckTimeoutMs = parseNumber(process.env.SCHEDULER_STUCK_TIMEOUT_MS, 300000, { min: 1000, max: 86400000 });
   const webappDedupeWindowMs = parseNumber(process.env.WEBAPP_DEDUPE_WINDOW_MS, 45000, { min: 5000, max: 600000 });
-  const masterBotAdminIds = String(process.env.MASTER_BOT_ADMIN_IDS || '')
-    .split(',')
-    .map((id) => id.trim())
-    .filter(Boolean);
-  const maxMasterBotAdminIds = String(process.env.MAX_MASTER_BOT_ADMIN_IDS || '')
-    .split(',')
-    .map((id) => id.trim())
-    .filter(Boolean);
-  const internalAdminWhitelist = String(process.env.INTERNAL_ADMIN_WHITELIST || process.env.INTERNAL_ADMIN_WHITELIST_IDS || '')
-    .split(',')
-    .map((id) => id.trim())
-    .filter(Boolean);
+  const webappRateLimitWindowMs = parseNumber(process.env.WEBAPP_RATE_LIMIT_WINDOW_MS, 15000, { min: 1000, max: 300000 });
+  const webappRateLimitMax = parseNumber(process.env.WEBAPP_RATE_LIMIT_MAX, 5, { min: 1, max: 100 });
+  const webhookRateLimitWindowMs = parseNumber(process.env.WEBHOOK_RATE_LIMIT_WINDOW_MS, 10000, { min: 1000, max: 300000 });
+  const webhookRateLimitMax = parseNumber(process.env.WEBHOOK_RATE_LIMIT_MAX, 30, { min: 1, max: 500 });
 
-  return {
+  const masterBotAdminIds = parseList(process.env.MASTER_BOT_ADMIN_IDS);
+  const maxMasterBotAdminIds = parseList(process.env.MAX_MASTER_BOT_ADMIN_IDS);
+  const internalAdminWhitelist = parseList(process.env.INTERNAL_ADMIN_WHITELIST || process.env.INTERNAL_ADMIN_WHITELIST_IDS);
+
+  const config = {
     nodeEnv: process.env.NODE_ENV || 'development',
     port,
     telegramClientBotToken: process.env.TELEGRAM_CLIENT_BOT_TOKEN || '',
     telegramMasterBotToken: process.env.TELEGRAM_MASTER_BOT_TOKEN || '',
     telegramIntegrationBotToken: process.env.TELEGRAM_INTEGRATION_BOT_TOKEN || '',
+    masterBotAdminIds,
     maxEnabled: parseBoolean(process.env.MAX_ENABLED, false),
     maxClientBotToken: process.env.MAX_CLIENT_BOT_TOKEN || '',
     maxMasterBotToken: process.env.MAX_MASTER_BOT_TOKEN || '',
@@ -45,7 +49,9 @@ function loadConfig() {
     maxWebAppUrl: process.env.MAX_WEBAPP_URL || process.env.WEBAPP_URL || 'https://example.com',
     maxBotName: process.env.MAX_BOT_NAME || '',
     maxDeepLinkBaseUrl: process.env.MAX_DEEPLINK_BASE_URL || '',
-    dbUrl: process.env.DB_URL || 'postgres://localhost:5432/telegram_reviews',
+    maxMasterBotAdminIds,
+    dbDriver: process.env.DB_DRIVER || 'sqlite',
+    dbUrl: process.env.DB_URL || '',
     dbSqlitePath: process.env.DB_SQLITE_PATH || process.env.DB_FILE_PATH || 'data/db.sqlite',
     queueDriver: process.env.QUEUE_DRIVER || 'memory',
     oneCWebhookSecret: process.env.ONE_C_WEBHOOK_SECRET || '',
@@ -61,13 +67,33 @@ function loadConfig() {
     schedulerMaxAttempts,
     schedulerStuckTimeoutMs,
     webappDedupeWindowMs,
+    webappRateLimitWindowMs,
+    webappRateLimitMax,
+    webhookRateLimitWindowMs,
+    webhookRateLimitMax,
     telegramMastersChatId: process.env.TELEGRAM_MASTERS_CHAT_ID || '',
+    telegramDebugChatId: process.env.TELEGRAM_DEBUG_CHAT_ID || '',
     webappTelegramChannelLink: process.env.TELEGRAM_CHANNEL_URL || process.env.WEBAPP_TELEGRAM_CHANNEL_LINK || '',
-    masterBotAdminIds,
-    maxMasterBotAdminIds,
     internalAdminWhitelist,
-    maxDiagnosticsEnabled: parseBoolean(process.env.MAX_DIAGNOSTICS_ENABLED, true)
+    maxDiagnosticsEnabled: parseBoolean(process.env.MAX_DIAGNOSTICS_ENABLED, true),
+    envAudit: {
+      requiredMissing: [
+        !process.env.WEBAPP_URL ? 'WEBAPP_URL' : null,
+        !process.env.DB_SQLITE_PATH && !process.env.DB_FILE_PATH ? 'DB_SQLITE_PATH/DB_FILE_PATH' : null
+      ].filter(Boolean),
+      deprecatedConfigured: [
+        process.env.DB_FILE_PATH ? 'DB_FILE_PATH' : null,
+        process.env.INTERNAL_ADMIN_WHITELIST_IDS ? 'INTERNAL_ADMIN_WHITELIST_IDS' : null,
+        process.env.WEBAPP_TELEGRAM_CHANNEL_LINK ? 'WEBAPP_TELEGRAM_CHANNEL_LINK' : null
+      ].filter(Boolean)
+    }
   };
+
+  if (!config.dbSqlitePath) {
+    throw new Error('DB_SQLITE_PATH (or legacy DB_FILE_PATH) is required');
+  }
+
+  return config;
 }
 
 module.exports = { loadConfig };

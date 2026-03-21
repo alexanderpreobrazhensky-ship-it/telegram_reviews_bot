@@ -1,5 +1,6 @@
 const MAX_API_BASE_URL = 'https://platform-api.max.ru';
 const logger = require('../logging/logger');
+const { withRetry } = require('../retry');
 
 function safeUrl(value) {
   try {
@@ -87,11 +88,11 @@ async function sendTelegramMessage(token, chatId, text, extra = {}) {
     return false;
   }
   try {
-    const response = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+    const response = await withRetry(() => fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ chat_id: chatId, text, ...extra })
-    });
+    }), { operation: 'telegram.sendMessage' });
     if (!response.ok) {
       const responseText = await response.text().catch(() => '');
       logger.error('telegram sendMessage failed', { status: response.status, chatId, responseText: responseText.slice(0, 500) });
@@ -113,14 +114,14 @@ async function sendMaxMessage(token, userId, text, extra = {}) {
   const payload = { text };
   if (attachments.length) payload.attachments = attachments;
   try {
-    const response = await fetch(`${MAX_API_BASE_URL}/messages?user_id=${encodeURIComponent(String(userId))}`, {
+    const response = await withRetry(() => fetch(`${MAX_API_BASE_URL}/messages?user_id=${encodeURIComponent(String(userId))}`, {
       method: 'POST',
       headers: {
         Authorization: token,
         'Content-Type': 'application/json'
       },
       body: JSON.stringify(payload)
-    });
+    }), { operation: 'max.sendMessage' });
     if (!response.ok) {
       const responseText = await response.text().catch(() => '');
       logger.error('MAX sendMessage failed', { status: response.status, userId, responseText: responseText.slice(0, 500) });
@@ -144,11 +145,11 @@ async function answerTelegramCallback(token, callbackId, text) {
     return false;
   }
   try {
-    const response = await fetch(`https://api.telegram.org/bot${token}/answerCallbackQuery`, {
+    const response = await withRetry(() => fetch(`https://api.telegram.org/bot${token}/answerCallbackQuery`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ callback_query_id: callbackId, text })
-    });
+    }), { operation: 'telegram.answerCallbackQuery' });
     if (!response.ok) {
       const responseText = await response.text().catch(() => '');
       logger.error('telegram answerCallback failed', { status: response.status, callbackId, responseText: responseText.slice(0, 500) });
@@ -167,14 +168,14 @@ async function answerMaxCallback(token, callbackId, text) {
     return false;
   }
   try {
-    const response = await fetch(`${MAX_API_BASE_URL}/answers?callback_id=${encodeURIComponent(String(callbackId))}`, {
+    const response = await withRetry(() => fetch(`${MAX_API_BASE_URL}/answers?callback_id=${encodeURIComponent(String(callbackId))}`, {
       method: 'POST',
       headers: {
         Authorization: token,
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({ notification: text })
-    });
+    }), { operation: 'max.answerCallback' });
     if (!response.ok) {
       const responseText = await response.text().catch(() => '');
       logger.error('MAX answerCallback failed', { status: response.status, callbackId, responseText: responseText.slice(0, 500) });
