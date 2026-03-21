@@ -7,7 +7,7 @@
   const startAppPayload = params.get('startapp') || '';
   const channelLink = window.__WEBAPP_TELEGRAM_CHANNEL_LINK__ || '#';
   const logoSrc = '/logo.png';
-  const PHONE_HINT = 'Введите корректный номер: 10 цифр без +7/8';
+  const PHONE_HINT = 'Введите 10 цифр';
   const PHONE_MAX_LENGTH = 10;
 
   const requestTypeLabels = {
@@ -38,8 +38,16 @@
     return String(value || '').replace(/\D/g, '');
   }
 
-  function shouldTrimRussianPrefix(digits) {
-    return digits.length > PHONE_MAX_LENGTH && /^[78]/.test(digits);
+  function stripRussianPrefix(digits) {
+    if (digits.length >= PHONE_MAX_LENGTH + 1 && /^[78]/.test(digits)) return digits.slice(1);
+    return digits;
+  }
+
+  function sanitizePhoneDigits(value, options = {}) {
+    const digits = stripRussianPrefix(extractPhoneDigits(value));
+    if (!digits) return '';
+    if (options.truncate === false) return digits;
+    return digits.slice(0, PHONE_MAX_LENGTH);
   }
 
   function normalizePhone10(value) {
@@ -51,10 +59,7 @@
   }
 
   function normalizePhoneInputValue(value) {
-    const digits = extractPhoneDigits(value);
-    if (!digits) return '';
-    const trimmed = shouldTrimRussianPrefix(digits) ? digits.slice(1) : digits;
-    return trimmed.slice(0, PHONE_MAX_LENGTH);
+    return sanitizePhoneDigits(value);
   }
 
   function onlyPhoneDigits(value) {
@@ -64,8 +69,7 @@
   function countDigitsBeforeCaret(value, caret) {
     const safeValue = String(value || '');
     const safeCaret = Math.max(0, Math.min(Number(caret) || 0, safeValue.length));
-    const beforeCaretDigits = extractPhoneDigits(safeValue.slice(0, safeCaret));
-    return Math.min(normalizePhoneInputValue(beforeCaretDigits).length, PHONE_MAX_LENGTH);
+    return normalizePhoneInputValue(safeValue.slice(0, safeCaret)).length;
   }
 
   function formatPhoneMask(rawValue) {
@@ -82,39 +86,40 @@
   }
 
   function applyPhoneEdit(rawValue, selection, inputType, text) {
-    const currentValue = String(rawValue || '');
+    const currentDigits = normalizePhoneInputValue(rawValue);
     const start = phoneCaretFromDigitIndex(selection?.start);
     const end = phoneCaretFromDigitIndex(selection?.end);
-    const insertedText = String(text || '');
-    let nextRawValue = currentValue;
+    const replacementDigits = sanitizePhoneDigits(text, { truncate: false });
+    let nextDigits = currentDigits;
     let caret = start;
 
     if (inputType === 'deleteContentBackward') {
       if (start !== end) {
-        nextRawValue = `${currentValue.slice(0, start)}${currentValue.slice(end)}`;
+        nextDigits = `${currentDigits.slice(0, start)}${currentDigits.slice(end)}`;
         caret = start;
       } else if (start > 0) {
-        nextRawValue = `${currentValue.slice(0, start - 1)}${currentValue.slice(start)}`;
+        nextDigits = `${currentDigits.slice(0, start - 1)}${currentDigits.slice(start)}`;
         caret = start - 1;
       }
     } else if (inputType === 'deleteContentForward') {
       if (start !== end) {
-        nextRawValue = `${currentValue.slice(0, start)}${currentValue.slice(end)}`;
+        nextDigits = `${currentDigits.slice(0, start)}${currentDigits.slice(end)}`;
       } else {
-        nextRawValue = `${currentValue.slice(0, start)}${currentValue.slice(start + 1)}`;
+        nextDigits = `${currentDigits.slice(0, start)}${currentDigits.slice(start + 1)}`;
       }
       caret = start;
     } else if (inputType === 'deleteByCut') {
-      nextRawValue = `${currentValue.slice(0, start)}${currentValue.slice(end)}`;
+      nextDigits = `${currentDigits.slice(0, start)}${currentDigits.slice(end)}`;
       caret = start;
     } else {
-      nextRawValue = `${currentValue.slice(0, start)}${insertedText}${currentValue.slice(end)}`;
-      caret = start + insertedText.length;
+      nextDigits = `${currentDigits.slice(0, start)}${replacementDigits}${currentDigits.slice(end)}`;
+      caret = start + replacementDigits.length;
     }
 
+    nextDigits = normalizePhoneInputValue(nextDigits);
     return {
-      digits: normalizePhoneInputValue(nextRawValue),
-      caret: countDigitsBeforeCaret(nextRawValue, caret)
+      digits: nextDigits,
+      caret: Math.min(caret, nextDigits.length)
     };
   }
 
@@ -129,7 +134,7 @@
       input.value = digits;
       input.dataset.phoneDigits = digits;
       if (typeof input.setSelectionRange === 'function') {
-        const nextCaret = phoneCaretFromDigitIndex(caret);
+        const nextCaret = phoneCaretFromDigitIndex(Math.min(caret, digits.length));
         input.setSelectionRange(nextCaret, nextCaret);
       }
       onChange(digits);
@@ -138,16 +143,24 @@
     function syncFromDom() {
       const caret = countDigitsBeforeCaret(input.value, input.selectionStart);
       digits = normalizePhoneInputValue(input.value);
-      render(Math.min(caret, digits.length));
+      render(caret);
     }
 
-    function applyEdit(inputType, text) {
-      const result = applyPhoneEdit(input.value, {
+    function applyEdit(inputType, text = '') {
+      const result = applyPhoneEdit(digits, {
         start: input.selectionStart,
         end: input.selectionEnd
       }, inputType, text);
       digits = result.digits;
       render(result.caret);
+    }
+
+    function onBeforeInput(event) {
+      if (event.isComposing || !event.cancelable) return;
+      const supported = new Set(['insertText', 'insertFromPaste', 'deleteContentBackward', 'deleteContentForward']);
+      if (!supported.has(event.inputType)) return;
+      event.preventDefault();
+      applyEdit(event.inputType, event.data || '');
     }
 
     function onInput() {
@@ -165,6 +178,7 @@
       applyEdit('deleteByCut');
     }
 
+    input.addEventListener('beforeinput', onBeforeInput);
     input.addEventListener('input', onInput);
     input.addEventListener('paste', onPaste);
     input.addEventListener('cut', onCut);
@@ -180,6 +194,7 @@
       syncFromDom,
       applyEdit,
       destroy() {
+        input.removeEventListener('beforeinput', onBeforeInput);
         input.removeEventListener('input', onInput);
         input.removeEventListener('paste', onPaste);
         input.removeEventListener('cut', onCut);
@@ -224,7 +239,7 @@
       return `<fieldset data-field="wasClientBefore"><legend>${label(name)}</legend><label><input type="radio" name="wasClientBefore" value="yes"> Да</label><label><input type="radio" name="wasClientBefore" value="no"> Нет</label><small class="field-error"></small></fieldset>`;
     }
     if (name === 'description' || name === 'question' || name === 'changeDetails') return `<label data-field="${name}">${label(name)}<textarea name="${name}"></textarea><small class="field-error"></small></label>`;
-    if (name === 'phone') return `<label data-field="phone">Телефон<input name="phone" inputmode="tel" autocomplete="tel" maxlength="10" placeholder="9991234567"/><small class="hint">Введите 10 цифр. +7, 8 и другие символы будут отброшены автоматически.</small><small class="field-error"></small></label>`;
+    if (name === 'phone') return `<label data-field="phone">Телефон<input name="phone" inputmode="tel" autocomplete="tel" maxlength="10" placeholder="9991234567"/><small class="hint">Введите 10 цифр без кода страны.</small><small class="field-error"></small></label>`;
     if (name === 'visitDate') return `<label data-field="visitDate">${label(name)}<input type="date" name="visitDate"/><small class="field-error"></small></label>`;
     return `<label data-field="${name}">${label(name)}<input name="${name}"/><small class="field-error"></small></label>`;
   }
@@ -251,6 +266,20 @@
     return errors;
   }
 
+
+  function updatePhoneFieldState(form, digits, options = {}) {
+    const phoneBox = form.querySelector('[data-field="phone"]');
+    const phoneError = phoneBox?.querySelector('.field-error');
+    const submit = form.querySelector('button[type="submit"]');
+    const isValid = /^\d{10}$/.test(String(digits || ''));
+    const shouldShowError = options.forceError || (options.touched && !isValid && String(digits || '').length > 0);
+
+    phoneBox?.classList.toggle('has-error', shouldShowError);
+    if (phoneError) phoneError.textContent = shouldShowError ? PHONE_HINT : '';
+    if (submit) submit.disabled = !isValid;
+    return isValid;
+  }
+
   async function submitForm(event, cfg) {
     event.preventDefault();
     const form = event.target;
@@ -264,8 +293,9 @@
     payload.phone = normalizePhone10(payload.phone);
     Object.assign(payload, detectChannelIdentity());
 
+    const phoneIsValid = updatePhoneFieldState(form, payload.phone, { touched: true, forceError: !/^\d{10}$/.test(String(payload.phone || '')) });
     const errors = validatePayload(cfg.type, payload);
-    if (errors.length) {
+    if (!phoneIsValid || errors.length) {
       errors.forEach((err) => setFieldError(form, err.field, err.message));
       globalError.textContent = 'Пожалуйста, исправьте ошибки в форме.';
       return;
@@ -290,7 +320,7 @@
     const error = mount.querySelector('[data-field="phone"] .field-error');
     const phoneMask = createPhoneInputController(input, {
       onChange(digits) {
-        if (/^\d{10}$/.test(digits)) error.textContent = '';
+        error.textContent = /^\d{10}$/.test(digits) ? '' : (String(digits || '').length ? PHONE_HINT : '');
       }
     });
     const list = document.getElementById('list');
@@ -353,16 +383,21 @@
     mount.innerHTML = `<section><img class="brand-logo" src="${logoSrc}" alt="logo"/><h2>${cfg.title}</h2><form id="request-form"><p class="form-error"></p>${cfg.fields.map(renderField).join('')}<button type="submit">Отправить</button></form></section>`;
     const form = document.getElementById('request-form');
     const phoneField = form.querySelector('input[name="phone"]');
+    let phoneTouched = false;
     createPhoneInputController(phoneField, {
       onChange(digits) {
-        if (!/^\d{10}$/.test(digits)) return;
-        const phoneBox = form.querySelector('[data-field="phone"]');
-        phoneBox?.classList.remove('has-error');
-        const phoneError = phoneBox?.querySelector('.field-error');
-        if (phoneError) phoneError.textContent = '';
+        updatePhoneFieldState(form, digits, { touched: phoneTouched });
       }
     });
-    form.addEventListener('submit', (e) => submitForm(e, cfg));
+    phoneField.addEventListener('blur', () => {
+      phoneTouched = true;
+      updatePhoneFieldState(form, phoneField.value, { touched: true });
+    });
+    updatePhoneFieldState(form, phoneField.value);
+    form.addEventListener('submit', (e) => {
+      phoneTouched = true;
+      submitForm(e, cfg);
+    });
     return;
   }
 

@@ -1,4 +1,4 @@
-const REQUEST_STATUSES = ['new', 'waiting_data', 'in_progress', 'processed', 'lost', 'archived'];
+const REQUEST_STATUSES = ['new', 'assigned', 'awaiting_client', 'scheduled', 'in_service', 'done', 'cancelled'];
 const QUALITY_CASE_STATUSES = ['new', 'assigned', 'in_progress', 'resolved', 'unresolved', 'archived'];
 
 function deriveClientChannel(requestCard) {
@@ -51,8 +51,8 @@ function createMasterService({ db, sendClientMessage, adminIds = [], actorChanne
       return db.listRecommendations({ clientId, includeHistory: true });
     },
 
-    changeRequestStatus({ requestId, toStatus, actorId, actorRole, lostReason }) {
-      return db.updateRequestStatus({ requestId, toStatus, actorId, actorRole, lostReason });
+    changeRequestStatus({ requestId, toStatus, actorId, actorRole, lostReason, comment }) {
+      return db.updateRequestStatus({ requestId, toStatus, actorId, actorRole, lostReason, comment });
     },
 
     addInternalComment({ requestId, actorId, actorRole, text }) {

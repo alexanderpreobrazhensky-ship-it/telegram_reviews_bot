@@ -12,11 +12,12 @@ const REQUEST_TYPES = Object.freeze({
 
 const REQUEST_STATUSES = Object.freeze({
   NEW: 'new',
-  WAITING_DATA: 'waiting_data',
-  IN_PROGRESS: 'in_progress',
-  PROCESSED: 'processed',
-  LOST: 'lost',
-  ARCHIVED: 'archived'
+  ASSIGNED: 'assigned',
+  AWAITING_CLIENT: 'awaiting_client',
+  SCHEDULED: 'scheduled',
+  IN_SERVICE: 'in_service',
+  DONE: 'done',
+  CANCELLED: 'cancelled'
 });
 
 const VISIT_STATUSES = Object.freeze({

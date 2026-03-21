@@ -17,7 +17,9 @@ test('agreed request types are fixed in domain enums', () => {
 });
 
 test('agreed status enums exist', () => {
-  assert.equal(Object.values(REQUEST_STATUSES).includes('archived'), true);
+  assert.equal(Object.values(REQUEST_STATUSES).includes('assigned'), true);
+  assert.equal(Object.values(REQUEST_STATUSES).includes('done'), true);
+  assert.equal(Object.values(REQUEST_STATUSES).includes('cancelled'), true);
   assert.equal(Object.values(VISIT_STATUSES).includes('closed'), true);
   assert.equal(Object.values(RECOMMENDATION_STATUSES).includes('deleted'), true);
   assert.equal(Object.values(QUALITY_CASE_STATUSES).includes('unresolved'), true);

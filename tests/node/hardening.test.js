@@ -109,6 +109,7 @@ test('normalizePhone10 and server validation keep only 10-digit phones', () => {
   assert.equal(normalizePhone10('9991112233'), '9991112233');
   assert.equal(normalizePhone10('12345'), '12345');
   assert.equal(normalizePhone10('123456789012345'), '123456789012345');
+  assert.equal(normalizePhone10('мусор +7 (999) 111-22-33'), '9991112233');
   assert.deepEqual(validateClientRequestPayload({ fullName: 'Иван', phone: '9991112233' }, 'data_change_request'), ['changeDetails is required']);
   assert.ok(validateClientRequestPayload({ phone: '12345' }, 'service_request').includes('phone must normalize to exactly 10 digits without +7/8'));
 });

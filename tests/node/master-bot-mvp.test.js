@@ -70,26 +70,30 @@ test('status transitions and lost reason validation work', async () => {
     const reqA = await createClientRequest(base, { fullName: 'Тест A', phone: '+70000000002', wasClientBefore: 'no', brand: 'Skoda', model: 'Rapid', year: '2020', vin: 'VINA', description: 'A' });
     const reqB = await createClientRequest(base, { fullName: 'Тест B', phone: '+70000000003', wasClientBefore: 'yes', brand: 'VW', model: 'Polo', year: '2021', vin: 'VINB', description: 'B' });
 
-    const waiting = await sendMaster(base, `/set_status ${reqA.id} waiting_data`);
+    const assigned = await sendMaster(base, `/set_status ${reqA.id} assigned`);
+    assert.equal(assigned.ok, true);
+    assert.equal(assigned.request.status, 'assigned');
+
+    const waiting = await sendMaster(base, `/set_status ${reqA.id} awaiting_client`);
     assert.equal(waiting.ok, true);
-    assert.equal(waiting.request.status, 'waiting_data');
+    assert.equal(waiting.request.status, 'awaiting_client');
 
-    const inProgress = await sendMaster(base, `/set_status ${reqA.id} in_progress`);
-    assert.equal(inProgress.ok, true);
+    const inService = await sendMaster(base, `/set_status ${reqA.id} in_service`);
+    assert.equal(inService.ok, true);
 
-    const processed = await sendMaster(base, `/set_status ${reqA.id} processed`);
-    assert.equal(processed.ok, true);
-    assert.equal(processed.request.status, 'processed');
+    const done = await sendMaster(base, `/set_status ${reqA.id} done`);
+    assert.equal(done.ok, true);
+    assert.equal(done.request.status, 'done');
 
-    const lostWithoutReason = await sendMaster(base, `/set_status ${reqB.id} in_progress`);
-    assert.equal(lostWithoutReason.ok, true);
-    const lostInvalid = await sendMaster(base, `/set_status ${reqB.id} lost`);
-    assert.equal(lostInvalid.ok, false);
-    assert.equal(lostInvalid.error, 'LOST_REASON_REQUIRED');
+    const assignedB = await sendMaster(base, `/set_status ${reqB.id} assigned`);
+    assert.equal(assignedB.ok, true);
+    const cancelledInvalid = await sendMaster(base, `/set_status ${reqB.id} cancelled`);
+    assert.equal(cancelledInvalid.ok, false);
+    assert.equal(cancelledInvalid.error, 'CANCELLATION_COMMENT_REQUIRED');
 
-    const lostValid = await sendMaster(base, `/set_status ${reqB.id} lost клиент не ответил`);
-    assert.equal(lostValid.ok, true);
-    assert.equal(lostValid.request.status, 'lost');
+    const cancelledValid = await sendMaster(base, `/set_status ${reqB.id} cancelled клиент не ответил`);
+    assert.equal(cancelledValid.ok, true);
+    assert.equal(cancelledValid.request.status, 'cancelled');
   });
 });
 
@@ -97,7 +101,7 @@ test('persistence stores status history internal comments and assignment', async
   await withServer(async (base) => {
     const req = await createClientRequest(base, { fullName: 'Сохранение', phone: '+70000000004', wasClientBefore: 'yes', brand: 'Toyota', model: 'Corolla', year: '2022', vin: 'VINP', description: 'persist' });
 
-    await sendMaster(base, `/set_status ${req.id} in_progress`);
+    await sendMaster(base, `/set_status ${req.id} assigned`);
     await sendMaster(base, `/comment ${req.id} проверили ошибки`);
 
     const state = db.readStore();

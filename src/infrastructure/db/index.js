@@ -63,6 +63,7 @@ function makeInitialStore() {
     recommendations: [],
     recommendationSync: { lastSyncAt: null, source: null },
     staffUsers: [],
+    requestEvents: [],
     requestStatusHistory: [],
     requestInternalComments: [],
     clientInternalNotes: [],
@@ -377,7 +378,7 @@ function requestRowToEntity(row) {
     clientId: row.client_id,
     vehicleId: row.vehicle_id,
     requestType: row.request_type,
-    status: row.status,
+    status: normalizeRequestStatusInput(row.status),
     description: row.description,
     sourceChannel: row.source_channel,
     assignedMasterId: row.assigned_master_id,
@@ -390,6 +391,10 @@ function requestRowToEntity(row) {
 
 function requestEventRowToEntity(row) {
   const data = parseJson(row.data, {});
+  const oldStatus = normalizeRequestStatusInput(data.oldStatus ?? data.fromStatus ?? null) || null;
+  const newStatus = normalizeRequestStatusInput(data.newStatus ?? data.toStatus ?? null, oldStatus) || null;
+  const actor = data.actor ?? data.changedBy ?? row.actor_id ?? null;
+  const comment = data.comment ?? data.reason ?? data.text ?? null;
   return {
     id: row.id,
     eventScope: row.event_scope,
@@ -399,9 +404,15 @@ function requestEventRowToEntity(row) {
     qualityCaseId: row.quality_case_id,
     actorId: row.actor_id,
     actorRole: row.actor_role,
+    actor,
+    oldStatus,
+    newStatus,
+    comment,
     createdAt: row.created_at,
     parentEventId: row.parent_event_id,
-    ...data
+    ...data,
+    fromStatus: oldStatus,
+    toStatus: newStatus
   };
 }
 
@@ -553,6 +564,7 @@ function readStore() {
     recommendations: listRows('recommendations').map(recommendationRowToEntity),
     recommendationSync: getMetaValue('recommendation_sync', { lastSyncAt: null, source: null }),
     staffUsers: listRows('staff_users').map(staffUserRowToEntity),
+    requestEvents: requestEvents.map(requestEventRowToEntity),
     requestStatusHistory: requestEvents.filter((item) => item.event_type === 'request_status_changed').map(requestEventRowToEntity),
     requestInternalComments: requestEvents.filter((item) => item.event_type === 'request_internal_comment').map(requestEventRowToEntity),
     clientInternalNotes: requestEvents.filter((item) => item.event_type === 'client_internal_note').map(requestEventRowToEntity),
@@ -1094,12 +1106,16 @@ function createRequest({ clientId, vehicleId, requestType, description, sourceCh
       eventType: 'request_status_changed',
       requestId: request.id,
       clientId: request.clientId,
+      oldStatus: null,
+      newStatus: 'new',
       fromStatus: null,
       toStatus: 'new',
       changedBy: 'system',
       changedByRole: 'system',
+      actor: 'system',
       actorId: 'system',
       actorRole: 'system',
+      comment: null,
       reason: null,
       createdAt: nowIso()
     });
@@ -1253,8 +1269,9 @@ function listRequests({ phone, telegramId, maxId, statuses }) {
     params.push(clientId);
   }
   if (statuses?.length) {
-    where.push(`status IN (${statuses.map(() => '?').join(',')})`);
-    params.push(...statuses);
+    const expandedStatuses = expandRequestStatuses(statuses);
+    where.push(`status IN (${expandedStatuses.map(() => '?').join(',')})`);
+    params.push(...expandedStatuses);
   }
   if (where.length) sql += ` WHERE ${where.join(' AND ')}`;
   sql += ' ORDER BY created_at ASC';
@@ -1316,30 +1333,75 @@ function upsertRecommendationFromSync({ externalId = null, clientId = null, text
   return item;
 }
 
-const allowedRequestTransitions = {
-  new: ['waiting_data', 'in_progress'],
-  waiting_data: ['in_progress'],
-  in_progress: ['processed', 'lost'],
-  processed: ['archived'],
-  lost: ['archived'],
-  archived: []
+const REQUEST_STATUS_ALIASES = {
+  waiting_data: 'awaiting_client',
+  in_progress: 'in_service',
+  processed: 'done',
+  lost: 'cancelled'
 };
 
-function updateRequestStatus({ requestId, toStatus, actorId, actorRole, lostReason = null }) {
+const REQUEST_STATUS_COMPATIBILITY = {
+  new: ['new'],
+  assigned: ['assigned'],
+  awaiting_client: ['awaiting_client', 'waiting_data'],
+  scheduled: ['scheduled'],
+  in_service: ['in_service', 'in_progress'],
+  done: ['done', 'processed', 'archived'],
+  cancelled: ['cancelled', 'lost']
+};
+
+function normalizeRequestStatusInput(status, currentStatus = null) {
+  const rawStatus = String(status || '').trim();
+  if (!rawStatus) return '';
+  if (rawStatus === 'archived') {
+    return currentStatus === 'cancelled' ? 'cancelled' : 'done';
+  }
+  return REQUEST_STATUS_ALIASES[rawStatus] || rawStatus;
+}
+
+function expandRequestStatuses(statuses = []) {
+  const result = new Set();
+  for (const status of statuses || []) {
+    const normalized = normalizeRequestStatusInput(status);
+    if (!normalized) continue;
+    result.add(normalized);
+    for (const alias of REQUEST_STATUS_COMPATIBILITY[normalized] || []) result.add(alias);
+  }
+  return [...result];
+}
+
+const allowedRequestTransitions = {
+  new: ['assigned', 'awaiting_client', 'scheduled', 'in_service', 'cancelled'],
+  assigned: ['awaiting_client', 'scheduled', 'in_service', 'cancelled', 'done'],
+  awaiting_client: ['assigned', 'scheduled', 'in_service', 'cancelled', 'done'],
+  scheduled: ['awaiting_client', 'in_service', 'cancelled', 'done'],
+  in_service: ['awaiting_client', 'scheduled', 'cancelled', 'done'],
+  done: [],
+  cancelled: []
+};
+
+function updateRequestStatus({ requestId, toStatus, actorId, actorRole, lostReason = null, comment = null }) {
   initializeStore();
   const row = getDb().prepare('SELECT * FROM requests WHERE id = ? LIMIT 1').get(requestId);
   if (!row) return { error: 'REQUEST_NOT_FOUND' };
   const request = requestRowToEntity(row);
-  const fromStatus = request.status;
-  if (!allowedRequestTransitions[fromStatus]?.includes(toStatus)) {
-    return { error: 'INVALID_TRANSITION', fromStatus, toStatus };
+  const fromStatus = normalizeRequestStatusInput(request.status);
+  const nextStatus = normalizeRequestStatusInput(toStatus, fromStatus);
+  const statusComment = String(comment || lostReason || '').trim() || null;
+  const rawStatus = String(toStatus || '').trim();
+
+  if (!nextStatus) return { error: 'INVALID_STATUS' };
+  if (nextStatus === fromStatus) return { request, history: null };
+  if (!allowedRequestTransitions[fromStatus]?.includes(nextStatus)) {
+    return { error: 'INVALID_TRANSITION', fromStatus, toStatus: nextStatus };
   }
-  if (toStatus === 'lost' && !String(lostReason || '').trim()) {
-    return { error: 'LOST_REASON_REQUIRED' };
+  if ((rawStatus === 'lost' || nextStatus === 'cancelled') && !statusComment) {
+    return { error: 'CANCELLATION_COMMENT_REQUIRED' };
   }
-  request.status = toStatus;
+
+  request.status = nextStatus;
   request.updatedAt = nowIso();
-  request.lostReason = toStatus === 'lost' ? lostReason : request.lostReason;
+  request.lostReason = nextStatus === 'cancelled' ? statusComment : null;
   if (!request.assignedMasterId && actorId) request.assignedMasterId = actorId;
 
   const history = {
@@ -1348,13 +1410,17 @@ function updateRequestStatus({ requestId, toStatus, actorId, actorRole, lostReas
     eventType: 'request_status_changed',
     requestId,
     clientId: request.clientId,
+    oldStatus: fromStatus,
+    newStatus: nextStatus,
     fromStatus,
-    toStatus,
+    toStatus: nextStatus,
     changedBy: actorId,
     changedByRole: actorRole,
+    actor: actorId,
     actorId,
     actorRole,
-    reason: toStatus === 'lost' ? lostReason : null,
+    comment: statusComment,
+    reason: statusComment,
     createdAt: nowIso()
   };
 
@@ -1368,7 +1434,7 @@ function updateRequestStatus({ requestId, toStatus, actorId, actorRole, lostReas
       source: 'master_bot',
       channel: 'master_bot',
       direction: 'internal',
-      payload: { action: 'request_status_changed', fromStatus, toStatus, actorId, actorRole, lostReason: history.reason },
+      payload: { action: 'request_status_changed', fromStatus, toStatus: nextStatus, actorId, actorRole, comment: statusComment },
       createdAt: nowIso()
     });
     insertRequestEvent({
@@ -1380,11 +1446,11 @@ function updateRequestStatus({ requestId, toStatus, actorId, actorRole, lostReas
       action: 'request_status_changed',
       requestId,
       clientId: request.clientId,
-      payload: { fromStatus, toStatus, lostReason: history.reason },
+      payload: { fromStatus, toStatus: nextStatus, comment: statusComment },
       createdAt: nowIso()
     });
 
-    if (toStatus === 'processed') {
+    if (nextStatus === 'done') {
       const existingTask = getDb().prepare(`
         SELECT id FROM tasks
         WHERE task_type = 'feedback_request' AND status <> 'cancelled' AND json_extract(payload, '$.requestId') = ?

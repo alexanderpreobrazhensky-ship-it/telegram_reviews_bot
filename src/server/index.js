@@ -105,12 +105,16 @@ async function duplicateToMastersChat({ config, request, payload }) {
     reply_markup: {
       inline_keyboard: [
         [
-          { text: 'Взять в работу', callback_data: `req:${request.id}:in_progress` },
-          { text: 'Запросить данные', callback_data: `req:${request.id}:waiting_data` }
+          { text: 'Назначить', callback_data: `req:${request.id}:assigned` },
+          { text: 'Ждём клиента', callback_data: `req:${request.id}:awaiting_client` }
         ],
         [
-          { text: 'Завершить', callback_data: `req:${request.id}:processed` },
-          { text: 'Потеряно', callback_data: `req:${request.id}:lost` }
+          { text: 'Запланировать', callback_data: `req:${request.id}:scheduled` },
+          { text: 'В сервисе', callback_data: `req:${request.id}:in_service` }
+        ],
+        [
+          { text: 'Завершить', callback_data: `req:${request.id}:done` },
+          { text: 'Отменить', callback_data: `req:${request.id}:cancelled` }
         ],
         [{ text: 'Подробнее', callback_data: `card:${request.id}` }]
       ]
