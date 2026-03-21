@@ -50,14 +50,20 @@ function injectConfigIntoHtml(html, config) {
   return html.includes('</body>') ? html.replace('</body>', `${script}</body>`) : `${html}${script}`;
 }
 
+function extractPhoneDigits(raw) {
+  return String(raw || '').replace(/\D/g, '');
+}
+
 function normalizePhone10(raw) {
-  const digits = String(raw || '').replace(/\D/g, '');
+  const digits = extractPhoneDigits(raw);
+  if (!digits) return '';
+  if (digits.length === 10) return digits;
   if (digits.length === 11 && (digits.startsWith('7') || digits.startsWith('8'))) return digits.slice(1);
   return digits;
 }
 
 function isValidPhone10(raw) {
-  return /^\d{10}$/.test(String(raw || ''));
+  return /^\d{10}$/.test(normalizePhone10(raw));
 }
 
 function validateClientRequestPayload(body = {}, type) {
@@ -72,7 +78,7 @@ function validateClientRequestPayload(body = {}, type) {
   for (const field of requiredByType[type] || []) {
     if (!String(body[field] || '').trim()) errors.push(`${field} is required`);
   }
-  if (!isValidPhone10(body.phone)) errors.push('phone must be 10 digits');
+  if (!isValidPhone10(body.phone)) errors.push('phone must normalize to exactly 10 digits without +7/8');
   return errors;
 }
 
@@ -209,7 +215,8 @@ function createServer({ config, logger }) {
       const type = typeMap[pathname];
       if (!type) return sendJson(res, 404, { error: 'Not found' });
 
-      body.phone = normalizePhone10(body.phone);
+      const normalizedPhone = normalizePhone10(body.phone);
+      body.phone = normalizedPhone;
       const errors = validateClientRequestPayload(body, type);
       if (errors.length) return sendJson(res, 400, { error: 'Validation error', details: errors });
 
@@ -233,7 +240,10 @@ function createServer({ config, logger }) {
     }
 
     if (req.method === 'GET' && pathname === '/api/client/requests') {
-      return sendJson(res, 200, { items: db.listRequests({ phone: requestUrl.searchParams.get('phone'), telegramId: requestUrl.searchParams.get('telegramId'), maxId: requestUrl.searchParams.get('maxId') }) });
+      const phone = requestUrl.searchParams.get('phone');
+      const normalizedPhone = phone ? normalizePhone10(phone) : null;
+      if (phone && !isValidPhone10(normalizedPhone)) return sendJson(res, 400, { error: 'Validation error', details: ['phone must normalize to exactly 10 digits without +7/8'] });
+      return sendJson(res, 200, { items: db.listRequests({ phone: normalizedPhone, telegramId: requestUrl.searchParams.get('telegramId'), maxId: requestUrl.searchParams.get('maxId') }) });
     }
 
     if (req.method === 'GET' && pathname === '/api/client/recommendations') {

@@ -51,6 +51,9 @@ test('client request route rejects invalid json and required fields', async () =
       body: JSON.stringify({ fullName: 'Иван', phone: '12345', wasClientBefore: 'yes', brand: 'Lada', model: 'Granta', year: '2019', vin: 'VIN-H', description: 'bad phone' })
     });
     assert.equal(invalidPhone.status, 400);
+
+    const invalidLookup = await fetch(`${base}/api/client/requests?phone=12345`);
+    assert.equal(invalidLookup.status, 400);
   });
 });
 
@@ -107,7 +110,7 @@ test('normalizePhone10 and server validation keep only 10-digit phones', () => {
   assert.equal(normalizePhone10('12345'), '12345');
   assert.equal(normalizePhone10('123456789012345'), '123456789012345');
   assert.deepEqual(validateClientRequestPayload({ fullName: 'Иван', phone: '9991112233' }, 'data_change_request'), ['changeDetails is required']);
-  assert.ok(validateClientRequestPayload({ phone: '12345' }, 'service_request').includes('phone must be 10 digits'));
+  assert.ok(validateClientRequestPayload({ phone: '12345' }, 'service_request').includes('phone must normalize to exactly 10 digits without +7/8'));
 });
 
 test('db path follows env and initializes missing store explicitly', () => {
