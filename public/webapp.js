@@ -35,7 +35,7 @@
     data_change_request: ['fullName', 'phone', 'changeDetails']
   };
 
-  function onlyPhoneDigits(value) {
+  function normalizePhone10(value) {
     const raw = String(value || '');
     const cleaned = raw.replace(/\D/g, '');
     if (!cleaned) return '';
@@ -43,6 +43,10 @@
     if (cleaned.length === 1 && cleaned === '8' && /^\s*\+8(?:\D|$)/.test(raw)) return '';
     const normalized = cleaned.length > 10 && (cleaned.startsWith('7') || cleaned.startsWith('8')) ? cleaned.slice(1) : cleaned;
     return normalized.slice(0, 10);
+  }
+
+  function onlyPhoneDigits(value) {
+    return normalizePhone10(value);
   }
 
   function formatPhoneMask(rawValue) {
@@ -128,8 +132,9 @@
     }
 
     function syncFromDom() {
-      digits = onlyPhoneDigits(input.value);
+      const normalizedDigits = onlyPhoneDigits(input.value);
       const selection = resolvePhoneSelectionRange(input);
+      digits = normalizedDigits;
       render(phoneCaretFromDigitIndex(Math.min(selection.start, digits.length)));
     }
 
@@ -166,6 +171,11 @@
       applyEdit('insertFromPaste', (event.clipboardData || window.clipboardData)?.getData('text') || '');
     }
 
+    function onCut(event) {
+      event.preventDefault();
+      applyEdit('deleteByCut');
+    }
+
     function onKeyDown(event) {
       if (event.metaKey || event.ctrlKey || event.altKey) return;
       if (/^\d$/.test(event.key)) {
@@ -198,12 +208,18 @@
       ensureCaretAfterPrefix();
     }
 
+    function onBlur() {
+      render(phoneCaretFromDigitIndex(Math.min(digits.length, PHONE_DIGIT_POSITIONS.length)));
+    }
+
     input.addEventListener('beforeinput', onBeforeInput);
     input.addEventListener('input', onInput);
     input.addEventListener('paste', onPaste);
+    input.addEventListener('cut', onCut);
     input.addEventListener('keydown', onKeyDown);
     input.addEventListener('focus', onFocus);
     input.addEventListener('click', onClick);
+    input.addEventListener('blur', onBlur);
 
     render(phoneCaretFromDigitIndex(Math.min(digits.length, PHONE_DIGIT_POSITIONS.length)));
 
@@ -219,9 +235,11 @@
         input.removeEventListener('beforeinput', onBeforeInput);
         input.removeEventListener('input', onInput);
         input.removeEventListener('paste', onPaste);
+        input.removeEventListener('cut', onCut);
         input.removeEventListener('keydown', onKeyDown);
         input.removeEventListener('focus', onFocus);
         input.removeEventListener('click', onClick);
+        input.removeEventListener('blur', onBlur);
       }
     };
   }
@@ -375,6 +393,7 @@
     PHONE_MASK_TEMPLATE,
     PHONE_DIGIT_POSITIONS,
     onlyPhoneDigits,
+    normalizePhone10,
     formatPhoneMask,
     phoneDigitIndexFromCaret,
     phoneCaretFromDigitIndex,

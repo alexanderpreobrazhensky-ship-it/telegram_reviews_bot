@@ -64,6 +64,22 @@ test('client bot /start and quick request flow works', async () => {
   });
 });
 
+test('client bot does not create request until phone is normalized to 10 digits', async () => {
+  await withServer(async (base) => {
+    await fetch(`${base}/telegram/client_bot/webhook`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: { text: 'Нужна запись / сервис', chat: { id: 1 }, from: { id: 10 } } }) });
+    await fetch(`${base}/telegram/client_bot/webhook`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: { text: 'Петров Петр', chat: { id: 1 }, from: { id: 10 } } }) });
+
+    const invalid = await fetch(`${base}/telegram/client_bot/webhook`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: { text: '12345', chat: { id: 1 }, from: { id: 10 } } }) });
+    const invalidData = await invalid.json();
+    assert.equal(invalidData.action, 'invalid_phone');
+    assert.equal(db.readStore().requests.length, 0);
+
+    await fetch(`${base}/telegram/client_bot/webhook`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: { text: '+79990000008', chat: { id: 1 }, from: { id: 10 } } }) });
+    assert.equal(db.readStore().requests.length, 1);
+    assert.equal(db.readStore().clients[0].phone, '9990000008');
+  });
+});
+
 test('persistence stores client vehicle request and communication events', async () => {
   await withServer(async (base) => {
     await fetch(`${base}/api/client/requests/service`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ fullName: 'Сидоров Сидор', phone: '+79990000007', wasClientBefore: 'no', year: '2019', vin: 'VIN007', brand: 'Renault', model: 'Logan', plateNumber: 'T777TT', description: 'Проверка' }) });

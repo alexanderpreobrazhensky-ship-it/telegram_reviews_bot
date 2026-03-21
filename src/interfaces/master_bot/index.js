@@ -3,6 +3,7 @@ const { createMasterService, createReportingService } = require('../../core/appl
 const logger = require('../../infrastructure/logging/logger');
 const { sendChannelMessage, answerChannelCallback } = require('../../infrastructure/messaging');
 const { extractIncomingEvent } = require('../shared/channelAdapters');
+const { validateMaxWebhookRequest } = require('../shared/maxSecurity');
 
 const sessions = new Map();
 
@@ -96,45 +97,6 @@ function adminIds(config, channel) {
   return channel === 'max' ? config.maxMasterBotAdminIds : config.masterBotAdminIds;
 }
 
-function sanitizeHeaderValue(name, value) {
-  const lower = String(name || '').toLowerCase();
-  if (['authorization', 'x-max-bot-api-secret'].includes(lower)) {
-    const raw = String(value || '');
-    if (!raw) return '';
-    if (raw.length <= 8) return `${raw.slice(0, 2)}***`;
-    return `${raw.slice(0, 4)}***${raw.slice(-2)}`;
-  }
-  return value;
-}
-
-function collectWebhookHeaders(headers = {}, rawHeaders = []) {
-  const sanitized = {};
-  for (const [name, value] of Object.entries(headers || {})) {
-    sanitized[name] = sanitizeHeaderValue(name, value);
-  }
-  const actualSecretHeaderName = Array.isArray(rawHeaders)
-    ? rawHeaders.find((value, index) => index % 2 === 0 && String(value).toLowerCase() === 'x-max-bot-api-secret') || null
-    : null;
-  return {
-    sanitized,
-    hasSecretHeader: Object.prototype.hasOwnProperty.call(headers || {}, 'x-max-bot-api-secret'),
-    actualSecretHeaderName
-  };
-}
-
-function findHeaderValue(headers = {}, rawHeaders = [], targetName = '') {
-  const normalizedTarget = String(targetName || '').toLowerCase();
-  for (const [name, value] of Object.entries(headers || {})) {
-    if (String(name).toLowerCase() === normalizedTarget) return String(value || '');
-  }
-  if (Array.isArray(rawHeaders)) {
-    for (let index = 0; index < rawHeaders.length; index += 2) {
-      if (String(rawHeaders[index] || '').toLowerCase() === normalizedTarget) return String(rawHeaders[index + 1] || '');
-    }
-  }
-  return '';
-}
-
 function buildSenderSnapshot({ body, event }) {
   return event.callback
     ? {
@@ -165,30 +127,21 @@ async function respondWithMessage({ channel, token, recipientId, text, payload =
 }
 
 async function handleMasterWebhook({ body, config, headers = {}, rawHeaders = [], pathname = '', method = 'POST', channel = 'telegram' }) {
-  const headerInfo = collectWebhookHeaders(headers, rawHeaders);
-  const expectedSecret = config.maxWebhookSecret || '';
-  const receivedSecret = findHeaderValue(headers, rawHeaders, 'x-max-bot-api-secret');
-  const secretCheckPassed = channel !== 'max' || !expectedSecret || receivedSecret === expectedSecret;
-  logger.info('master_bot webhook received', {
-    channel,
-    pathname,
-    method,
-    headers: headerInfo.sanitized,
-    hasSecretHeader: headerInfo.hasSecretHeader,
-    actualSecretHeaderName: headerInfo.actualSecretHeaderName,
-    usesEnvMaxWebhookSecret: Boolean(expectedSecret),
-    secretCheckPassed
-  });
-  if (channel === 'max' && !secretCheckPassed) {
-    logger.warn('master_bot secret check failed', {
-      channel,
+  if (channel === 'max') {
+    const validation = validateMaxWebhookRequest({
+      config,
+      headers,
+      rawHeaders,
       pathname,
-      hasSecretHeader: headerInfo.hasSecretHeader,
-      actualSecretHeaderName: headerInfo.actualSecretHeaderName,
-      receivedSecretPreview: sanitizeHeaderValue('x-max-bot-api-secret', receivedSecret),
-      expectedSecretPreview: sanitizeHeaderValue('x-max-bot-api-secret', expectedSecret)
+      method,
+      logger,
+      routeLabel: 'master_bot',
+      token: masterToken(config, channel),
+      body
     });
-    return { ok: false, error: 'INVALID_WEBHOOK_SECRET', statusCode: 403 };
+    if (!validation.ok) {
+      return { ok: false, error: validation.error, statusCode: validation.statusCode };
+    }
   }
 
   try {

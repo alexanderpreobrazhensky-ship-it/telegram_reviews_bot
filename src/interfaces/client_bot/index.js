@@ -3,6 +3,7 @@ const db = require('../../infrastructure/db');
 const logger = require('../../infrastructure/logging/logger');
 const { sendChannelMessage, answerChannelCallback } = require('../../infrastructure/messaging');
 const { QUICK_TYPE_BY_KEY, parseCommandText, resolveStartContext, extractIncomingEvent, buildClientMainMenu } = require('../shared/channelAdapters');
+const { validateMaxWebhookRequest } = require('../shared/maxSecurity');
 
 const sessions = new Map();
 
@@ -26,6 +27,10 @@ function normalizePhone10(raw) {
   const digits = String(raw || '').replace(/\D/g, '');
   if (digits.length === 11 && (digits.startsWith('7') || digits.startsWith('8'))) return digits.slice(1);
   return digits;
+}
+
+function isValidPhone10(raw) {
+  return /^\d{10}$/.test(normalizePhone10(raw));
 }
 
 function parseRating(text) {
@@ -85,45 +90,6 @@ async function sendBotMessage({ channel, config, recipientId, text, extra = {} }
   return delivered;
 }
 
-function sanitizeHeaderValue(name, value) {
-  const lower = String(name || '').toLowerCase();
-  if (['authorization', 'x-max-bot-api-secret'].includes(lower)) {
-    const raw = String(value || '');
-    if (!raw) return '';
-    if (raw.length <= 8) return `${raw.slice(0, 2)}***`;
-    return `${raw.slice(0, 4)}***${raw.slice(-2)}`;
-  }
-  return value;
-}
-
-function collectWebhookHeaders(headers = {}, rawHeaders = []) {
-  const sanitized = {};
-  for (const [name, value] of Object.entries(headers || {})) {
-    sanitized[name] = sanitizeHeaderValue(name, value);
-  }
-  const actualSecretHeaderName = Array.isArray(rawHeaders)
-    ? rawHeaders.find((value, index) => index % 2 === 0 && String(value).toLowerCase() === 'x-max-bot-api-secret') || null
-    : null;
-  return {
-    sanitized,
-    hasSecretHeader: Object.prototype.hasOwnProperty.call(headers || {}, 'x-max-bot-api-secret'),
-    actualSecretHeaderName
-  };
-}
-
-function findHeaderValue(headers = {}, rawHeaders = [], targetName = '') {
-  const normalizedTarget = String(targetName || '').toLowerCase();
-  for (const [name, value] of Object.entries(headers || {})) {
-    if (String(name).toLowerCase() === normalizedTarget) return String(value || '');
-  }
-  if (Array.isArray(rawHeaders)) {
-    for (let index = 0; index < rawHeaders.length; index += 2) {
-      if (String(rawHeaders[index] || '').toLowerCase() === normalizedTarget) return String(rawHeaders[index + 1] || '');
-    }
-  }
-  return '';
-}
-
 function buildSenderSnapshot({ body, event }) {
   return event.callback
     ? {
@@ -139,30 +105,21 @@ function resolveRecipientId(channel, primaryId, fallbackId) {
 }
 
 async function handleClientWebhook({ body, config, headers = {}, rawHeaders = [], pathname = '', method = 'POST', channel = 'telegram' }) {
-  const headerInfo = collectWebhookHeaders(headers, rawHeaders);
-  const expectedSecret = config.maxWebhookSecret || '';
-  const receivedSecret = findHeaderValue(headers, rawHeaders, 'x-max-bot-api-secret');
-  const secretCheckPassed = channel !== 'max' || !expectedSecret || receivedSecret === expectedSecret;
-  logger.info('client_bot webhook received', {
-    channel,
-    pathname,
-    method,
-    headers: headerInfo.sanitized,
-    hasSecretHeader: headerInfo.hasSecretHeader,
-    actualSecretHeaderName: headerInfo.actualSecretHeaderName,
-    usesEnvMaxWebhookSecret: Boolean(expectedSecret),
-    secretCheckPassed
-  });
-  if (channel === 'max' && !secretCheckPassed) {
-    logger.warn('client_bot secret check failed', {
-      channel,
+  if (channel === 'max') {
+    const validation = validateMaxWebhookRequest({
+      config,
+      headers,
+      rawHeaders,
       pathname,
-      hasSecretHeader: headerInfo.hasSecretHeader,
-      actualSecretHeaderName: headerInfo.actualSecretHeaderName,
-      receivedSecretPreview: sanitizeHeaderValue('x-max-bot-api-secret', receivedSecret),
-      expectedSecretPreview: sanitizeHeaderValue('x-max-bot-api-secret', expectedSecret)
+      method,
+      logger,
+      routeLabel: 'client_bot',
+      token: clientBotToken(config, channel),
+      body
     });
-    return { ok: false, error: 'INVALID_WEBHOOK_SECRET', statusCode: 403 };
+    if (!validation.ok) {
+      return { ok: false, error: validation.error, statusCode: validation.statusCode };
+    }
   }
 
   try {
@@ -253,9 +210,14 @@ async function handleClientWebhook({ body, config, headers = {}, rawHeaders = []
 
     if (session?.step === 'phone') {
       logger.info('client_bot handler branch selected', { channel, pathname, branch: 'collect_phone', userId, recipientId });
+      const normalizedPhone = normalizePhone10(effectiveText);
+      if (!/^\d{10}$/.test(normalizedPhone)) {
+        await sendBotMessage({ channel, config, recipientId, text: 'Нужен корректный телефон: 10 цифр. Попробуйте ещё раз.' });
+        return { ok: false, action: 'invalid_phone', channel };
+      }
       const client = db.upsertClient({
         fullName: session.fullName,
-        phone: normalizePhone10(effectiveText),
+        phone: normalizedPhone,
         telegramId: channel === 'telegram' ? userId : null,
         maxId: channel === 'max' ? userId : null,
         preferredChannel: channel
@@ -330,4 +292,4 @@ async function handleClientWebhook({ body, config, headers = {}, rawHeaders = []
   }
 }
 
-module.exports = { registerClientBotRoutes, handleClientWebhook, quickTypeFromText };
+module.exports = { registerClientBotRoutes, handleClientWebhook, quickTypeFromText, normalizePhone10, isValidPhone10 };

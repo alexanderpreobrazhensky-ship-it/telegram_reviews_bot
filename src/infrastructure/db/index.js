@@ -2,16 +2,35 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 
-const DB_PATH = process.env.DB_FILE_PATH || path.join(process.cwd(), 'data', 'db.json');
+const DEFAULT_DB_PATH = path.join(process.cwd(), 'data', 'db.json');
+const runtimeState = {
+  initializedPaths: new Set()
+};
+
+function getDbPath() {
+  return process.env.DB_FILE_PATH || DEFAULT_DB_PATH;
+}
+
+function logDb(level, message, meta = {}) {
+  const payload = { dbFilePath: getDbPath(), ...meta };
+  const method = level === 'error' ? console.error : (level === 'warn' ? console.warn : console.log);
+  method(`[DB:${level.toUpperCase()}] ${message}`, payload);
+}
 
 function nowIso() {
   return new Date().toISOString();
 }
 
-function safeReadStoreRaw() {
+function safeReadStoreRaw(dbPath = getDbPath()) {
   try {
-    return JSON.parse(fs.readFileSync(DB_PATH, 'utf8'));
-  } catch {
+    return JSON.parse(fs.readFileSync(dbPath, 'utf8'));
+  } catch (error) {
+    if (error?.code !== 'ENOENT') {
+      logDb('error', 'Failed to read DB store, falling back to initial structure', {
+        errorCode: error?.code || 'UNKNOWN_DB_READ_ERROR',
+        errorMessage: error?.message || 'read_failed'
+      });
+    }
     return makeInitialStore();
   }
 }
@@ -41,17 +60,21 @@ function makeInitialStore() {
   };
 }
 
-function ensureStore() {
-  if (!fs.existsSync(path.dirname(DB_PATH))) {
-    fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
+function ensureStore(dbPath = getDbPath()) {
+  const dbDir = path.dirname(dbPath);
+  if (!fs.existsSync(dbDir)) {
+    fs.mkdirSync(dbDir, { recursive: true });
+    logDb('info', 'Created DB directory', { dbDir });
   }
 
-  if (!fs.existsSync(DB_PATH)) {
-    fs.writeFileSync(DB_PATH, JSON.stringify(makeInitialStore(), null, 2));
-    return;
+  if (!fs.existsSync(dbPath)) {
+    fs.writeFileSync(dbPath, JSON.stringify(makeInitialStore(), null, 2));
+    logDb('warn', 'DB file was missing and has been initialized with an empty store', {
+      createdFreshStore: true
+    });
   }
 
-  const store = safeReadStoreRaw();
+  const store = safeReadStoreRaw(dbPath);
   const initial = makeInitialStore();
   let changed = false;
   for (const [key, value] of Object.entries(initial)) {
@@ -60,7 +83,6 @@ function ensureStore() {
       changed = true;
     }
   }
-
 
   for (const task of store.tasks || []) {
     if (!Object.hasOwn(task, 'processingStartedAt')) {
@@ -122,19 +144,56 @@ function ensureStore() {
   }
 
   if (changed) {
-    fs.writeFileSync(DB_PATH, JSON.stringify(store, null, 2));
+    fs.writeFileSync(dbPath, JSON.stringify(store, null, 2));
+    logDb('info', 'DB store schema was upgraded in place', { schemaPatched: true });
+  }
+
+  if (!runtimeState.initializedPaths.has(dbPath)) {
+    runtimeState.initializedPaths.add(dbPath);
+    logDb('info', 'DB store initialized', { createdFreshStore: false, collections: Object.keys(store).length });
   }
 }
 
+function getDbRuntimeInfo() {
+  const dbPath = getDbPath();
+  return {
+    path: dbPath,
+    dir: path.dirname(dbPath),
+    exists: fs.existsSync(dbPath)
+  };
+}
+
+function initializeStore() {
+  ensureStore(getDbPath());
+  return getDbRuntimeInfo();
+}
+
 function readStore() {
-  ensureStore();
-  return safeReadStoreRaw();
+  const dbPath = getDbPath();
+  ensureStore(dbPath);
+  return safeReadStoreRaw(dbPath);
 }
 
 function writeStore(store) {
-  const tempPath = `${DB_PATH}.tmp`;
-  fs.writeFileSync(tempPath, JSON.stringify(store, null, 2));
-  fs.renameSync(tempPath, DB_PATH);
+  const dbPath = getDbPath();
+  ensureStore(dbPath);
+  const tempPath = `${dbPath}.tmp`;
+  try {
+    fs.writeFileSync(tempPath, JSON.stringify(store, null, 2));
+    fs.renameSync(tempPath, dbPath);
+  } catch (error) {
+    logDb('error', 'Failed to write DB store', {
+      errorCode: error?.code || 'UNKNOWN_DB_WRITE_ERROR',
+      errorMessage: error?.message || 'write_failed'
+    });
+    throw error;
+  } finally {
+    if (fs.existsSync(tempPath)) {
+      try {
+        fs.unlinkSync(tempPath);
+      } catch {}
+    }
+  }
 }
 
 function upsertClient({ fullName, phone, telegramId, maxId = null, preferredChannel = null }) {
@@ -900,8 +959,10 @@ function getReportSnapshotById(id) {
 }
 
 function resetStore() {
-  if (fs.existsSync(DB_PATH)) fs.unlinkSync(DB_PATH);
-  ensureStore();
+  const dbPath = getDbPath();
+  if (fs.existsSync(dbPath)) fs.unlinkSync(dbPath);
+  runtimeState.initializedPaths.delete(dbPath);
+  ensureStore(dbPath);
 }
 
 function createIntegrationEvent({ sourceSystem, eventType, rawPayload, dedupeKey = null }) {
@@ -983,8 +1044,13 @@ function applyEntitySyncMetadata({ collection, entityId, metadata = {} }) {
   return entity;
 }
 
-module.exports = {
-  DB_PATH,
+const api = {
+  get DB_PATH() {
+    return getDbPath();
+  },
+  getDbPath,
+  getDbRuntimeInfo,
+  initializeStore,
   upsertClient,
   upsertVehicle,
   createRequest,
@@ -1031,3 +1097,5 @@ module.exports = {
   getIntegrationEventCard,
   applyEntitySyncMetadata
 };
+
+module.exports = api;
