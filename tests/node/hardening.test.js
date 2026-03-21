@@ -1,9 +1,11 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 const db = require('../../src/infrastructure/db');
 const { createScheduler } = require('../../src/infrastructure/scheduler');
-const { createServer } = require('../../src/server');
+const { createServer, normalizePhone10, validateClientRequestPayload } = require('../../src/server');
 const { loadConfig } = require('../../src/infrastructure/config');
 const logger = require('../../src/infrastructure/logging/logger');
 
@@ -42,6 +44,13 @@ test('client request route rejects invalid json and required fields', async () =
       body: JSON.stringify({ fullName: 'Иван', phone: '+79990000000', wasClientBefore: 'yes', brand: 'Lada', model: 'Granta', year: '2019', vin: 'VIN-H', description: 'ok' })
     });
     assert.equal(ok.status, 201);
+
+    const invalidPhone = await fetch(`${base}/api/client/requests/service`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fullName: 'Иван', phone: '12345', wasClientBefore: 'yes', brand: 'Lada', model: 'Granta', year: '2019', vin: 'VIN-H', description: 'bad phone' })
+    });
+    assert.equal(invalidPhone.status, 400);
   });
 });
 
@@ -88,4 +97,55 @@ test('scheduler prevents double run and recovers stuck tasks', async () => {
 
   const recovered = db.claimDueTasks({ limit: 10, stuckTimeoutMs: 100 });
   assert.equal(recovered.some((item) => item.id === dueTask.id), true);
+});
+
+test('normalizePhone10 and server validation keep only 10-digit phones', () => {
+  assert.equal(normalizePhone10('+79991112233'), '9991112233');
+  assert.equal(normalizePhone10('8 (999) 111-22-33'), '9991112233');
+  assert.equal(normalizePhone10('7 999 111 22 33'), '9991112233');
+  assert.equal(normalizePhone10('9991112233'), '9991112233');
+  assert.equal(normalizePhone10('12345'), '12345');
+  assert.equal(normalizePhone10('123456789012345'), '123456789012345');
+  assert.deepEqual(validateClientRequestPayload({ fullName: 'Иван', phone: '9991112233' }, 'data_change_request'), ['changeDetails is required']);
+  assert.ok(validateClientRequestPayload({ phone: '12345' }, 'service_request').includes('phone must be 10 digits'));
+});
+
+test('db path follows env and initializes missing store explicitly', () => {
+  const original = process.env.DB_FILE_PATH;
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'telegram-reviews-bot-'));
+  const tempPath = path.join(tempDir, 'nested', 'db.json');
+  process.env.DB_FILE_PATH = tempPath;
+
+  try {
+    const infoBefore = db.getDbRuntimeInfo();
+    assert.equal(infoBefore.path, tempPath);
+    assert.equal(infoBefore.exists, false);
+    db.resetStore();
+    const infoAfter = db.getDbRuntimeInfo();
+    assert.equal(infoAfter.path, tempPath);
+    assert.equal(infoAfter.exists, true);
+    const state = JSON.parse(fs.readFileSync(tempPath, 'utf8'));
+    assert.ok(Array.isArray(state.requests));
+  } finally {
+    if (original === undefined) delete process.env.DB_FILE_PATH;
+    else process.env.DB_FILE_PATH = original;
+  }
+});
+
+test('db read errors fall back to initial store shape instead of crashing', () => {
+  const original = process.env.DB_FILE_PATH;
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'telegram-reviews-bot-broken-'));
+  const tempPath = path.join(tempDir, 'db.json');
+  process.env.DB_FILE_PATH = tempPath;
+  fs.mkdirSync(path.dirname(tempPath), { recursive: true });
+  fs.writeFileSync(tempPath, '{broken');
+
+  try {
+    const state = db.readStore();
+    assert.ok(Array.isArray(state.requests));
+    assert.ok(Array.isArray(state.clients));
+  } finally {
+    if (original === undefined) delete process.env.DB_FILE_PATH;
+    else process.env.DB_FILE_PATH = original;
+  }
 });

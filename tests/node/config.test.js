@@ -39,3 +39,22 @@ test('config sanitizes invalid numeric env values', () => {
     else process.env[key] = value;
   }
 });
+
+test('config reads MAX and DB path related env values', () => {
+  const original = {
+    MAX_ENABLED: process.env.MAX_ENABLED,
+    DB_FILE_PATH: process.env.DB_FILE_PATH
+  };
+
+  process.env.MAX_ENABLED = 'TRUE';
+  process.env.DB_FILE_PATH = '/tmp/telegram-reviews-bot/db.json';
+
+  const config = loadConfig();
+  assert.equal(config.maxEnabled, true);
+  assert.equal(process.env.DB_FILE_PATH, '/tmp/telegram-reviews-bot/db.json');
+
+  for (const [key, value] of Object.entries(original)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+});

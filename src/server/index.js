@@ -56,6 +56,10 @@ function normalizePhone10(raw) {
   return digits;
 }
 
+function isValidPhone10(raw) {
+  return /^\d{10}$/.test(String(raw || ''));
+}
+
 function validateClientRequestPayload(body = {}, type) {
   const errors = [];
   const requiredByType = {
@@ -68,7 +72,7 @@ function validateClientRequestPayload(body = {}, type) {
   for (const field of requiredByType[type] || []) {
     if (!String(body[field] || '').trim()) errors.push(`${field} is required`);
   }
-  if (!/^\d{10}$/.test(String(body.phone || ''))) errors.push('phone must be 10 digits');
+  if (!isValidPhone10(body.phone)) errors.push('phone must be 10 digits');
   return errors;
 }
 
@@ -375,4 +379,4 @@ function createServer({ config, logger }) {
   });
 }
 
-module.exports = { createServer };
+module.exports = { createServer, normalizePhone10, isValidPhone10, validateClientRequestPayload, createClientRequest };

@@ -117,12 +117,13 @@ function flush() {
 
 test('onlyPhoneDigits and formatPhoneMask normalize Russian phone inputs', () => {
   const dom = createDom({ route: '/' });
-  const { onlyPhoneDigits, formatPhoneMask } = dom.window.__WEBAPP_TEST_API__;
+  const { onlyPhoneDigits, normalizePhone10, formatPhoneMask } = dom.window.__WEBAPP_TEST_API__;
 
   assert.equal(onlyPhoneDigits('+7 (999) 111-22-33'), '9991112233');
   assert.equal(onlyPhoneDigits('8 999 111 22 33'), '9991112233');
   assert.equal(onlyPhoneDigits('799911122334455'), '9991112233');
   assert.equal(onlyPhoneDigits('+7 (___) ___-__-__'), '');
+  assert.equal(normalizePhone10('+7 999 111-22-33'), '9991112233');
   const formattedFull = formatPhoneMask('89991112233');
   assert.equal(formattedFull.digits, '9991112233');
   assert.equal(formattedFull.masked, '+7 (999) 111-22-33');
@@ -184,6 +185,15 @@ for (const channel of ['telegram', 'max']) {
       paste(phone, '+7 999 111-22-33');
       assert.equal(phone.value, '+7 (999) 111-22-33');
       assert.equal(phone.selectionStart, api.PHONE_MASK_TEMPLATE.length);
+
+      phone.setSelectionRange(api.phoneCaretFromDigitIndex(3), api.phoneCaretFromDigitIndex(6));
+      const cutEvent = new dom.window.Event('cut', { bubbles: true, cancelable: true });
+      phone.dispatchEvent(cutEvent);
+      assert.equal(phone.value, '+7 (999) 223-3_-__');
+
+      phone.setSelectionRange(api.phoneCaretFromDigitIndex(3), api.phoneCaretFromDigitIndex(3));
+      paste(phone, '111');
+      assert.equal(phone.value, '+7 (999) 111-22-33');
 
       formCase.fill(form);
       submit(form);

@@ -82,7 +82,7 @@ test('MAX client bot supports start help quick flow and stores max_chat source',
     const unknown = await post(base, '/max/client_bot/webhook', { event_id: 'evt-1', payload: { unsupported: true } }, webhookHeaders);
     assert.equal(unknown.response.status, 200);
     assert.equal(unknown.data.action, 'ignored_unknown_update');
-  }, { MAX_WEBHOOK_SECRET: 'secret-max' });
+  }, { MAX_ENABLED: 'true', MAX_CLIENT_BOT_TOKEN: 'max-client-token', MAX_WEBHOOK_SECRET: 'secret-max' });
 });
 
 test('MAX master bot enforces access, works with roles and sends clarification foundation to MAX', async () => {
@@ -125,12 +125,13 @@ test('MAX master bot enforces access, works with roles and sends clarification f
     const state = db.readStore();
     assert.equal(state.staffUsers.some((item) => item.maxId === 'mx-master-2' && item.role === 'master'), true);
     assert.equal(state.communicationEvents.some((item) => item.payload?.action === 'client_clarification_requested' && item.channel === 'max' && item.direction === 'outbound'), true);
-  }, { MAX_WEBHOOK_SECRET: 'secret-max', MAX_MASTER_BOT_ADMIN_IDS: 'mx-admin-1' });
+  }, { MAX_ENABLED: 'true', MAX_CLIENT_BOT_TOKEN: 'max-client-token', MAX_MASTER_BOT_TOKEN: 'max-master-token', MAX_WEBHOOK_SECRET: 'secret-max', MAX_MASTER_BOT_ADMIN_IDS: 'mx-admin-1' });
 });
 
 test('MAX webhook secret check reads env secret and accepts header name casing from runtime', async () => {
   await withMockedFetch(async () => {
     const config = loadConfig();
+    config.maxEnabled = true;
     config.maxWebhookSecret = 'secret-max';
     config.maxClientBotToken = 'max-client-token';
     config.maxMasterBotToken = 'max-master-token';
@@ -162,9 +163,36 @@ test('MAX webhook secret check reads env secret and accepts header name casing f
   });
 });
 
+test('MAX webhook rejects missing secret, invalid payload and disabled runtime', async () => {
+  await withServer(async (base) => {
+    const noSecret = await post(base, '/max/client_bot/webhook', { message: { body: { text: '/help' }, chat_id: 'chat-1', from: { user_id: 'mx-client-1', first_name: 'Max' } } });
+    assert.equal(noSecret.response.status, 403);
+    assert.equal(noSecret.data.error, 'INVALID_WEBHOOK_SECRET');
+  }, { MAX_ENABLED: 'true', MAX_CLIENT_BOT_TOKEN: 'max-client-token', MAX_WEBHOOK_SECRET: 'secret-max' });
+
+  await withServer(async (base) => {
+    const invalidPayload = await post(base, '/max/client_bot/webhook', null, { 'x-max-bot-api-secret': 'secret-max' });
+    assert.equal(invalidPayload.response.status, 400);
+    assert.equal(invalidPayload.data.error, 'INVALID_MAX_PAYLOAD');
+  }, { MAX_ENABLED: 'true', MAX_CLIENT_BOT_TOKEN: 'max-client-token', MAX_WEBHOOK_SECRET: 'secret-max' });
+
+  await withServer(async (base) => {
+    const secretMissing = await post(base, '/max/client_bot/webhook', { message: { body: { text: '/help' }, chat_id: 'chat-1', from: { user_id: 'mx-client-1', first_name: 'Max' } } }, { 'x-max-bot-api-secret': 'secret-max' });
+    assert.equal(secretMissing.response.status, 503);
+    assert.equal(secretMissing.data.error, 'MAX_WEBHOOK_SECRET_MISSING');
+  }, { MAX_ENABLED: 'true', MAX_CLIENT_BOT_TOKEN: 'max-client-token' });
+
+  await withServer(async (base) => {
+    const disabled = await post(base, '/max/master_bot/webhook', { message: { body: { text: '/whoami' }, chat_id: 'chat-2', from: { user_id: 'mx-master-1', first_name: 'Master' } } }, { 'x-max-bot-api-secret': 'secret-max' });
+    assert.equal(disabled.response.status, 503);
+    assert.equal(disabled.data.error, 'MAX_DISABLED');
+  }, { MAX_MASTER_BOT_TOKEN: 'max-master-token', MAX_WEBHOOK_SECRET: 'secret-max' });
+});
+
 test('MAX outbound replies target user_id instead of chat_id for client and master bots', async () => {
   await withMockedFetch(async (calls) => {
     const config = {
+      maxEnabled: true,
       maxWebhookSecret: 'secret-max',
       maxClientBotToken: 'max-client-token',
       maxMasterBotToken: 'max-master-token',

@@ -7,10 +7,26 @@ const { sendChannelMessage } = require('./src/infrastructure/messaging');
 
 function bootstrap() {
   const config = loadConfig();
+  const dbRuntime = db.getDbRuntimeInfo();
+  logger.info('DB runtime configured', {
+    dbFilePath: dbRuntime.path,
+    dbDirectory: dbRuntime.dir,
+    dbFileExistsAtBoot: dbRuntime.exists
+  });
+  db.initializeStore();
   const server = createServer({ config, logger });
 
   if (!config.telegramClientBotToken) {
     logger.warn('TELEGRAM_CLIENT_BOT_TOKEN is missing: outgoing bot notifications are disabled');
+  }
+  if (config.maxEnabled && !config.maxWebhookSecret) {
+    logger.warn('MAX is enabled but MAX_WEBHOOK_SECRET is missing: MAX webhooks will be rejected');
+  }
+  if (config.maxEnabled && !config.maxClientBotToken) {
+    logger.warn('MAX is enabled but MAX_CLIENT_BOT_TOKEN is missing: MAX client webhook replies will be rejected');
+  }
+  if (config.maxEnabled && !config.maxMasterBotToken) {
+    logger.warn('MAX is enabled but MAX_MASTER_BOT_TOKEN is missing: MAX master webhook replies will be rejected');
   }
 
   const scheduler = createScheduler({
