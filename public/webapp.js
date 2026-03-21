@@ -9,6 +9,7 @@
   const logoSrc = '/logo.png';
   const PHONE_HINT = 'Введите 10 цифр';
   const PHONE_MAX_LENGTH = 10;
+  let phoneValidityState = null;
 
   const requestTypeLabels = {
     service_request: 'Заявка на сервис',
@@ -207,6 +208,27 @@
     return labels[name] || name;
   }
 
+  function analyticsBase() {
+    return {
+      channel: platform,
+      platform,
+      metaJson: {
+        path,
+        startAppPayload
+      }
+    };
+  }
+
+  function track(eventType, payload = {}) {
+    if (String(window.navigator?.userAgent || '').toLowerCase().includes('jsdom')) return;
+    const body = Object.assign(analyticsBase(), payload, { eventType });
+    fetch('/api/analytics/events', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    }).catch(() => {});
+  }
+
   function renderResult(ok, requestId) {
     mount.innerHTML = `<section class="result ${ok ? 'ok' : 'error'}"><img class="brand-logo" src="${logoSrc}" alt="logo"/><h2>${ok ? 'Ваша заявка принята' : 'Не удалось отправить заявку'}</h2><p>${ok ? 'Мы свяжемся с вами в ближайшее время.' : 'Повторите попытку позднее.'}</p>${requestId ? `<p class="result-id">Номер обращения: ${requestId}</p>` : ''}<div class="result-actions"><a class="btn" href="${channelLink}" target="_blank" rel="noopener">Подписаться на Telegram-канал</a><a class="btn ghost" href="${channelLink}" target="_blank" rel="noopener">Ссылка на Telegram-канал</a><a class="btn" href="${path}">Создать ещё одно обращение</a><a class="btn ghost" href="/">На главную</a></div></section>`;
   }
@@ -273,6 +295,12 @@
     const submit = form.querySelector('button[type="submit"]');
     const isValid = /^\d{10}$/.test(String(digits || ''));
     const shouldShowError = options.forceError || (options.touched && !isValid && String(digits || '').length > 0);
+    const nextState = isValid ? 'valid' : (String(digits || '').length ? 'invalid' : 'empty');
+    if (nextState !== phoneValidityState) {
+      if (nextState === 'valid') track('phone_valid');
+      if (nextState === 'invalid') track('phone_invalid', { status: 'invalid_phone', metaJson: { digitsLength: String(digits || '').length, path } });
+      phoneValidityState = nextState;
+    }
 
     phoneBox?.classList.toggle('has-error', shouldShowError);
     if (phoneError) phoneError.textContent = shouldShowError ? PHONE_HINT : '';
@@ -304,12 +332,15 @@
     form.dataset.submitting = '1';
     submit.disabled = true;
     submit.textContent = 'Отправка...';
+    track('submit_attempt', { requestType: cfg.type, metaJson: { endpoint: cfg.endpoint } });
     try {
       const response = await fetch(cfg.endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'REQUEST_FAILED');
+      track('request_created', { requestType: cfg.type, requestId: data.id, status: 'created' });
       renderResult(true, data.id);
     } catch {
+      track('request_failed', { requestType: cfg.type, status: 'client_error' });
       renderResult(false);
     }
   }
@@ -380,6 +411,8 @@
 
   if (forms[path]) {
     const cfg = forms[path];
+    track('webapp_opened', { requestType: cfg.type });
+    track('form_started', { requestType: cfg.type });
     mount.innerHTML = `<section><img class="brand-logo" src="${logoSrc}" alt="logo"/><h2>${cfg.title}</h2><form id="request-form"><p class="form-error"></p>${cfg.fields.map(renderField).join('')}<button type="submit">Отправить</button></form></section>`;
     const form = document.getElementById('request-form');
     const phoneField = form.querySelector('input[name="phone"]');
@@ -401,6 +434,7 @@
     return;
   }
 
+  track('webapp_opened');
   if (path === '/requests') return renderRequests();
   if (path === '/recommendations') return renderRecommendations();
 

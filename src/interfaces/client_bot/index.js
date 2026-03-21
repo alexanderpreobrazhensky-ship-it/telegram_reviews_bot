@@ -106,6 +106,13 @@ function resolveRecipientId(channel, primaryId, fallbackId) {
 
 async function handleClientWebhook({ body, config, headers = {}, rawHeaders = [], pathname = '', method = 'POST', channel = 'telegram' }) {
   if (channel === 'max') {
+    db.createAnalyticsEvent({
+      eventType: 'max_webhook_received',
+      channel: 'max',
+      platform: 'max',
+      status: 'received',
+      metaJson: { route: 'client_bot', pathname, method }
+    });
     const validation = validateMaxWebhookRequest({
       config,
       headers,
@@ -118,6 +125,13 @@ async function handleClientWebhook({ body, config, headers = {}, rawHeaders = []
       body
     });
     if (!validation.ok) {
+      db.createAnalyticsEvent({
+        eventType: 'max_webhook_rejected',
+        channel: 'max',
+        platform: 'max',
+        status: validation.error,
+        metaJson: { route: 'client_bot', pathname, method, statusCode: validation.statusCode }
+      });
       return { ok: false, error: validation.error, statusCode: validation.statusCode };
     }
   }
@@ -236,6 +250,16 @@ async function handleClientWebhook({ body, config, headers = {}, rawHeaders = []
         channel,
         direction: 'inbound',
         payload: { action: 'quick_request_created', requestType: session.requestType }
+      });
+      db.createAnalyticsEvent({
+        eventType: 'tg_request_created',
+        channel,
+        platform: channel,
+        requestType: session.requestType,
+        requestId: request.id,
+        clientId: client.id,
+        status: request.status,
+        metaJson: { sourceChannel: sourceChannelFor(channel) }
       });
       sessions.delete(sessionKey);
       await sendBotMessage({

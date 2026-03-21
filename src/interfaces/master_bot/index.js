@@ -62,6 +62,8 @@ function buildRequestCardText(card) {
     `Год: ${vehicle.year || '-'}`,
     `Описание: ${r.description || '-'}`,
     `Источник: ${r.sourceChannel || '-'}`,
+    `Назначено: ${r.assignedTo || r.assignedMasterId || '-'}`,
+    `Назначил: ${r.assignedBy || '-'}`,
     `Создано: ${r.createdAt || '-'}`,
     `Клиент ID: ${r.clientId || '-'}`,
     `Авто ID: ${r.vehicleId || '-'}`,
@@ -131,6 +133,13 @@ async function respondWithMessage({ channel, token, recipientId, text, payload =
 
 async function handleMasterWebhook({ body, config, headers = {}, rawHeaders = [], pathname = '', method = 'POST', channel = 'telegram' }) {
   if (channel === 'max') {
+    db.createAnalyticsEvent({
+      eventType: 'max_webhook_received',
+      channel: 'max',
+      platform: 'max',
+      status: 'received',
+      metaJson: { route: 'master_bot', pathname, method }
+    });
     const validation = validateMaxWebhookRequest({
       config,
       headers,
@@ -143,6 +152,13 @@ async function handleMasterWebhook({ body, config, headers = {}, rawHeaders = []
       body
     });
     if (!validation.ok) {
+      db.createAnalyticsEvent({
+        eventType: 'max_webhook_rejected',
+        channel: 'max',
+        platform: 'max',
+        status: validation.error,
+        metaJson: { route: 'master_bot', pathname, method, statusCode: validation.statusCode }
+      });
       return { ok: false, error: validation.error, statusCode: validation.statusCode };
     }
   }
@@ -238,6 +254,17 @@ async function handleMasterWebhook({ body, config, headers = {}, rawHeaders = []
           const answered = await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: 'Укажите комментарий' });
           if (!answered) logger.error('master_bot callback answer failed', { channel, callbackId: event.callback.id, recipientId });
           return respondWithMessage({ channel, token, recipientId, text: `Укажите комментарий для отмены заявки ${requestId}` });
+        }
+        if (toStatus === 'assigned') {
+          masterService.assignRequest({
+            requestId,
+            assignedTo: actor.id,
+            assignedBy: actor.id,
+            actorId: actor.id,
+            actorRole: actor.role,
+            actorType: actor.role,
+            metaJson: { channel }
+          });
         }
         const result = masterService.changeRequestStatus({ requestId, toStatus, actorId: actor.id, actorRole: actor.role });
         if (!result?.error && toStatus === 'awaiting_client') {

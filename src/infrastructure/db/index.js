@@ -165,6 +165,9 @@ const schemaStatements = [
     description TEXT,
     source_channel TEXT,
     assigned_master_id TEXT,
+    assigned_to TEXT,
+    assigned_at TEXT,
+    assigned_by TEXT,
     lost_reason TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
@@ -181,6 +184,10 @@ const schemaStatements = [
     quality_case_id TEXT,
     actor_id TEXT,
     actor_role TEXT,
+    old_value TEXT,
+    new_value TEXT,
+    actor_type TEXT,
+    meta_json TEXT,
     created_at TEXT NOT NULL,
     data TEXT NOT NULL,
     parent_event_id TEXT
@@ -246,6 +253,13 @@ const schemaStatements = [
     id TEXT PRIMARY KEY,
     parent_event_id TEXT,
     event_type TEXT NOT NULL,
+    channel TEXT,
+    platform TEXT,
+    request_type TEXT,
+    request_id TEXT,
+    client_id TEXT,
+    status TEXT,
+    meta_json TEXT,
     source_system TEXT,
     processing_status TEXT,
     related_entity_type TEXT,
@@ -302,6 +316,35 @@ function ensureSchema() {
     }
   });
   createSchema();
+  ensureOptionalColumns();
+}
+
+function tableColumns(tableName) {
+  return new Set(getDb().prepare(`PRAGMA table_info(${tableName})`).all().map((row) => row.name));
+}
+
+function ensureColumn(tableName, columnName, definition) {
+  const columns = tableColumns(tableName);
+  if (!columns.has(columnName)) {
+    getDb().prepare(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${definition}`).run();
+  }
+}
+
+function ensureOptionalColumns() {
+  ensureColumn('requests', 'assigned_to', 'TEXT');
+  ensureColumn('requests', 'assigned_at', 'TEXT');
+  ensureColumn('requests', 'assigned_by', 'TEXT');
+  ensureColumn('request_events', 'old_value', 'TEXT');
+  ensureColumn('request_events', 'new_value', 'TEXT');
+  ensureColumn('request_events', 'actor_type', 'TEXT');
+  ensureColumn('request_events', 'meta_json', 'TEXT');
+  ensureColumn('analytics_events', 'channel', 'TEXT');
+  ensureColumn('analytics_events', 'platform', 'TEXT');
+  ensureColumn('analytics_events', 'request_type', 'TEXT');
+  ensureColumn('analytics_events', 'request_id', 'TEXT');
+  ensureColumn('analytics_events', 'client_id', 'TEXT');
+  ensureColumn('analytics_events', 'status', 'TEXT');
+  ensureColumn('analytics_events', 'meta_json', 'TEXT');
 }
 
 function tableCount(tableName) {
@@ -382,35 +425,46 @@ function requestRowToEntity(row) {
     description: row.description,
     sourceChannel: row.source_channel,
     assignedMasterId: row.assigned_master_id,
+    assignedTo: row.assigned_to || row.assigned_master_id || entity.assignedTo || entity.assignedMasterId || null,
+    assignedAt: row.assigned_at || entity.assignedAt || null,
+    assignedBy: row.assigned_by || entity.assignedBy || null,
     lostReason: row.lost_reason,
     createdAt: row.created_at,
     updatedAt: row.updated_at
   });
+  if (!entity.assignedMasterId && entity.assignedTo) entity.assignedMasterId = entity.assignedTo;
   return entity;
 }
 
 function requestEventRowToEntity(row) {
   const data = parseJson(row.data, {});
+  const canonicalEventType = row.event_type === 'request_status_changed' ? 'status_changed' : row.event_type;
   const oldStatus = normalizeRequestStatusInput(data.oldStatus ?? data.fromStatus ?? null) || null;
   const newStatus = normalizeRequestStatusInput(data.newStatus ?? data.toStatus ?? null, oldStatus) || null;
   const actor = data.actor ?? data.changedBy ?? row.actor_id ?? null;
   const comment = data.comment ?? data.reason ?? data.text ?? null;
   return {
+    ...data,
     id: row.id,
     eventScope: row.event_scope,
-    eventType: row.event_type,
+    storageEventType: row.event_type,
+    canonicalEventType,
+    eventType: canonicalEventType === 'status_changed' ? 'request_status_changed' : canonicalEventType,
     requestId: row.request_id,
     clientId: row.client_id,
     qualityCaseId: row.quality_case_id,
     actorId: row.actor_id,
     actorRole: row.actor_role,
+    actorType: row.actor_type || data.actorType || row.actor_role || null,
     actor,
+    oldValue: row.old_value || data.oldValue || null,
+    newValue: row.new_value || data.newValue || null,
+    metaJson: parseJson(row.meta_json, data.metaJson || {}),
     oldStatus,
     newStatus,
     comment,
     createdAt: row.created_at,
     parentEventId: row.parent_event_id,
-    ...data,
     fromStatus: oldStatus,
     toStatus: newStatus
   };
@@ -486,6 +540,13 @@ function analyticsEventRowToEntity(row) {
     id: row.id,
     parentEventId: row.parent_event_id,
     storageEventType: row.event_type,
+    channel: row.channel || entity.channel || null,
+    platform: row.platform || entity.platform || null,
+    requestType: row.request_type || entity.requestType || null,
+    requestId: row.request_id || entity.requestId || null,
+    clientId: row.client_id || entity.clientId || null,
+    status: row.status || entity.status || null,
+    metaJson: parseJson(row.meta_json, entity.metaJson || {}),
     sourceSystem: row.source_system,
     processingStatus: row.processing_status,
     relatedEntityType: row.related_entity_type,
@@ -561,11 +622,14 @@ function readStore() {
     communicationEvents: listRows('communications').map(communicationRowToEntity),
     integrationEvents: analyticsEvents.filter((item) => item.event_type === 'integration_event').map(analyticsEventRowToEntity),
     integrationEventLogs: analyticsEvents.filter((item) => item.event_type === 'integration_event_log').map(analyticsEventRowToEntity),
+    analyticsEvents: analyticsEvents
+      .filter((item) => !['integration_event', 'integration_event_log'].includes(item.event_type))
+      .map(analyticsEventRowToEntity),
     recommendations: listRows('recommendations').map(recommendationRowToEntity),
     recommendationSync: getMetaValue('recommendation_sync', { lastSyncAt: null, source: null }),
     staffUsers: listRows('staff_users').map(staffUserRowToEntity),
     requestEvents: requestEvents.map(requestEventRowToEntity),
-    requestStatusHistory: requestEvents.filter((item) => item.event_type === 'request_status_changed').map(requestEventRowToEntity),
+    requestStatusHistory: requestEvents.filter((item) => ['request_status_changed', 'status_changed'].includes(item.event_type)).map(requestEventRowToEntity),
     requestInternalComments: requestEvents.filter((item) => item.event_type === 'request_internal_comment').map(requestEventRowToEntity),
     clientInternalNotes: requestEvents.filter((item) => item.event_type === 'client_internal_note').map(requestEventRowToEntity),
     masterActions: requestEvents.filter((item) => item.event_type === 'master_action').map(requestEventRowToEntity),
@@ -665,6 +729,9 @@ function insertOrReplaceRequest(request) {
     description: entity.description || '',
     source_channel: entity.sourceChannel || null,
     assigned_master_id: entity.assignedMasterId || null,
+    assigned_to: entity.assignedTo || entity.assignedMasterId || null,
+    assigned_at: entity.assignedAt || null,
+    assigned_by: entity.assignedBy || null,
     lost_reason: entity.lostReason || null,
     created_at: entity.createdAt,
     updated_at: entity.updatedAt,
@@ -678,10 +745,10 @@ function insertRequestEvent(event) {
   getDb().prepare(`
     INSERT OR REPLACE INTO request_events (
       id, event_scope, event_type, request_id, client_id, quality_case_id,
-      actor_id, actor_role, created_at, data, parent_event_id
+      actor_id, actor_role, old_value, new_value, actor_type, meta_json, created_at, data, parent_event_id
     ) VALUES (
       @id, @event_scope, @event_type, @request_id, @client_id, @quality_case_id,
-      @actor_id, @actor_role, @created_at, @data, @parent_event_id
+      @actor_id, @actor_role, @old_value, @new_value, @actor_type, @meta_json, @created_at, @data, @parent_event_id
     )
   `).run({
     id: entity.id,
@@ -692,6 +759,10 @@ function insertRequestEvent(event) {
     quality_case_id: entity.qualityCaseId || null,
     actor_id: entity.actorId || null,
     actor_role: entity.actorRole || null,
+    old_value: entity.oldValue ?? null,
+    new_value: entity.newValue ?? null,
+    actor_type: entity.actorType || entity.actorRole || null,
+    meta_json: JSON.stringify(entity.metaJson || {}),
     created_at: entity.createdAt || nowIso(),
     data: serializeEntity(entity),
     parent_event_id: entity.parentEventId || null
@@ -793,16 +864,23 @@ function insertOrReplaceAnalyticsEvent(item) {
   const entity = { ...item };
   getDb().prepare(`
     INSERT OR REPLACE INTO analytics_events (
-      id, parent_event_id, event_type, source_system, processing_status,
-      related_entity_type, related_entity_id, dedupe_key, created_at, processed_at, data
+      id, parent_event_id, event_type, channel, platform, request_type, request_id, client_id, status, meta_json,
+      source_system, processing_status, related_entity_type, related_entity_id, dedupe_key, created_at, processed_at, data
     ) VALUES (
-      @id, @parent_event_id, @event_type, @source_system, @processing_status,
-      @related_entity_type, @related_entity_id, @dedupe_key, @created_at, @processed_at, @data
+      @id, @parent_event_id, @event_type, @channel, @platform, @request_type, @request_id, @client_id, @status, @meta_json,
+      @source_system, @processing_status, @related_entity_type, @related_entity_id, @dedupe_key, @created_at, @processed_at, @data
     )
   `).run({
     id: entity.id,
     parent_event_id: entity.parentEventId || null,
     event_type: entity.eventType,
+    channel: entity.channel || null,
+    platform: entity.platform || null,
+    request_type: entity.requestType || null,
+    request_id: entity.requestId || null,
+    client_id: entity.clientId || null,
+    status: entity.status || null,
+    meta_json: JSON.stringify(entity.metaJson || {}),
     source_system: entity.sourceSystem || null,
     processing_status: entity.processingStatus || null,
     related_entity_type: entity.relatedEntityType || null,
@@ -1088,6 +1166,9 @@ function createRequest({ clientId, vehicleId, requestType, description, sourceCh
     description: description || '',
     payload: payload || {},
     assignedMasterId: null,
+    assignedTo: null,
+    assignedAt: null,
+    assignedBy: null,
     lostReason: null,
     externalIds: {},
     sourceSystem: sourceChannel || 'system',
@@ -1103,7 +1184,21 @@ function createRequest({ clientId, vehicleId, requestType, description, sourceCh
     insertRequestEvent({
       id: crypto.randomUUID(),
       eventScope: 'request',
-      eventType: 'request_status_changed',
+      eventType: 'created',
+      requestId: request.id,
+      clientId: request.clientId,
+      actorId: 'system',
+      actorRole: 'system',
+      actorType: 'system',
+      oldValue: null,
+      newValue: 'new',
+      metaJson: { requestType, sourceChannel },
+      createdAt: nowIso()
+    });
+    insertRequestEvent({
+      id: crypto.randomUUID(),
+      eventScope: 'request',
+      eventType: 'status_changed',
       requestId: request.id,
       clientId: request.clientId,
       oldStatus: null,
@@ -1115,6 +1210,10 @@ function createRequest({ clientId, vehicleId, requestType, description, sourceCh
       actor: 'system',
       actorId: 'system',
       actorRole: 'system',
+      actorType: 'system',
+      oldValue: null,
+      newValue: 'new',
+      metaJson: { requestType, sourceChannel },
       comment: null,
       reason: null,
       createdAt: nowIso()
@@ -1122,6 +1221,47 @@ function createRequest({ clientId, vehicleId, requestType, description, sourceCh
   });
   tx();
   return request;
+}
+
+function createAnalyticsEvent({
+  eventType,
+  channel = null,
+  platform = null,
+  requestType = null,
+  requestId = null,
+  clientId = null,
+  status = null,
+  metaJson = {},
+  sourceSystem = null,
+  processingStatus = null,
+  relatedEntityType = null,
+  relatedEntityId = null,
+  dedupeKey = null,
+  parentEventId = null,
+  processedAt = null
+}) {
+  initializeStore();
+  const event = {
+    id: crypto.randomUUID(),
+    parentEventId,
+    eventType,
+    channel,
+    platform,
+    requestType,
+    requestId,
+    clientId,
+    status,
+    metaJson,
+    sourceSystem,
+    processingStatus,
+    relatedEntityType,
+    relatedEntityId,
+    dedupeKey,
+    createdAt: nowIso(),
+    processedAt
+  };
+  insertOrReplaceAnalyticsEvent(event);
+  return event;
 }
 
 function createCommunicationEvent({ clientId, requestId, source, payload, channel = null, direction = null }) {
@@ -1152,6 +1292,38 @@ function recordMasterAction({ actorId, role, action, requestId = null, clientId 
     requestId,
     clientId,
     payload,
+    createdAt: nowIso()
+  };
+  insertRequestEvent(item);
+  return item;
+}
+
+function recordRequestEvent({
+  requestId = null,
+  clientId = null,
+  eventType,
+  oldValue = null,
+  newValue = null,
+  actorId = null,
+  actorRole = null,
+  actorType = null,
+  metaJson = {},
+  comment = null
+}) {
+  initializeStore();
+  const item = {
+    id: crypto.randomUUID(),
+    eventScope: 'request',
+    eventType,
+    requestId,
+    clientId,
+    actorId,
+    actorRole,
+    actorType,
+    oldValue,
+    newValue,
+    metaJson,
+    comment,
     createdAt: nowIso()
   };
   insertRequestEvent(item);
@@ -1253,7 +1425,7 @@ function revokeStaffUser({ channel = 'telegram', channelUserId = '', telegramId,
   return { user };
 }
 
-function listRequests({ phone, telegramId, maxId, statuses }) {
+function listRequests({ phone, telegramId, maxId, statuses, channel, requestType }) {
   initializeStore();
   let clientId = null;
   if (phone || telegramId || maxId) {
@@ -1272,6 +1444,14 @@ function listRequests({ phone, telegramId, maxId, statuses }) {
     const expandedStatuses = expandRequestStatuses(statuses);
     where.push(`status IN (${expandedStatuses.map(() => '?').join(',')})`);
     params.push(...expandedStatuses);
+  }
+  if (channel) {
+    where.push('source_channel = ?');
+    params.push(channel);
+  }
+  if (requestType) {
+    where.push('request_type = ?');
+    params.push(requestType);
   }
   if (where.length) sql += ` WHERE ${where.join(' AND ')}`;
   sql += ' ORDER BY created_at ASC';
@@ -1407,7 +1587,7 @@ function updateRequestStatus({ requestId, toStatus, actorId, actorRole, lostReas
   const history = {
     id: crypto.randomUUID(),
     eventScope: 'request',
-    eventType: 'request_status_changed',
+    eventType: 'status_changed',
     requestId,
     clientId: request.clientId,
     oldStatus: fromStatus,
@@ -1419,6 +1599,10 @@ function updateRequestStatus({ requestId, toStatus, actorId, actorRole, lostReas
     actor: actorId,
     actorId,
     actorRole,
+    actorType: actorRole || 'system',
+    oldValue: fromStatus,
+    newValue: nextStatus,
+    metaJson: { comment: statusComment, lostReason },
     comment: statusComment,
     reason: statusComment,
     createdAt: nowIso()
@@ -1480,6 +1664,60 @@ function updateRequestStatus({ requestId, toStatus, actorId, actorRole, lostReas
   });
   tx();
   return { request, history };
+}
+
+function updateRequestAssignment({ requestId, assignedTo, assignedBy = null, actorId = null, actorRole = null, actorType = null, metaJson = {} }) {
+  initializeStore();
+  const row = getDb().prepare('SELECT * FROM requests WHERE id = ? LIMIT 1').get(requestId);
+  if (!row) return { error: 'REQUEST_NOT_FOUND' };
+  const request = requestRowToEntity(row);
+  const normalizedAssignedTo = String(assignedTo || '').trim();
+  if (!normalizedAssignedTo) return { error: 'ASSIGNED_TO_REQUIRED' };
+
+  const oldValue = request.assignedTo || null;
+  request.assignedTo = normalizedAssignedTo;
+  request.assignedMasterId = normalizedAssignedTo;
+  request.assignedBy = assignedBy || actorId || actorRole || 'system';
+  request.assignedAt = nowIso();
+  request.updatedAt = nowIso();
+
+  const event = {
+    id: crypto.randomUUID(),
+    eventScope: 'request',
+    eventType: 'assigned',
+    requestId,
+    clientId: request.clientId,
+    actorId: actorId || assignedBy || null,
+    actorRole: actorRole || null,
+    actorType: actorType || actorRole || 'system',
+    oldValue,
+    newValue: normalizedAssignedTo,
+    metaJson: {
+      assignedAt: request.assignedAt,
+      assignedBy: request.assignedBy,
+      ...metaJson
+    },
+    createdAt: nowIso()
+  };
+
+  const tx = getDb().transaction(() => {
+    insertOrReplaceRequest(request);
+    insertRequestEvent(event);
+    insertRequestEvent({
+      id: crypto.randomUUID(),
+      eventScope: 'master_action',
+      eventType: 'master_action',
+      actorId: actorId || assignedBy || null,
+      actorRole: actorRole || null,
+      action: 'request_assigned',
+      requestId,
+      clientId: request.clientId,
+      payload: { oldValue, assignedTo: normalizedAssignedTo, assignedBy: request.assignedBy },
+      createdAt: nowIso()
+    });
+  });
+  tx();
+  return { request, event };
 }
 
 function addInternalComment({ requestId, actorId, actorRole, text }) {
@@ -1586,6 +1824,7 @@ function getRequestCard(requestId) {
     client: store.clients.find((item) => item.id === request.clientId) || null,
     vehicle: store.vehicles.find((item) => item.id === request.vehicleId) || null,
     assignedMaster: store.staffUsers.find((item) => item.id === request.assignedMasterId) || null,
+    requestEvents: store.requestEvents.filter((item) => item.requestId === requestId),
     statusHistory: store.requestStatusHistory.filter((item) => item.requestId === requestId),
     internalComments: store.requestInternalComments.filter((item) => item.requestId === requestId)
   };
@@ -2091,6 +2330,7 @@ const api = {
   upsertClient,
   upsertVehicle,
   createRequest,
+  createAnalyticsEvent,
   createCommunicationEvent,
   listRequests,
   listRecommendations,
@@ -2101,7 +2341,9 @@ const api = {
   createStaffUser,
   revokeStaffUser,
   recordMasterAction,
+  recordRequestEvent,
   updateRequestStatus,
+  updateRequestAssignment,
   addInternalComment,
   addClientNote,
   searchCRM,

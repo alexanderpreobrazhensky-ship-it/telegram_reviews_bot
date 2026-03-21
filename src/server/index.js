@@ -16,6 +16,10 @@ function readBody(req) {
     });
     req.on('end', () => {
       if (!raw) return resolve({ body: {}, invalidJson: false });
+      const contentType = String(req.headers['content-type'] || '');
+      if (contentType.includes('application/x-www-form-urlencoded')) {
+        return resolve({ body: Object.fromEntries(new URLSearchParams(raw).entries()), invalidJson: false });
+      }
       try {
         resolve({ body: JSON.parse(raw), invalidJson: false });
       } catch {
@@ -28,6 +32,11 @@ function readBody(req) {
 function sendJson(res, status, payload) {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
   res.end(JSON.stringify(payload));
+}
+
+function sendHtml(res, status, html) {
+  res.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8' });
+  res.end(html);
 }
 
 function serveFile(res, filePath, contentType) {
@@ -164,6 +173,154 @@ function createClientRequest({ body, type, sourceChannel = 'webapp' }) {
   return { client, vehicle, request };
 }
 
+function trackAnalytics(event) {
+  return db.createAnalyticsEvent(event);
+}
+
+function internalAdminSet(config) {
+  return new Set([
+    ...(config.internalAdminWhitelist || []),
+    ...(config.masterBotAdminIds || []),
+    ...(config.maxMasterBotAdminIds || [])
+  ].map((item) => String(item || '').trim()).filter(Boolean));
+}
+
+function resolveInternalAdminId(req, requestUrl) {
+  return String(
+    req.headers['x-admin-id']
+      || req.headers['x-internal-admin-id']
+      || requestUrl.searchParams.get('admin_id')
+      || requestUrl.searchParams.get('adminId')
+      || ''
+  ).trim();
+}
+
+function isInternalAuthorized(req, requestUrl, config) {
+  const adminId = resolveInternalAdminId(req, requestUrl);
+  const whitelist = internalAdminSet(config);
+  return { ok: whitelist.size > 0 && whitelist.has(adminId), adminId, whitelistSize: whitelist.size };
+}
+
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function renderInternalRequestsPage({ requests, filters, adminId, requestCards }) {
+  const selected = (value, expected) => String(value || '') === String(expected || '') ? ' selected' : '';
+  const rows = requests.map((request) => {
+    const card = requestCards.get(request.id);
+    const eventsHtml = (card?.requestEvents || [])
+      .map((event) => `<li><strong>${escapeHtml(event.canonicalEventType || event.eventType)}</strong> · ${escapeHtml(event.createdAt)} · ${escapeHtml(event.actorType || event.actorRole || '-')} · ${escapeHtml(event.actorId || '-')} · ${escapeHtml(event.oldValue || event.oldStatus || '-')} → ${escapeHtml(event.newValue || event.newStatus || '-')}</li>`)
+      .join('');
+    return `
+      <tr>
+        <td>${escapeHtml(request.id)}</td>
+        <td>${escapeHtml(request.createdAt)}</td>
+        <td>
+          <form method="POST" action="/internal/requests/${encodeURIComponent(request.id)}/status?admin_id=${encodeURIComponent(adminId)}">
+            <select name="status">
+              ${['new', 'assigned', 'awaiting_client', 'scheduled', 'in_service', 'done', 'cancelled'].map((status) => `<option value="${status}"${selected(request.status, status)}>${status}</option>`).join('')}
+            </select>
+            <input type="text" name="comment" placeholder="comment / reason"/>
+            <button type="submit">Save</button>
+          </form>
+        </td>
+        <td>${escapeHtml(card?.client?.phone || '-')}</td>
+        <td>${escapeHtml(request.sourceChannel || '-')}</td>
+        <td>${escapeHtml(request.requestType || '-')}</td>
+        <td>${escapeHtml(request.assignedTo || '-')}</td>
+      </tr>
+      <tr>
+        <td colspan="7">
+          <details>
+            <summary>Events (${(card?.requestEvents || []).length})</summary>
+            <ul>${eventsHtml || '<li>No events</li>'}</ul>
+          </details>
+        </td>
+      </tr>
+    `;
+  }).join('');
+
+  return `<!doctype html>
+  <html lang="en">
+    <head>
+      <meta charset="utf-8"/>
+      <title>Internal Requests</title>
+      <style>
+        body { font-family: Arial, sans-serif; margin: 24px; }
+        table { width: 100%; border-collapse: collapse; }
+        th, td { border: 1px solid #ddd; padding: 8px; vertical-align: top; }
+        form.inline, .filters { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+        input, select, button { padding: 6px; }
+        details { margin-top: 8px; }
+      </style>
+    </head>
+    <body>
+      <h1>Internal Requests</h1>
+      <p>Admin: ${escapeHtml(adminId)}</p>
+      <form class="filters" method="GET" action="/internal/requests">
+        <input type="hidden" name="admin_id" value="${escapeHtml(adminId)}"/>
+        <label>Status <select name="status"><option value="">all</option>${['new', 'assigned', 'awaiting_client', 'scheduled', 'in_service', 'done', 'cancelled'].map((status) => `<option value="${status}"${selected(filters.status, status)}>${status}</option>`).join('')}</select></label>
+        <label>Channel <select name="channel"><option value="">all</option>${['webapp', 'max_webapp', 'telegram_chat', 'max_chat'].map((channel) => `<option value="${channel}"${selected(filters.channel, channel)}>${channel}</option>`).join('')}</select></label>
+        <label>Type <select name="request_type"><option value="">all</option>${Object.values(REQUEST_TYPES).map((type) => `<option value="${type}"${selected(filters.requestType, type)}>${type}</option>`).join('')}</select></label>
+        <button type="submit">Apply</button>
+      </form>
+      <table>
+        <thead>
+          <tr><th>ID</th><th>Created</th><th>Status</th><th>Phone</th><th>Channel</th><th>Type</th><th>Assigned</th></tr>
+        </thead>
+        <tbody>${rows || '<tr><td colspan="7">No requests</td></tr>'}</tbody>
+      </table>
+    </body>
+  </html>`;
+}
+
+function buildHealthPayload(config) {
+  return {
+    status: 'ok',
+    uptimeSeconds: Math.round(process.uptime()),
+    env: config.nodeEnv,
+    timestamp: new Date().toISOString()
+  };
+}
+
+function buildDbHealthPayload() {
+  const runtime = db.getDbRuntimeInfo();
+  const tables = db.listTables();
+  return {
+    status: 'ok',
+    db: {
+      type: runtime.type,
+      path: runtime.path,
+      initStatus: runtime.lastInitStatus,
+      tables
+    }
+  };
+}
+
+function buildMaxHealthPayload(config) {
+  const payload = {
+    status: config.maxEnabled ? 'enabled' : 'disabled',
+    maxEnabled: Boolean(config.maxEnabled),
+    tokensConfigured: Boolean(config.maxClientBotToken || config.maxMasterBotToken),
+    webhookSecretConfigured: Boolean(config.maxWebhookSecret),
+    botNameConfigured: Boolean(config.maxBotName)
+  };
+  if (config.maxDiagnosticsEnabled) {
+    payload.diagnostics = {
+      hasClientBotToken: Boolean(config.maxClientBotToken),
+      hasMasterBotToken: Boolean(config.maxMasterBotToken),
+      hasWebAppUrl: Boolean(config.maxWebAppUrl),
+      hasDeepLinkBaseUrl: Boolean(config.maxDeepLinkBaseUrl)
+    };
+  }
+  return payload;
+}
 
 
 function createServer({ config, logger }) {
@@ -177,7 +334,48 @@ function createServer({ config, logger }) {
     const requestUrl = new URL(req.url, 'http://localhost');
     const pathname = requestUrl.pathname;
 
-    if (req.method === 'GET' && pathname === '/health') return sendJson(res, 200, { ok: true, env: config.nodeEnv });
+    if (req.method === 'GET' && pathname === '/health') return sendJson(res, 200, buildHealthPayload(config));
+    if (req.method === 'GET' && pathname === '/health/db') return sendJson(res, 200, buildDbHealthPayload());
+    if (req.method === 'GET' && pathname === '/health/max') return sendJson(res, 200, buildMaxHealthPayload(config));
+
+    if (req.method === 'GET' && pathname === '/internal/requests') {
+      const auth = isInternalAuthorized(req, requestUrl, config);
+      if (!auth.ok) return sendJson(res, 403, { error: 'FORBIDDEN', details: ['Provide a whitelisted admin_id query parameter or x-admin-id header.'] });
+      const filters = {
+        status: requestUrl.searchParams.get('status') || '',
+        channel: requestUrl.searchParams.get('channel') || '',
+        requestType: requestUrl.searchParams.get('request_type') || ''
+      };
+      const requests = db.listRequests({
+        statuses: filters.status ? [filters.status] : undefined,
+        channel: filters.channel || undefined,
+        requestType: filters.requestType || undefined
+      }).slice(-100).reverse();
+      const requestCards = new Map(requests.map((item) => [item.id, db.getRequestCard(item.id)]));
+      return sendHtml(res, 200, renderInternalRequestsPage({ requests, filters, adminId: auth.adminId, requestCards }));
+    }
+
+    if (req.method === 'POST' && /^\/internal\/requests\/[^/]+\/status$/.test(pathname)) {
+      const auth = isInternalAuthorized(req, requestUrl, config);
+      if (!auth.ok) return sendJson(res, 403, { error: 'FORBIDDEN' });
+      const requestId = pathname.split('/')[3];
+      const { body, invalidJson } = await readBody(req);
+      if (invalidJson) return sendJson(res, 400, { error: 'Invalid JSON payload' });
+      const formBody = Object.keys(body || {}).length ? body : {};
+      const result = db.updateRequestStatus({
+        requestId,
+        toStatus: formBody.status,
+        comment: formBody.comment || null,
+        lostReason: formBody.comment || null,
+        actorId: auth.adminId,
+        actorRole: 'admin'
+      });
+      if ((req.headers['content-type'] || '').includes('application/json')) {
+        return sendJson(res, result?.error ? 400 : 200, result);
+      }
+      res.writeHead(303, { Location: `/internal/requests?admin_id=${encodeURIComponent(auth.adminId)}` });
+      return res.end();
+    }
 
     if (req.method === 'GET' && (pathname === '/styles.css' || pathname === '/webapp.js')) {
       const staticPath = path.join(process.cwd(), 'public', pathname.slice(1));
@@ -222,7 +420,17 @@ function createServer({ config, logger }) {
       const normalizedPhone = normalizePhone10(body.phone);
       body.phone = normalizedPhone;
       const errors = validateClientRequestPayload(body, type);
-      if (errors.length) return sendJson(res, 400, { error: 'Validation error', details: errors });
+      if (errors.length) {
+        trackAnalytics({
+          eventType: 'request_failed',
+          channel: body.sourceChannel === 'max_webapp' ? 'max' : 'telegram',
+          platform: body.sourceChannel === 'max_webapp' ? 'max' : 'telegram',
+          requestType: type,
+          status: 'validation_error',
+          metaJson: { errors }
+        });
+        return sendJson(res, 400, { error: 'Validation error', details: errors });
+      }
 
       const dedupeText = body.description || body.question || body.changeDetails || '';
       const duplicate = db.findRecentDuplicateRequest({
@@ -232,15 +440,98 @@ function createServer({ config, logger }) {
         text: dedupeText,
         withinMs: config.webappDedupeWindowMs
       });
-      if (duplicate) return sendJson(res, 200, { ...duplicate, deduplicated: true });
+      if (duplicate) {
+        trackAnalytics({
+          eventType: 'request_failed',
+          channel: body.sourceChannel === 'max_webapp' ? 'max' : 'telegram',
+          platform: body.sourceChannel === 'max_webapp' ? 'max' : 'telegram',
+          requestType: type,
+          requestId: duplicate.id,
+          clientId: duplicate.clientId,
+          status: 'duplicate_detected',
+          metaJson: { duplicateRequestId: duplicate.id }
+        });
+        db.recordRequestEvent({
+          requestId: duplicate.id,
+          clientId: duplicate.clientId,
+          eventType: 'duplicate_detected',
+          actorId: 'system',
+          actorRole: 'system',
+          actorType: 'system',
+          oldValue: duplicate.status || null,
+          newValue: duplicate.status || null,
+          metaJson: {
+            duplicateRequestId: duplicate.id,
+            sourceChannel: body.sourceChannel === 'max_webapp' ? 'max_webapp' : 'webapp'
+          }
+        });
+        return sendJson(res, 200, { ...duplicate, deduplicated: true });
+      }
 
       const sourceChannel = body.sourceChannel === 'max_webapp' ? 'max_webapp' : 'webapp';
-      const created = createClientRequest({ body, type, sourceChannel }).request;
+      const { client, request: created } = createClientRequest({ body, type, sourceChannel });
+      trackAnalytics({
+        eventType: 'request_created',
+        channel: sourceChannel === 'max_webapp' ? 'max' : 'telegram',
+        platform: sourceChannel === 'max_webapp' ? 'max' : 'telegram',
+        requestType: type,
+        requestId: created.id,
+        clientId: client.id,
+        status: created.status,
+        metaJson: { sourceChannel }
+      });
       await duplicateToMastersChat({ config, request: created, payload: body });
       if (created.requestType === REQUEST_TYPES.COMPLAINT) {
         await duplicateToMastersChat({ config, request: created, payload: body });
       }
       return sendJson(res, 201, created);
+    }
+
+    if (req.method === 'POST' && pathname === '/api/analytics/events') {
+      const { body, invalidJson } = await readBody(req);
+      if (invalidJson) return sendJson(res, 400, { error: 'Invalid JSON payload' });
+      const event = trackAnalytics({
+        eventType: body.eventType,
+        channel: body.channel || null,
+        platform: body.platform || null,
+        requestType: body.requestType || null,
+        requestId: body.requestId || null,
+        clientId: body.clientId || null,
+        status: body.status || null,
+        metaJson: body.metaJson || {}
+      });
+      return sendJson(res, 201, event);
+    }
+
+    if (req.method === 'POST' && /^\/api\/requests\/[^/]+\/assign$/.test(pathname)) {
+      const { body, invalidJson } = await readBody(req);
+      if (invalidJson) return sendJson(res, 400, { error: 'Invalid JSON payload' });
+      const requestId = pathname.split('/')[3];
+      const result = db.updateRequestAssignment({
+        requestId,
+        assignedTo: body.assignedTo,
+        assignedBy: body.assignedBy || body.actorId || 'admin',
+        actorId: body.actorId || body.assignedBy || null,
+        actorRole: body.actorRole || 'admin',
+        actorType: body.actorType || body.actorRole || 'admin',
+        metaJson: body.metaJson || {}
+      });
+      return sendJson(res, result?.error ? 400 : 200, result);
+    }
+
+    if (req.method === 'POST' && /^\/api\/requests\/[^/]+\/status$/.test(pathname)) {
+      const { body, invalidJson } = await readBody(req);
+      if (invalidJson) return sendJson(res, 400, { error: 'Invalid JSON payload' });
+      const requestId = pathname.split('/')[3];
+      const result = db.updateRequestStatus({
+        requestId,
+        toStatus: body.status,
+        comment: body.comment || null,
+        lostReason: body.comment || null,
+        actorId: body.actorId || null,
+        actorRole: body.actorRole || 'admin'
+      });
+      return sendJson(res, result?.error ? 400 : 200, result);
     }
 
     if (req.method === 'GET' && pathname === '/api/client/requests') {
