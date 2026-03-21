@@ -9,6 +9,6 @@ test('production path is node-first', () => {
   assert.equal(fs.existsSync('app.js'), true);
 });
 
-test('project audit file exists', () => {
-  assert.equal(fs.existsSync('PROJECT_AUDIT.md'), true);
+test('centralized repository audit file exists under audit/', () => {
+  assert.equal(fs.existsSync('audit/REPOSITORY_FULL_AUDIT.md'), true);
 });

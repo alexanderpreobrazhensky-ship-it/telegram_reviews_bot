@@ -1,48 +1,41 @@
-# manifest_generated_for_branch=main production_branch=main
-.bothost/entrypoint.conf
-.github/workflows/tests.yml
-.gitignore
-AUDIT_AFTER_CODEX.md
-Dockerfile
-README.md
-audit/AUDIT_FOR_AI.md
-audit/ENV_REPORT.json
-audit/MASTER_AUDIT_FOR_EXTERNAL_AI.json
-audit/MASTER_AUDIT_FOR_EXTERNAL_AI.md
-audit/REPO_MANIFEST.txt
-bots/__init__.py
-bots/client_bot/CHECKLIST.md
-bots/client_bot/README.md
-bots/client_bot/__init__.py
-bots/client_bot/config/dictionary_rules.json
-bots/client_bot/config/example.env
-bots/client_bot/logs/.gitkeep
-bots/client_bot/main.py
-bots/client_bot/requirements.txt
-bots/client_bot/services/__init__.py
-bots/client_bot/services/ai_service.py
-bots/client_bot/services/dictionary_rules.py
-bots/client_bot/services/outgoing_queue.py
-bots/client_bot/services/telegram_api.py
-bots/client_bot/storage.py
-bots/client_bot/webapp/assets/.gitkeep
-bots/client_bot/webapp/assets/webapp.bundle.css
-bots/client_bot/webapp/assets/webapp.bundle.js
-bots/client_bot/webapp/config.json
-bots/client_bot/webapp/index.html
-data/.gitkeep
-legacy/index.js
-logo.png
-main.py
-requirements.txt
-services/__init__.py
-services/client_bot_service/__init__.py
-services/client_bot_service/app/__init__.py
-services/client_bot_service/app/config.py
-services/client_bot_service/app/main.py
-shared/clients_registry.py
-tests/test_entrypoints.py
-tests/test_health.py
-tests/test_runtime_behavior.py
-tests/test_static_routes.py
-tests/test_webhook_url_build.py
+ACTIVE_PRODUCTION_PATH
+- app.js
+- package.json
+- package-lock.json
+- Dockerfile
+- .bothost/entrypoint.conf
+- public/index.html
+- public/webapp.js
+- public/styles.css
+- src/server/index.js
+- src/core/**
+- src/infrastructure/**
+- src/interfaces/client_bot/**
+- src/interfaces/master_bot/**
+- src/interfaces/integration_bot/**
+- src/interfaces/shared/**
+- src/integrations/**
+- tests/node/**
+
+LEGACY_OR_HISTORICAL
+- bots/**
+- services/**
+- shared/clients_registry.py
+- requirements.txt
+- tests/test_*.py
+- legacy/index.js
+
+DOCUMENTATION_CONTOUR
+- readme/README.md
+- readme/ARCHITECTURE.md
+- readme/DEPLOYMENT.md
+- readme/ENV_REFERENCE.md
+- readme/LEGACY_PYTHON.md
+- audit/REPOSITORY_FULL_AUDIT.md
+- audit/ENV_FULL_AUDIT.md
+- audit/DOCUMENTATION_CONSISTENCY_AUDIT.md
+- audit/LEGACY_AND_RISKS_AUDIT.md
+- audit/MASTER_AUDIT_FOR_EXTERNAL_AI.md
+- audit/MASTER_AUDIT_FOR_EXTERNAL_AI.json
+- audit/ENV_REPORT.json
+- audit/REPO_MANIFEST.txt

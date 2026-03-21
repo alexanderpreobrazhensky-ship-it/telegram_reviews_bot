@@ -1,41 +1,27 @@
-# MASTER AUDIT FOR EXTERNAL AI
+# Master audit for external AI
 
-## 1. Executive summary
-- Production contract enforced as Python-only.
-- Node trigger removed from root: `index.js` moved to `legacy/index.js`.
-- BotHost contract fixed: branch `main`, Dockerfile-first, `main.py`, webhook-first.
+## Canonical runtime contract
+- Runtime: Node.js.
+- Entrypoint: `app.js`.
+- Package manifest: `package.json`.
+- Container start command: `node app.js`.
+- BotHost entrypoint: `.bothost/entrypoint.conf` with `main_file=app.js`, `branch=main`.
 
-## 2. Production contract
-- branch: `main`
-- runtime: `python`
-- deploy path: `dockerfile-first`
-- entrypoint: `main.py`
-- default mode: `webhook`
-- runtime chain: `main.py` -> `services/client_bot_service/app/main.py` -> `bots/client_bot/main.py`
+## Scope snapshot
+- Shared HTTP server, WebApp, scheduler, Telegram client/master/integration bots, and MAX client/master bots all run in one process.
+- Persistence is a JSON file via `DB_FILE_PATH`.
+- The repository also contains a legacy Python contour that is not part of the active production path.
 
-## 3. BotHost safety status
-- Root repository has no Node entrypoint markers (`index.js`, `app.js`, `server.js`, `main.js`, `package.json`).
-- `.bothost/entrypoint.conf` contains `main_file=main.py` and `branch=main`.
-- Dockerfile runs `CMD ["python", "main.py"]`.
+## Current readiness summary
+- Node/BotHost readiness: moderate/good for single-instance deployment.
+- MAX readiness: partial-to-good MVP.
+- Security readiness: partial due to unauthenticated integration routes.
+- Persistence readiness: partial due to JSON DB limitations.
+- Documentation consistency: restored in this audit pass.
 
-## 4. Webhook-first contract
-- Base URL priority: `WEBHOOK_URL` -> `PUBLIC_BASE_URL` -> `DOMAIN`.
-- URL normalization: trim, double-scheme cleanup, forced https, invalid => missing.
-- `BOT_PATH_SECRET` is required in webhook mode (fail fast).
-- Polling fallback is used only when webhook base URL cannot be resolved.
-- Startup logs include mode, token source, base URL source, port, storage mode (no secrets).
-
-## 5. Route and feature integrity
-Confirmed existing runtime paths remain available:
-- `/health`
-- `/service-health`
-- `/WEBAPP`
-- `/WEBAPP/config.json`
-- `/assets/webapp.bundle.js`
-- `/assets/webapp.bundle.css`
-- `/app.js`
-- `/app.css`
-
-## 6. Validation
-- `python -m unittest discover -s tests -p "test_*.py"`
-- Contract tests include root Node marker absence and Dockerfile/main.py runtime checks.
+## Main blockers and caveats
+1. JSON DB is not scale-safe.
+2. Integration HTTP routes need auth hardening.
+3. No MAX integration bot route.
+4. Recommendation parity for MAX is incomplete.
+5. Legacy Python files remain a maintenance/documentation drift risk.

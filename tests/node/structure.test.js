@@ -5,8 +5,8 @@ const fs = require('node:fs');
 const requiredPaths = [
   'app.js',
   'package.json',
-  'README.md',
-  'PROJECT_AUDIT.md',
+  'readme/README.md',
+  'audit/REPOSITORY_FULL_AUDIT.md',
   'src/core/domain',
   'src/core/application',
   'src/interfaces/client_bot',

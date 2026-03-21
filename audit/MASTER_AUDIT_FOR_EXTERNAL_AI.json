@@ -1,41 +1,37 @@
 {
-  "audit_version": 3,
-  "production_branch": "main",
-  "production_contract": {
-    "runtime": "python",
-    "deploy_path": "dockerfile-first",
-    "entrypoint": "main.py",
-    "default_mode": "webhook",
-    "runtime_chain": [
-      "main.py",
-      "services/client_bot_service/app/main.py",
-      "bots/client_bot/main.py"
-    ]
-  },
-  "bot_host_safety": {
-    "root_node_markers_absent": [
-      "index.js",
-      "app.js",
-      "server.js",
-      "main.js",
-      "package.json"
-    ],
-    "legacy_node_wrapper": "legacy/index.js",
-    "entrypoint_conf": {
-      "main_file": "main.py",
+  "runtime": {
+    "language": "nodejs",
+    "entrypoint": "app.js",
+    "package_manifest": "package.json",
+    "container_command": ["node", "app.js"],
+    "bothost_entrypoint": {
+      "main_file": "app.js",
       "branch": "main"
     }
   },
-  "webhook_contract": {
-    "base_url_priority": [
-      "WEBHOOK_URL",
-      "PUBLIC_BASE_URL",
-      "DOMAIN"
-    ],
-    "path_secret_required": true,
-    "fallback_to_polling_when_base_missing": true
+  "active_contour": {
+    "webapp": true,
+    "telegram_client_bot": true,
+    "telegram_master_bot": true,
+    "telegram_integration_bot": true,
+    "max_client_bot": true,
+    "max_master_bot": true,
+    "max_integration_bot": false,
+    "scheduler_in_process": true,
+    "persistence": "json_file_db"
   },
-  "checks": [
-    "python -m unittest discover -s tests -p \"test_*.py\""
+  "readiness": {
+    "deploy_readiness": "single_instance_mvp_ready",
+    "bothost_readiness": "moderate_good",
+    "max_readiness": "partial_good",
+    "security_readiness": "partial",
+    "persistence_readiness": "partial"
+  },
+  "major_risks": [
+    "unauthenticated_integration_routes",
+    "json_db_single_instance_limitations",
+    "in_process_scheduler_shared_with_http",
+    "incomplete_max_feature_parity",
+    "legacy_python_doc_drift_risk"
   ]
 }
