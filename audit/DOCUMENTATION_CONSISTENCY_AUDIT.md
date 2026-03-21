@@ -1,47 +1,41 @@
-# Documentation consistency audit
+# Documentation Consistency Audit
 
-## Summary
-Prior documentation had severe doc/code drift. The most serious issue was a split-brain production contract: several files claimed that the repository was Python-first while the actual deploy path in `package.json`, `Dockerfile`, `.bothost/entrypoint.conf`, and `app.js` is Node-first.
+## Scope
+Alignment between current code, audit files, README files, and legacy/historical documentation drift.
 
-## 1. README findings
-### README files found before cleanup
-- `README.md`
-- `bots/client_bot/README.md`
+## Current state
+- Documentation is now centralized under `readme/`.
+- Audit material is now centralized under `audit/`.
+- The new documentation set describes the active Node-first runtime and its SQLite-backed persistence.
 
-### Problems found
-- Root `README.md` was partly aligned with Node runtime, but it pointed to root-level audit/env files that were supposed to be centralized elsewhere.
-- `bots/client_bot/README.md` claimed Python as the production runtime and described a webhook-first Python deploy chain that is no longer the repository's active production path.
+## Confirmed facts
+- The active production path is Node-first, not Python-first.
+- The active persistence layer is SQLite, not JSON-first, though JSON import compatibility still exists.
+- Telegram integration bot is Telegram-only.
+- MAX is embedded in the same Node project; a separate BotHost project for MAX is not part of the documented design.
+- `public/index.html` and `review.html` remain untouched.
 
-### Action taken
-- Removed README files from non-documentation locations.
-- Replaced them with a centralized `readme/` contour aligned to the live code.
+## Risks
+- Legacy Python folders can still tempt future contributors to write conflicting docs.
+- Placeholder env names can still cause doc drift if someone documents aspirational architecture as current reality.
+- If route behavior changes in `src/server/index.js`, static README summaries can drift again without disciplined updates.
 
-## 2. Audit-file findings
-### Audit files found before cleanup
-- `PROJECT_AUDIT.md`
-- `FINAL_IMPLEMENTATION_AUDIT.md`
-- `REPOSITORY_FULL_AUDIT.md`
-- `ENV_FULL_AUDIT.md`
-- `audit/FINAL_TECH_AUDIT.md`
-- `audit/MASTER_AUDIT_FOR_EXTERNAL_AI.md`
-- `audit/MASTER_AUDIT_FOR_EXTERNAL_AI.json`
-- `audit/ENV_DEPLOY_REFERENCE.md`
+## Gaps
+- There is no automated doc-vs-code consistency test beyond broad Node structure tests.
+- Machine-readable documentation is limited to `audit/MASTER_AUDIT_FOR_EXTERNAL_AI.json`.
 
-### Problems found
-- Root-level audit files violated the requirement to centralize audits under `audit/`.
-- `audit/MASTER_AUDIT_FOR_EXTERNAL_AI.md` claimed there was no root Node entrypoint and described `main.py` as the deploy path, directly contradicting the code.
-- `audit/FINAL_TECH_AUDIT.md` captured an earlier project state and was narrower than the current repository scope.
-- `audit/ENV_DEPLOY_REFERENCE.md` and root `ENV_FULL_AUDIT.md` duplicated each other and created maintenance overlap.
+## Legacy / dead / misleading parts
+- Any prior Python-first deployment narrative is now obsolete.
+- Any prior JSON-primary persistence narrative is obsolete.
+- Any prior scattered README/audit files outside `readme/` and `audit/` are removed from the active contour.
 
-### Action taken
-- Removed outdated/duplicative audit files.
-- Rebuilt a centralized audit contour under `audit/` with one current repository audit, one env audit, one consistency audit, and updated machine-readable summaries.
+## Recommendations
+1. Treat this documentation set as the only source of truth for architecture and deploy guidance.
+2. Update docs in the same PR as runtime changes.
+3. Add a simple docs smoke test later if doc drift becomes recurrent.
 
-## 3. Code/doc drift still worth watching
-1. `MAX_ENABLED` reads like a feature flag but does not gate MAX route registration.
-2. WebApp route/state scaffolding modules are not authoritative for live routing.
-3. Legacy Python env reads remain in-tree and can tempt future docs to over-document dead paths.
-4. Integration env names suggest a worker architecture that does not currently exist.
+## Confidence level
+High.
 
-## 4. Final consistency conclusion
-After this cleanup, the documentation contour is aligned with the current codebase. Future drift risk remains concentrated in the legacy Python tail and in placeholder configuration names that imply more infrastructure than is currently implemented.
+## Follow-up checks
+- Re-audit docs whenever entrypoints, persistence driver, or route maps change.
