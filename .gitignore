@@ -4,9 +4,12 @@ __pycache__/
 
 # runtime generated data
 /data/*.json
+/data/*.sqlite
 /data/*.jsonl
 /data/posts_queue.json
 /data/clients.jsonl
 /data/tickets.jsonl
 /data/system.json
 !/data/.gitkeep
+
+node_modules/

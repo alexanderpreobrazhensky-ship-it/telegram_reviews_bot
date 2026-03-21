@@ -55,6 +55,10 @@ function createMasterService({ db, sendClientMessage, adminIds = [], actorChanne
       return db.updateRequestStatus({ requestId, toStatus, actorId, actorRole, lostReason, comment });
     },
 
+    assignRequest({ requestId, assignedTo, assignedBy, actorId, actorRole, actorType, metaJson }) {
+      return db.updateRequestAssignment({ requestId, assignedTo, assignedBy, actorId, actorRole, actorType, metaJson });
+    },
+
     addInternalComment({ requestId, actorId, actorRole, text }) {
       return db.addInternalComment({ requestId, actorId, actorRole, text });
     },

@@ -27,6 +27,10 @@ function loadConfig() {
     .split(',')
     .map((id) => id.trim())
     .filter(Boolean);
+  const internalAdminWhitelist = String(process.env.INTERNAL_ADMIN_WHITELIST || process.env.INTERNAL_ADMIN_WHITELIST_IDS || '')
+    .split(',')
+    .map((id) => id.trim())
+    .filter(Boolean);
 
   return {
     nodeEnv: process.env.NODE_ENV || 'development',
@@ -60,7 +64,9 @@ function loadConfig() {
     telegramMastersChatId: process.env.TELEGRAM_MASTERS_CHAT_ID || '',
     webappTelegramChannelLink: process.env.TELEGRAM_CHANNEL_URL || process.env.WEBAPP_TELEGRAM_CHANNEL_LINK || '',
     masterBotAdminIds,
-    maxMasterBotAdminIds
+    maxMasterBotAdminIds,
+    internalAdminWhitelist,
+    maxDiagnosticsEnabled: parseBoolean(process.env.MAX_DIAGNOSTICS_ENABLED, true)
   };
 }
 
