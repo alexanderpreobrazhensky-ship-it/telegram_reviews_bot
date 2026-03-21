@@ -2,6 +2,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const Database = require('better-sqlite3');
+const { validateAssignment } = require('../../core/shared/requestValidation');
 
 const DEFAULT_SQLITE_PATH = path.join(process.cwd(), 'data', 'db.sqlite');
 const DEFAULT_LEGACY_JSON_PATH = path.join(process.cwd(), 'data', 'db.json');
@@ -715,10 +716,10 @@ function insertOrReplaceRequest(request) {
   getDb().prepare(`
     INSERT OR REPLACE INTO requests (
       id, client_id, vehicle_id, request_type, status, description, source_channel,
-      assigned_master_id, lost_reason, created_at, updated_at, data
+      assigned_master_id, assigned_to, assigned_at, assigned_by, lost_reason, created_at, updated_at, data
     ) VALUES (
       @id, @client_id, @vehicle_id, @request_type, @status, @description, @source_channel,
-      @assigned_master_id, @lost_reason, @created_at, @updated_at, @data
+      @assigned_master_id, @assigned_to, @assigned_at, @assigned_by, @lost_reason, @created_at, @updated_at, @data
     )
   `).run({
     id: entity.id,
@@ -1154,14 +1155,16 @@ function upsertVehicle({ clientId, brand, model, year, vin, plateNumber }) {
   return vehicle;
 }
 
-function createRequest({ clientId, vehicleId, requestType, description, sourceChannel, payload = {} }) {
+function createRequest({ clientId, vehicleId, requestType, description, sourceChannel, payload = {}, status = 'new' }) {
   initializeStore();
+  const normalizedStatus = normalizeRequestStatusInput(status) || 'new';
+  const createdAt = nowIso();
   const request = {
     id: crypto.randomUUID(),
     clientId,
     vehicleId: vehicleId || null,
     requestType,
-    status: 'new',
+    status: normalizedStatus,
     sourceChannel,
     description: description || '',
     payload: payload || {},
@@ -1173,11 +1176,12 @@ function createRequest({ clientId, vehicleId, requestType, description, sourceCh
     externalIds: {},
     sourceSystem: sourceChannel || 'system',
     sourceOfTruth: 'local',
+    integrationSync: { pending: true, target: 'one_c', eventType: 'request.created' },
     lastSyncedAt: null,
     localPendingChanges: false,
     needsManualReview: false,
-    createdAt: nowIso(),
-    updatedAt: nowIso()
+    createdAt,
+    updatedAt: createdAt
   };
   const tx = getDb().transaction(() => {
     insertOrReplaceRequest(request);
@@ -1191,9 +1195,9 @@ function createRequest({ clientId, vehicleId, requestType, description, sourceCh
       actorRole: 'system',
       actorType: 'system',
       oldValue: null,
-      newValue: 'new',
+      newValue: normalizedStatus,
       metaJson: { requestType, sourceChannel },
-      createdAt: nowIso()
+      createdAt
     });
     insertRequestEvent({
       id: crypto.randomUUID(),
@@ -1202,9 +1206,9 @@ function createRequest({ clientId, vehicleId, requestType, description, sourceCh
       requestId: request.id,
       clientId: request.clientId,
       oldStatus: null,
-      newStatus: 'new',
+      newStatus: normalizedStatus,
       fromStatus: null,
-      toStatus: 'new',
+      toStatus: normalizedStatus,
       changedBy: 'system',
       changedByRole: 'system',
       actor: 'system',
@@ -1212,15 +1216,64 @@ function createRequest({ clientId, vehicleId, requestType, description, sourceCh
       actorRole: 'system',
       actorType: 'system',
       oldValue: null,
-      newValue: 'new',
+      newValue: normalizedStatus,
       metaJson: { requestType, sourceChannel },
       comment: null,
       reason: null,
-      createdAt: nowIso()
+      createdAt
+    });
+    insertRequestEvent({
+      id: crypto.randomUUID(),
+      eventScope: 'integration',
+      eventType: 'integration_sync_pending',
+      requestId: request.id,
+      clientId: request.clientId,
+      actorId: 'system',
+      actorRole: 'system',
+      actorType: 'system',
+      oldValue: null,
+      newValue: 'one_c_pending',
+      metaJson: { target: 'one_c', mappingVersion: 1 },
+      createdAt
     });
   });
   tx();
   return request;
+}
+
+function markRequestDuplicate({ requestId, duplicateOfRequestId, actorId = 'system', actorRole = 'system', metaJson = {} }) {
+  initializeStore();
+  const request = findRequestById(requestId);
+  if (!request) return null;
+  const updated = {
+    ...request,
+    payload: {
+      ...(request.payload || {}),
+      duplicate: true,
+      duplicateOfRequestId
+    },
+    updatedAt: nowIso()
+  };
+  const event = {
+    id: crypto.randomUUID(),
+    eventScope: 'request',
+    eventType: 'duplicate_detected',
+    requestId,
+    clientId: request.clientId,
+    actorId,
+    actorRole,
+    actorType: actorRole,
+    oldValue: null,
+    newValue: duplicateOfRequestId || null,
+    metaJson: { duplicateOfRequestId, ...(metaJson || {}) },
+    createdAt: nowIso()
+  };
+  const tx = getDb().transaction(() => {
+    insertOrReplaceRequest(updated);
+    insertRequestEvent(event);
+  });
+  tx();
+  return { request: updated, event };
 }
 
 function createAnalyticsEvent({
@@ -1671,8 +1724,9 @@ function updateRequestAssignment({ requestId, assignedTo, assignedBy = null, act
   const row = getDb().prepare('SELECT * FROM requests WHERE id = ? LIMIT 1').get(requestId);
   if (!row) return { error: 'REQUEST_NOT_FOUND' };
   const request = requestRowToEntity(row);
-  const normalizedAssignedTo = String(assignedTo || '').trim();
-  if (!normalizedAssignedTo) return { error: 'ASSIGNED_TO_REQUIRED' };
+  const assignmentValidation = validateAssignment(assignedTo);
+  if (!assignmentValidation.ok) return { error: assignmentValidation.error };
+  const normalizedAssignedTo = assignmentValidation.value;
 
   const oldValue = request.assignedTo || null;
   request.assignedTo = normalizedAssignedTo;
@@ -1876,6 +1930,7 @@ function findRequestById(requestId) {
 function findRecentDuplicateRequest({ requestType, phone, vin, text, withinMs = 45000 }) {
   initializeStore();
   const normalizedPhone = String(phone || '').trim();
+  if (!normalizedPhone) return null;
   const normalizedVin = String(vin || '').trim().toUpperCase();
   const normalizedText = String(text || '').trim().toLowerCase();
   const now = Date.now();
@@ -1884,16 +1939,16 @@ function findRecentDuplicateRequest({ requestType, phone, vin, text, withinMs = 
   const vehicles = new Map(listRows('vehicles').map((row) => { const entity = vehicleRowToEntity(row); return [entity.id, entity]; }));
   const clients = new Map(listRows('clients').map((row) => { const entity = clientRowToEntity(row); return [entity.id, entity]; }));
   for (const request of requests) {
-    if (request.requestType !== requestType) continue;
     const createdAtMs = Date.parse(request.createdAt || '');
     if (!Number.isFinite(createdAtMs) || now - createdAtMs > windowMs) continue;
     const client = clients.get(request.clientId);
     if (!client || String(client.phone || '') !== normalizedPhone) continue;
+    if (requestType && request.requestType !== requestType) continue;
     const vehicle = request.vehicleId ? vehicles.get(request.vehicleId) || null : null;
-    const vinMatch = normalizedVin ? String(vehicle?.vin || '').trim().toUpperCase() === normalizedVin : true;
-    if (!vinMatch) continue;
-    const textMatch = String(request.description || '').trim().toLowerCase() === normalizedText;
-    if (!textMatch) continue;
+    if (normalizedVin && String(vehicle?.vin || '').trim().toUpperCase() !== normalizedVin) continue;
+    if (normalizedText && String(request.description || '').trim().toLowerCase() !== normalizedText) {
+      // phone + close time is enough for the default duplicate heuristic; text mismatch is advisory only
+    }
     return request;
   }
   return null;
@@ -2358,6 +2413,7 @@ const api = {
   findClientByMaxId,
   findRequestById,
   findRecentDuplicateRequest,
+  markRequestDuplicate,
   createFeedback,
   createTask,
   listTasks,

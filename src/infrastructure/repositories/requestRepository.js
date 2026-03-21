@@ -1,13 +1,34 @@
-function createRequestRepository() {
+function createRequestRepository({ db }) {
   return {
-    async create(payload) {
-      return {
-        id: payload.id || 'stub-request-id',
-        ...payload
-      };
+    create(payload) {
+      return db.createRequest(payload);
     },
-    async findById(id) {
-      return id ? { id } : null;
+    createClient(payload) {
+      return db.upsertClient(payload);
+    },
+    createVehicle(payload) {
+      return db.upsertVehicle(payload);
+    },
+    findById(id) {
+      return db.findRequestById(id);
+    },
+    findRecentDuplicate(criteria) {
+      return db.findRecentDuplicateRequest(criteria);
+    },
+    markDuplicate(payload) {
+      return db.markRequestDuplicate(payload);
+    },
+    list(filters) {
+      return db.listRequests(filters);
+    },
+    getCard(id) {
+      return db.getRequestCard(id);
+    },
+    updateStatus(payload) {
+      return db.updateRequestStatus(payload);
+    },
+    updateAssignment(payload) {
+      return db.updateRequestAssignment(payload);
     }
   };
 }

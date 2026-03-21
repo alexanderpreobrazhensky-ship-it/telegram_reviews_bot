@@ -82,6 +82,7 @@ function extractTelegramEvent(body = {}) {
   const callbackQuery = body?.callback_query || null;
   return {
     message,
+    contact: message?.contact ? { phoneNumber: String(message.contact.phone_number || ''), firstName: message.contact.first_name || '', lastName: message.contact.last_name || '', userId: String(message.contact.user_id || '') } : (body?.contact ? { phoneNumber: String(body.contact.phone_number || body.contact.phone || ''), userId: String(body.contact.user_id || body.contact.userId || '') } : null),
     callback: callbackQuery
       ? {
           id: callbackQuery.id,
@@ -108,6 +109,7 @@ function extractMaxEvent(body = {}) {
   const callbackMessage = callback?.message || message || {};
   return {
     message,
+    contact: message?.contact ? { phoneNumber: String(message.contact.phone_number || message.contact.phone || ''), firstName: message.contact.first_name || '', lastName: message.contact.last_name || '', userId: String(message.contact.user_id || message.contact.userId || '') } : (body?.contact ? { phoneNumber: String(body.contact.phone_number || body.contact.phone || ''), userId: String(body.contact.user_id || body.contact.userId || '') } : null),
     callback: callback
       ? {
           id: callback.callback_id || callback.id || callback.query_id || '',

@@ -136,7 +136,7 @@ test('p1 server: internal UI, health endpoints, analytics endpoint, and assignme
   }, { INTERNAL_ADMIN_WHITELIST: 'admin-77' });
 });
 
-test('p1 duplicate detection logs duplicate request event and analytics failure event', async () => {
+test('p1 duplicate detection keeps request creation working and records duplicate markers', async () => {
   await withServer(async ({ base }) => {
     const payload = {
       fullName: 'Duplicate Client',
@@ -162,13 +162,14 @@ test('p1 duplicate detection logs duplicate request event and analytics failure 
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload)
     });
-    assert.equal(second.status, 200);
+    assert.equal(second.status, 201);
     const deduped = await second.json();
     assert.equal(deduped.deduplicated, true);
-    assert.equal(deduped.id, created.id);
+    assert.notEqual(deduped.id, created.id);
+    assert.equal(deduped.duplicateOfRequestId, created.id);
 
     const store = db.readStore();
-    assert.ok(store.requestEvents.some((event) => event.requestId === created.id && event.canonicalEventType === 'duplicate_detected'));
-    assert.ok(store.analyticsEvents.some((event) => event.eventType === 'request_failed' && event.status === 'duplicate_detected'));
+    assert.ok(store.requestEvents.some((event) => event.requestId === deduped.id && event.canonicalEventType === 'duplicate_detected'));
+    assert.ok(store.analyticsEvents.some((event) => event.eventType === 'request_duplicate_detected' && event.requestId === deduped.id));
   });
 });
