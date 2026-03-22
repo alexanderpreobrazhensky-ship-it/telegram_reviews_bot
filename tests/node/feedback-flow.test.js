@@ -105,3 +105,63 @@ test('scheduler executes due tasks and retries failed tasks safely', async () =>
   assert.equal(failedCandidate.attemptCount, 1);
   assert.equal(executed.includes(task.id), true);
 });
+
+test('waiting_decision and consulted follow-up tasks are persisted and processed safely', async () => {
+  db.resetStore();
+  const clientA = db.upsertClient({ fullName: 'Wait Client', phone: '0000000101', telegramId: '9101' });
+  const clientB = db.upsertClient({ fullName: 'Consult Client', phone: '0000000102', telegramId: '9102' });
+  const staff = db.createStaffUser({ channelUserId: '7001', telegramId: '7001', fullName: 'Master', role: 'master', actorId: 'admin', actorRole: 'admin' }).user;
+  const requestA = db.createRequest({ clientId: clientA.id, requestType: 'service_request', description: 'wait', sourceChannel: 'telegram_chat' });
+  const requestB = db.createRequest({ clientId: clientB.id, requestType: 'service_request', description: 'consult', sourceChannel: 'telegram_chat' });
+
+  db.updateRequestAssignment({ requestId: requestA.id, assignedTo: staff.id, assignedBy: 'admin', actorId: 'admin', actorRole: 'admin' });
+  db.updateRequestAssignment({ requestId: requestB.id, assignedTo: staff.id, assignedBy: 'admin', actorId: 'admin', actorRole: 'admin' });
+  db.updateRequestStatus({ requestId: requestA.id, toStatus: 'in_progress', actorId: staff.id, actorRole: 'master' });
+  db.updateRequestStatus({ requestId: requestB.id, toStatus: 'in_progress', actorId: staff.id, actorRole: 'master' });
+  db.updateRequestStatus({ requestId: requestA.id, toStatus: 'processed', substatus: 'waiting_decision', actorId: staff.id, actorRole: 'master' });
+  db.updateRequestStatus({ requestId: requestB.id, toStatus: 'processed', substatus: 'consulted', actorId: staff.id, actorRole: 'master' });
+
+  const tasks = db.listTasks(['scheduled']);
+  const waitingTask = tasks.find((item) => item.taskType === 'waiting_decision_followup' && item.payload?.requestId === requestA.id);
+  const consultedTask = tasks.find((item) => item.taskType === 'consulted_followup' && item.payload?.requestId === requestB.id);
+  assert.equal(Boolean(waitingTask), true);
+  assert.equal(Boolean(consultedTask), true);
+
+  const store = db.readStore();
+  store.tasks = store.tasks.map((item) => {
+    if (item.id === waitingTask.id || item.id === consultedTask.id) {
+      return { ...item, dueAt: new Date(Date.now() - 1000).toISOString() };
+    }
+    return item;
+  });
+  db.replaceStore(store);
+
+  const notifications = [];
+  const scheduler = createScheduler({
+    db,
+    logger: { warn() {}, error() {} },
+    handlers: {
+      async waiting_decision_followup(item) {
+        const result = db.reactivateWaitingDecisionRequest({ requestId: item.payload.requestId, actorId: 'scheduler', actorRole: 'system' });
+        notifications.push({ type: 'waiting', requestId: result.request.id });
+      },
+      async consulted_followup(item) {
+        const result = db.registerConsultedFollowup({ requestId: item.payload.requestId, actorId: 'scheduler', actorRole: 'system' });
+        notifications.push({ type: 'consulted', requestId: result.request.id });
+      }
+    },
+    batchSize: 10
+  });
+
+  const processed = await scheduler.runOnce();
+  assert.equal(processed.processed, 2);
+
+  const reloadedA = db.findRequestById(requestA.id);
+  const reloadedB = db.findRequestById(requestB.id);
+  assert.equal(reloadedA.status, 'in_progress');
+  assert.equal(reloadedA.substatus, null);
+  assert.equal(reloadedB.status, 'processed');
+  assert.equal(reloadedB.substatus, 'consulted');
+  assert.equal(Boolean(reloadedB.lastFollowupAt), true);
+  assert.equal(notifications.length, 2);
+});

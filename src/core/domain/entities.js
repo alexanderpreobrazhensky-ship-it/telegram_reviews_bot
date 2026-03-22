@@ -117,7 +117,7 @@ const CommunicationEvent = {
 
 const Task = {
   ...baseEntity,
-  taskType: 'feedback_request|quality_followup|recommendation_reminder|maintenance_reminder',
+  taskType: 'feedback_request|waiting_decision_followup|consulted_followup|quality_followup|recommendation_reminder|maintenance_reminder',
   dueAt: 'ISODate',
   processedAt: 'ISODate|null',
   status: 'scheduled|processing|completed|failed|cancelled',

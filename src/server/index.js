@@ -448,12 +448,19 @@ function createServer({ config, logger }) {
           TELEGRAM_CLIENT_BOT_TOKEN: Boolean(config.telegramClientBotToken),
           TELEGRAM_MASTER_BOT_TOKEN: Boolean(config.telegramMasterBotToken),
           TELEGRAM_INTEGRATION_BOT_TOKEN: Boolean(config.telegramIntegrationBotToken),
+          MASTER_BOT_ADMIN_IDS: (config.masterBotAdminIds || []).length,
+          MAX_ENABLED: Boolean(config.maxEnabled),
           MAX_CLIENT_BOT_TOKEN: Boolean(config.maxClientBotToken),
           MAX_MASTER_BOT_TOKEN: Boolean(config.maxMasterBotToken),
-          MAX_WEBHOOK_SECRET: Boolean(config.maxWebhookSecret)
+          MAX_WEBHOOK_SECRET: Boolean(config.maxWebhookSecret),
+          MAX_MASTER_BOT_ADMIN_IDS: (config.maxMasterBotAdminIds || []).length,
+          MAX_WEBAPP_URL: Boolean(config.maxWebAppUrl)
         },
         healthEndpoints: ['/health', '/health/db', '/health/max'],
-        scheduler: { waitingDecisionScheduled: db.listTasks(['scheduled', 'processing']).filter((item) => item.taskType === 'waiting_decision_followup').length },
+        scheduler: {
+          waitingDecisionScheduled: db.listTasks(['scheduled', 'processing']).filter((item) => item.taskType === 'waiting_decision_followup').length,
+          consultedScheduled: db.listTasks(['scheduled', 'processing']).filter((item) => item.taskType === 'consulted_followup').length
+        },
         webhooks: router.filter((item) => item.path.includes('/webhook')).map((item) => `${item.method} ${item.path}`)
       });
     }
@@ -466,6 +473,8 @@ function createServer({ config, logger }) {
         since: requestUrl.searchParams.get('since') || null,
         eventType: requestUrl.searchParams.get('type') || null,
         bot: requestUrl.searchParams.get('bot') || null,
+        channel: requestUrl.searchParams.get('channel') || null,
+        user: requestUrl.searchParams.get('user') || null,
         limit: Number(requestUrl.searchParams.get('limit') || 100)
       }));
     }

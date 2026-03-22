@@ -3,6 +3,7 @@ const REQUEST_SUBSTATUSES = Object.freeze(['recorded', 'consulted', 'spam', 'wai
 const ARCHIVED_SUBSTATUSES = new Set(['spam', 'rejected']);
 const TERMINAL_STATUSES = new Set(['completed']);
 const IMMUTABLE_SUBSTATUSES = new Set(['spam', 'rejected']);
+const FOLLOWUP_SUBSTATUSES = new Set(['waiting_decision', 'consulted']);
 const REQUEST_EVENT_TYPES = Object.freeze([
   'created',
   'status_changed',
@@ -14,7 +15,8 @@ const REQUEST_EVENT_TYPES = Object.freeze([
   'followup_scheduled',
   'followup_reactivated',
   'message_delivery_failed',
-  'message_sent'
+  'message_sent',
+  'outbound_message_failed'
 ]);
 const ANALYTICS_EVENT_TYPES = Object.freeze([
   'webapp_opened',
@@ -36,8 +38,8 @@ const STATUS_ALIASES = Object.freeze({
   waiting_data: 'error',
   scheduled: 'processed',
   done: 'completed',
-  cancelled: 'completed',
-  lost: 'completed',
+  cancelled: 'processed',
+  lost: 'processed',
   archived: 'completed'
 });
 
@@ -55,7 +57,7 @@ const SUBSTATUS_ALIASES = Object.freeze({
 });
 
 const STATUS_TRANSITIONS = Object.freeze({
-  new: ['in_progress', 'processed', 'in_service', 'error'],
+  new: ['in_progress', 'processed', 'error'],
   in_progress: ['processed', 'in_service', 'error'],
   processed: ['in_progress', 'in_service', 'completed', 'error'],
   in_service: ['completed', 'error', 'processed'],
@@ -151,6 +153,7 @@ function normalizeLegacyRequestState({ status, substatus = null, comment = null,
 
   if (status === 'cancelled' || status === 'lost') {
     normalizedSubstatus = 'rejected';
+    normalizedStatus = 'processed';
     normalizedArchived = true;
   }
   if (status === 'awaiting_client' || status === 'waiting_data') normalizedStatus = 'error';
@@ -161,16 +164,19 @@ function normalizeLegacyRequestState({ status, substatus = null, comment = null,
   return { status: normalizedStatus, substatus: normalizedSubstatus, archived: normalizedArchived, comment: comment || null };
 }
 
-function canTransitionRequest({ fromStatus, fromSubstatus = null, toStatus, toSubstatus = null } = {}) {
+function canTransitionRequest({ fromStatus, fromSubstatus = null, toStatus, toSubstatus = null, archived = false, allowArchived = false } = {}) {
   const currentStatus = validateRequestStatus(fromStatus);
   const nextStatus = validateRequestStatus(toStatus);
   const currentSubstatus = validateRequestSubstatus(fromSubstatus) || null;
   const nextSubstatus = validateRequestSubstatus(toSubstatus) || null;
+  const requestArchived = isArchivedStatus({ status: currentStatus, substatus: currentSubstatus, archived });
 
   if (!currentStatus || !nextStatus) return { ok: false, error: 'INVALID_STATUS' };
+  if (requestArchived && !allowArchived) return { ok: false, error: 'ARCHIVED_IMMUTABLE' };
   if (TERMINAL_STATUSES.has(currentStatus)) return { ok: false, error: 'COMPLETED_IMMUTABLE' };
   if (IMMUTABLE_SUBSTATUSES.has(currentSubstatus)) return { ok: false, error: 'ARCHIVED_IMMUTABLE' };
   if (currentStatus === 'new' && nextStatus === 'completed') return { ok: false, error: 'INVALID_TRANSITION' };
+  if ((currentSubstatus === 'spam' || currentSubstatus === 'rejected') && nextStatus === 'in_service') return { ok: false, error: 'INVALID_TRANSITION' };
   if (currentStatus === nextStatus && currentSubstatus === nextSubstatus) return { ok: true, noop: true };
   if (!STATUS_TRANSITIONS[currentStatus]?.includes(nextStatus) && currentStatus !== nextStatus) {
     return { ok: false, error: 'INVALID_TRANSITION' };
@@ -188,6 +194,7 @@ module.exports = {
   STATUS_TRANSITIONS,
   TERMINAL_STATUSES,
   IMMUTABLE_SUBSTATUSES,
+  FOLLOWUP_SUBSTATUSES,
   validateClientRequestPayload,
   validateRequestStatus,
   validateRequestSubstatus,
