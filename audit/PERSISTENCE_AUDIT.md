@@ -1,66 +1,67 @@
 # Persistence Audit
 
 ## Scope
-Active persistence layer, initialization path, schema creation, startup behavior with empty/existing stores, migration, import/export mechanics, and data-integrity risks.
+Current persistence model, SQLite path resolution, schema creation, JSON import compatibility, integrity behavior, and remaining data-loss / duplicate risks.
 
 ## Current state
-- Active persistence is SQLite through `better-sqlite3` in `src/infrastructure/db/index.js`.
-- `DB_SQLITE_PATH` is canonical; `DB_FILE_PATH` remains a compatibility alias.
-- On first init, schema is created automatically.
-- If the SQLite DB is empty and a legacy JSON file exists, the app performs a one-time import into SQLite.
+- The active persistence layer is SQLite via `better-sqlite3` in `src/infrastructure/db/index.js`.
+- The runtime resolves its active DB path from `DB_SQLITE_PATH`, then legacy `DB_FILE_PATH`, then a default `data/db.sqlite` path.
+- If the configured/legacy path ends in `.json`, the active runtime DB path is rewritten to a `.sqlite` filename while the JSON path remains eligible for import.
+- Schema creation is automatic and idempotent at startup.
 
 ## Confirmed facts
-- Driver: SQLite only in the active runtime.
-- Initialization enables WAL mode, `synchronous=NORMAL`, and `foreign_keys=ON`.
-- Schema includes clients, vehicles, requests, request events, communications, tasks, staff users, quality cases, analytics events, recommendations, feedback, report snapshots, and meta.
-- Phone is stored with a 10-digit constraint at the DB layer for clients.
-- `replaceStore()` exists for import-style replacement in tests/utilities.
-- Export exists as an HTTP internal export (`/internal/export`) for requests only; there is no general-purpose full DB export/import UI.
+### Confirmed by code
+- SQLite is the only implemented active database driver in production code.
+- The DB connection enables `journal_mode = WAL`, `synchronous = NORMAL`, and `foreign_keys = ON`.
+- `initializeStore()` creates the schema and then conditionally imports legacy JSON when the SQLite store is empty and a legacy JSON file exists.
+- `getLegacyJsonPath()` can use `DB_JSON_IMPORT_PATH`; otherwise it derives the path from legacy/default logic.
+- Schema includes at least: `clients`, `vehicles`, `requests`, `request_events`, `communications`, `tasks`, `staff_users`, `quality_cases`, `analytics_events`, `recommendations`, `feedback`, `report_snapshots`, and `meta`.
+- Clients have a DB-level `CHECK` constraint limiting stored phone values to either `NULL` or exactly 10 digits.
+- Requests, analytics events, communications, tasks, quality cases, feedback, and report snapshots are all stored in SQLite and then rehydrated into JS objects.
+- The runtime still supports destructive JSON-to-SQLite import and whole-store replacement helpers, which are used in tests and migration-style logic.
+- Request duplicate handling is heuristic: new requests are still created, then marked as duplicates if a recent match is found.
+- Task processing and reporting snapshots are persisted in SQLite, not in memory-only structures.
 
-## Behavior audit
-### Empty DB
-- Schema is created.
-- If a legacy JSON store is available and the main tables are empty, import runs and records migration metadata.
+### Confirmed by tests
+- SQLite file creation, table creation, JSON migration, CRUD persistence, and restart survival are covered by `tests/node/sqlite-persistence.test.js`.
 
-### Existing DB
-- Existing SQLite file is opened in place.
-- Schema creation is idempotent (`CREATE TABLE IF NOT EXISTS`).
+### Confirmed only by runtime/deploy assumption
+- The live BotHost filesystem path configured for SQLite is assumed to be persistent.
+- The live production DB is assumed to already be on SQLite unless an operator still deploys with a JSON-oriented env mismatch.
 
-### Migration / import
-- JSON → SQLite import is destructive for target tables during the import transaction because it clears target tables before rehydration.
-- Migration metadata is written to the `meta` table.
+### Unresolved / hypothesis only
+- There is no runtime evidence in this repo alone that production has completed any needed one-time JSON import already.
+- There is no direct proof here that operators are backing up the SQLite file before destructive migration/import operations.
 
-## Integrity assessment
-- Transactionality: strong for operations wrapped in SQLite transactions, including JSON import and several multi-step mutations.
-- Idempotency: mixed. Upserts exist for many entities, but webhook/event processing still relies on higher-level logic and dedupe heuristics.
-- Duplicate risk: present for request creation; mitigated by recent-duplicate detection, but duplicates are still created then marked.
-- Silent reset risk: low for normal startup, medium for any operator invoking import/replace flows without care.
-- Data consistency risk: medium because some relationships are modeled in JSON payload fragments rather than strict relational joins.
+## What changed after modernization
+- SQLite is now the canonical persistence layer; JSON is no longer the primary store.
+- Initialization now explicitly logs DB runtime info and migration status at boot.
+- Request lifecycle state, analytics, quality cases, feedback, tasks, and reporting snapshots are all aligned to the SQLite-backed runtime.
+- The project moved from “legacy JSON-first possibility” to “SQLite-first with compatibility import path.”
+
+## Remaining gaps
+- There is no formal migration framework with explicit version files.
+- There is no built-in backup/restore CLI for operators.
+- Some relational links still depend on JSON payload fields in addition to table columns.
+- The DB module still exposes destructive helpers that would need careful operational handling if used outside tests.
 
 ## Risks
-- `replaceStore()` and JSON import are destructive operations against the current SQLite content.
-- Deduplication is advisory rather than a unique constraint.
-- `synchronous=NORMAL` improves performance but is slightly weaker than FULL durability under hard crashes.
-- In-process scheduler/task handling is safe for the current single-node model but risky for uncontrolled multi-instance operation.
-
-## Gaps
-- No formal migration framework versioning beyond ad hoc schema evolution and meta tracking.
-- No full backup/restore CLI documented in the app itself.
-- No immutable audit log outside the primary SQLite store.
+- If production is misconfigured with a legacy JSON path, operators may misunderstand where the active `.sqlite` file is actually written.
+- JSON import and `replaceStore()` are destructive operations for target tables.
+- Duplicate prevention is advisory, not enforced by a unique DB constraint.
+- `synchronous = NORMAL` trades some durability margin for performance.
+- Multi-instance deployment would raise integrity risk for scheduler/task claiming and duplicate heuristics unless carefully coordinated.
 
 ## Legacy / dead / misleading parts
-- Legacy JSON persistence still influences startup logic and naming, even though SQLite is now canonical.
-- `DB_DRIVER`/`DB_URL` suggest pluggability that is not implemented.
-
-## Recommendations
-1. Keep SQLite as the canonical store and document BotHost persistence paths operationally.
-2. Add a protected backup/export workflow before any destructive import or replace operation.
-3. If concurrency increases, move from heuristic dedupe to stronger uniqueness strategy per request source and identity.
-4. Add an explicit migration version ledger if schema changes accelerate.
+- `DB_FILE_PATH` and `DB_JSON_IMPORT_PATH` remain legacy-oriented persistence knobs.
+- The presence of JSON import logic should not be described as JSON-first persistence anymore.
+- `DB_DRIVER` and `DB_URL` are misleading for persistence architecture because alternate DB drivers are not implemented in the active path.
 
 ## Confidence level
-High.
+High for code-confirmed persistence behavior; medium for live production data location and migration state because runtime filesystem inspection was not performed.
 
-## Follow-up checks
-- Verify the real BotHost DB path survives redeploy and restart.
-- Before any production data import, capture a SQLite backup and test restore.
+## Recommended follow-up checks
+- Confirm the live production env points to the intended SQLite file path.
+- Verify that the active `.sqlite` file survives restart and redeploy in BotHost.
+- Before any migration/import activity, take and test a SQLite backup.
+- If request dedupe becomes business-critical, consider unique constraints or stronger idempotency keys.

@@ -1,41 +1,54 @@
 # Documentation Consistency Audit
 
 ## Scope
-Alignment between current code, audit files, README files, and legacy/historical documentation drift.
+Consistency between current code, audit files, and `readme/` documentation, with emphasis on eliminating outdated architectural descriptions.
 
 ## Current state
-- Documentation is now centralized under `readme/`.
-- Audit material is now centralized under `audit/`.
-- The new documentation set describes the active Node-first runtime and its SQLite-backed persistence.
+- The documentation set now consistently describes the project as Node-first, SQLite-backed, and centered on `app.js` + `src/server/index.js`.
+- Audit files live under `audit/`; operational docs live under `readme/`.
+- The refreshed audit set uses consistent terminology for Telegram, MAX, WebApp, persistence, runtime, and security.
 
 ## Confirmed facts
-- The active production path is Node-first, not Python-first.
-- The active persistence layer is SQLite, not JSON-first, though JSON import compatibility still exists.
-- Telegram integration bot is Telegram-only.
-- MAX is embedded in the same Node project; a separate BotHost project for MAX is not part of the documented design.
-- `public/index.html` and `review.html` remain untouched.
+### Confirmed by direct repo inspection
+- `readme/README_DEPLOY.md`, `README_RUNTIME.md`, `README_ENV.md`, `README_PERSISTENCE.md`, `README_WEBAPP.md`, and `README_MAX.md` all align with the active Node-first runtime.
+- The refreshed audit files now align with the code-confirmed reality that SQLite is active and JSON is compatibility-only.
+- Telegram integration bot is consistently described as Telegram-only.
+- MAX is consistently described as embedded in the same Node project, not as a separate deployment.
+- `review.html` and `public/index.html` were left untouched.
+
+### Previously stale claims removed or downgraded
+- Python-first production descriptions.
+- JSON-first persistence descriptions.
+- Blanket statements that MAX is purely unimplemented.
+- Blanket statements that older phone-input issues are still confirmed production facts.
+- Claims that route maps outside `src/server/index.js` are authoritative.
+
+## What changed after modernization
+- Documentation now follows the current runtime path instead of the broad historical tree.
+- Audit files now distinguish code-confirmed facts from runtime-only assumptions.
+- Terminology is synchronized across repository, env, runtime, persistence, WebApp, Telegram, MAX, security, testing, and post-deploy audits.
+- The external-agent starter document is now the Markdown file `audit/MASTER_AUDIT_FOR_EXTERNAL_AI.md`.
+
+## Remaining gaps
+- The machine-readable JSON mirror previously present under `audit/` could drift if maintained separately.
+- There is still no automated doc-vs-code consistency test.
+- Legacy repository folders can still attract future documentation drift if someone documents from a superficial tree scan.
 
 ## Risks
-- Legacy Python folders can still tempt future contributors to write conflicting docs.
-- Placeholder env names can still cause doc drift if someone documents aspirational architecture as current reality.
-- If route behavior changes in `src/server/index.js`, static README summaries can drift again without disciplined updates.
-
-## Gaps
-- There is no automated doc-vs-code consistency test beyond broad Node structure tests.
-- Machine-readable documentation is limited to `audit/MASTER_AUDIT_FOR_EXTERNAL_AI.json`.
+- If future runtime changes land without parallel audit/readme updates, drift can reappear quickly.
+- Legacy and placeholder files/env names still create documentation ambiguity.
+- Operators may still rely on old external notes not stored in the repo.
 
 ## Legacy / dead / misleading parts
-- Any prior Python-first deployment narrative is now obsolete.
-- Any prior JSON-primary persistence narrative is obsolete.
-- Any prior scattered README/audit files outside `readme/` and `audit/` are removed from the active contour.
-
-## Recommendations
-1. Treat this documentation set as the only source of truth for architecture and deploy guidance.
-2. Update docs in the same PR as runtime changes.
-3. Add a simple docs smoke test later if doc drift becomes recurrent.
+- Any document describing the project as Python-first or legacy-first is stale.
+- Any document describing JSON as the current primary production store is stale.
+- Any document that generalizes session-specific WebApp issues into repo-wide production blockers without evidence is misleading.
+- The older JSON-form external-agent audit mirror is no longer needed as a primary source of truth.
 
 ## Confidence level
-High.
+High for repository-internal documentation consistency after this rewrite; medium for external/off-repo documentation because it was not inspected.
 
-## Follow-up checks
-- Re-audit docs whenever entrypoints, persistence driver, or route maps change.
+## Recommended follow-up checks
+- Remove or regenerate any machine-readable audit mirror if you want to keep only one external-agent source of truth.
+- Update audit/readme files in the same PR whenever runtime or env behavior changes.
+- Consider adding a lightweight CI check that confirms required audit files exist only under `audit/`.

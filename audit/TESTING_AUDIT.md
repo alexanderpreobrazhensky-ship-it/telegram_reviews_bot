@@ -1,63 +1,78 @@
 # Testing Audit
 
 ## Scope
-Automated test inventory, executed checks, manual QA coverage status, regression scope, and remaining verification gaps.
+Current automated test inventory, what is covered by unit/integration-style tests, what still relies on manual QA, and which critical scenarios remain under-verified.
 
 ## Current state
-- Primary automated suite is Node’s built-in test runner over `tests/node/**`.
-- Legacy Python tests exist but are all skipped.
-- This audit run restored missing Node dependency installation, then executed the full Node suite successfully.
+- The active automated suite is `npm test`, which runs Node's built-in test runner over `tests/node/**`.
+- Legacy Python tests still exist but do not represent the active production contour.
+- Test coverage is strongest around config, server routes, SQLite persistence, request lifecycle, Telegram/MAX handlers, reporting, and WebApp phone behavior.
 
 ## Confirmed facts
-### Automated checks executed in this audit
-- `npm install` succeeded and restored `better-sqlite3`.
-- `npm test` passed: 60/60 Node tests.
-- `python -m pytest -q tests/test_entrypoints.py tests/test_health.py tests/test_runtime_behavior.py tests/test_static_routes.py tests/test_webhook_url_build.py` completed with 5 skipped tests.
+### Automated tests that really exist
+- Config/env parsing tests.
+- Production-path and repo-structure checks.
+- Health endpoint tests.
+- SQLite initialization, migration, restart-survival, and persistence tests.
+- WebApp phone-input and form-submission tests using JSDOM.
+- Telegram client bot, master bot, and integration bot tests.
+- MAX channel and hardening tests.
+- Status model, request-event, analytics/reporting, integration-flow, and operational-flow tests.
 
-### Code-level coverage areas confirmed by the Node suite
-- Config loading and sanitization
-- Production-path and structure checks
-- Health endpoints
-- SQLite initialization, migration, persistence, and restart behavior
-- Client request creation for all form types
-- Phone normalization and WebApp input behavior
-- Telegram client/master/integration flows
-- MAX webhook validation and basic flows
-- Reporting, analytics, export, dedupe, status transitions, quality cases, scheduler behavior
+### Unit-style / focused component coverage
+- Phone normalization and request validation helpers.
+- Config parsing and env sanitization.
+- Channel adapter parsing.
+- Some DB operations and validation helpers through focused Node tests.
 
-## Manual QA audit status
-### Simulated/manual-equivalent coverage completed
-- WebApp phone input behavior via JSDOM
-- Request submission flows for Telegram and MAX-simulated webviews
-- Telegram and MAX webhook route behavior through automated HTTP tests
-- Persistence restart behavior through SQLite tests
+### Integration-style / runtime-path coverage
+- HTTP server route behavior, including health, request creation, internal routes, reports, and integration endpoints.
+- SQLite persistence across restart.
+- WebApp-to-server submit flow in simulated environments.
+- Bot webhook handling across Telegram and MAX.
+- Scheduler claiming/recovery behavior.
 
-### Remaining live manual QA
-- Real Telegram WebView device checks
-- Real MAX WebView device checks
-- Real Telegram/MAX outbound delivery with live credentials
-- Real BotHost persistence validation across redeploy
+### Manual-QA-only or runtime-only areas
+- Real Telegram outbound message delivery.
+- Real MAX outbound message delivery.
+- Real Telegram WebView behavior on actual devices.
+- Real MAX WebView behavior on actual devices.
+- Real BotHost persistence path survival across an actual deploy/redeploy.
+- Real webhook registration state in Telegram and MAX control planes.
+
+### Critical scenarios explicitly represented
+- Phone validation and normalization.
+- DB/persistence init, migration, CRUD, and restart survival.
+- Status model and request-event generation.
+- Analytics event creation and reporting behavior.
+- Export and diagnostics/health endpoints.
+
+## What changed after modernization
+- The test story is now centered on the Node runtime, not on historical Python contours.
+- SQLite persistence and migration behavior are now directly covered.
+- Phone-input behavior after the recent fixes is specifically covered in JSDOM tests.
+- MAX behavior is no longer undocumented or purely aspirational; it has automated regression coverage, albeit not live-platform proof.
+
+## Remaining gaps
+- No live end-to-end post-deploy smoke suite is stored in the repo.
+- No browser-container screenshot or visual regression artifact was captured in this environment.
+- No authenticated/perimeter production security tests are present.
+- Legacy Python tests remain as historical residue and can confuse readers about the active validation strategy.
 
 ## Risks
-- Python tests do not validate a live Python contour because they are intentionally skipped.
-- Automated tests cannot prove real external API delivery to Telegram/MAX.
-- Browser-container screenshots were not available in this environment, so no visual artifact was captured.
-
-## Gaps
-- No full end-to-end deploy smoke against a live BotHost environment.
-- No real secret/credential validation in CI from this repository alone.
+- Passing `npm test` does not prove Telegram/MAX credentials, webhook registration, or external API reachability.
+- Simulated webview tests cannot guarantee all device/browser/runtime quirks are resolved.
+- If legacy Python files remain, contributors may misread skipped Python tests as meaningful runtime coverage.
 
 ## Legacy / dead / misleading parts
-- Python tests are historical and should not be interpreted as active production validation.
-
-## Recommendations
-1. Keep `npm test` as the minimum regression gate.
-2. Add a post-deploy live smoke checklist execution record per release.
-3. If the Python contour is not coming back, retire or archive the skipped Python tests.
+- Python tests are historical, not authoritative production validation.
+- Any old testing narrative that describes Python tests as a primary gate is stale.
+- Test presence should not be confused with live deploy verification.
 
 ## Confidence level
-High for code-level regression, medium for live-provider behavior.
+High for code-level regression coverage; medium for real deployed behavior because runtime/provider verification still has to be done manually.
 
-## Follow-up checks
-- Run live Telegram/MAX smoke after deploy.
-- Validate restart persistence on the real BotHost mount path.
+## Recommended follow-up checks
+- Keep `npm test` as the minimum regression gate.
+- Add a documented live post-deploy smoke record for Telegram, MAX, WebApp submit, and persistence restart checks.
+- If the Python contour is truly retired, consider archiving or clearly labeling the skipped Python tests.

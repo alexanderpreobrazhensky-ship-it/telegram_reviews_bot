@@ -1,62 +1,67 @@
 # Runtime Audit
 
 ## Scope
-Entrypoint, startup chain, server creation, scheduler initialization, route registration, runtime assumptions, and deploy-dependent behavior.
+Entrypoint, startup chain, route registration, scheduler behavior, WebApp delivery, and the boundary between code-confirmed runtime facts and deploy-only assumptions.
 
 ## Current state
-- `app.js` is the real bootstrap.
-- Startup order is: load config → inspect/init SQLite → create HTTP server → configure scheduler → `listen()` → start scheduler.
-- `src/server/index.js` uses Node `http.createServer`, not Express.
-- Telegram client, Telegram master, Telegram integration, MAX client, and MAX master webhook handlers all run in the same process.
+- The production runtime is a single Node.js HTTP process started from `app.js`.
+- The app uses Node's built-in `http` server rather than Express or another framework.
+- WebApp routes, API routes, internal pages, health checks, and bot webhooks share the same process.
+- The scheduler is in-process and starts only after the server begins listening.
 
 ## Confirmed facts
-- Real entrypoint: `app.js`.
-- Real server factory: `createServer({ config, logger })` in `src/server/index.js`.
-- Route registration for bots happens synchronously during server creation via `registerClientBotRoutes`, `registerMasterBotRoutes`, and `registerIntegrationBotRoutes`.
-- Scheduler is created in `app.js` and starts only after `server.listen()` succeeds.
-- Scheduler processing shares the same process and event loop with HTTP handling.
-- WebApp delivery is static-file based: `public/index.html`, `public/styles.css`, and `public/webapp.js`, with runtime config injected into HTML at response time.
+### Confirmed by code
+- `app.js` calls `loadConfig()`, logs DB runtime info, initializes the store, creates the server, configures the scheduler, and starts the scheduler inside the `listen()` callback.
+- `src/server/index.js` registers bot routes before request handling begins.
+- Health endpoints are `/health`, `/health/db`, and `/health/max`.
+- Internal operational pages are served at `/internal/requests`, `/internal/requests/:id`, and `/internal/export`.
+- Static assets are served directly from `public/` for `/styles.css`, `/webapp.js`, and `/logo.png`.
+- WebApp HTML for `/`, `/requests`, `/recommendations`, and the five `/forms/...` routes is always served from `public/index.html` with injected runtime config.
+- Webhook requests are subject to an in-memory rate limiter keyed by path and request IP.
+- WebApp request creation routes are separately rate-limited and dedupe-checked.
+- Scheduler handlers are configured in `app.js`; only `feedback_request` currently has implemented outbound behavior, while `quality_followup`, `recommendation_reminder`, and `maintenance_reminder` are placeholders.
 
-## Runtime assumptions
-### Confirmed facts
-- The app expects a writable filesystem path for SQLite.
-- Telegram outbound delivery requires token presence but webhook handlers can still accept requests without tokens.
-- MAX routes require `MAX_ENABLED`, the relevant token, and `MAX_WEBHOOK_SECRET` to accept webhook payloads.
+### Confirmed by deployment-oriented files
+- BotHost and Docker both point at the same `app.js` startup path.
+- The runtime expects a writable filesystem location for SQLite.
 
-### Depends on ENV
-- Listen port, scheduler timing, admin bootstrap, MAX availability diagnostics, WebApp URLs, rate limits, and dedupe windows.
+### Confirmed only by deployment assumptions, not by repo runtime proof
+- BotHost is assumed to preserve the configured SQLite path across restarts/redeploys.
+- Telegram and MAX webhook endpoints are assumed to be registered with their external platforms.
+- Network egress to Telegram and MAX APIs is assumed to be available in production.
 
-### Depends on deploy environment
-- Persistence durability depends on how BotHost mounts the DB path.
-- External message delivery depends on Telegram/MAX API availability.
-- Real MAX/Telegram webhook registration must be done outside the app.
+### Unresolved runtime uncertainty
+- Whether production runs a single instance or multiple instances is not confirmed from code or deploy files here.
+- Whether the live environment uses strict config mode is not confirmed.
+- Whether the live deployment exposes integration endpoints publicly or behind additional proxy controls is not confirmed.
 
-### Assumptions / hypotheses only
-- BotHost persistence guarantees are not provable from source alone.
-- Real live webhook registration state is not visible inside the repository.
+## What changed after modernization
+- The runtime path is now explicitly Node-first, centralized in `app.js` and `src/server/index.js`.
+- Persistence startup is now SQLite-centric, with DB runtime logging and initialization happening before server start.
+- WebApp delivery, admin pages, integrations, reporting, and bots now live behind a unified HTTP server instead of appearing as scattered legacy surfaces.
+- Scheduler behavior is codified as an in-process runtime responsibility rather than an external worker assumption.
+
+## Remaining gaps
+- No process supervisor logic or cluster coordination exists in the repo.
+- No startup manifest endpoint summarizes registered routes or enabled contours.
+- No separate worker isolates scheduler/task execution from request-handling load.
+- In-memory rate limiting and sessions remain instance-local.
 
 ## Risks
-- Single-process runtime means HTTP load, webhook bursts, and scheduler work share one failure domain.
-- In-memory bot sessions are lost on restart.
-- Rate limiting is in-memory and therefore instance-local.
-
-## Gaps
-- No separate worker process for scheduler/integration tasks.
-- No route auto-registration report exposed to operators.
-- No environment-specific startup mode that disables unsupported contours entirely.
+- Single-process design means webhook bursts, internal reports, and scheduler work share one failure domain.
+- In-memory sessions in bot handlers are lost on restart.
+- Instance-local rate limiting and scheduler logic can misbehave under uncoordinated horizontal scaling.
+- Runtime health endpoints may appear healthy even if outbound bot tokens are missing.
 
 ## Legacy / dead / misleading parts
-- `src/interfaces/webapp/routes.js` is not the live route source.
-- Legacy Python services describe a different startup model and must not be used for runtime reasoning.
-
-## Recommendations
-1. Keep treating the platform as a single-instance/small-scale monolith unless worker separation is added.
-2. If multi-instance deploys are planned, move rate limiting, dedupe, and scheduling coordination out of process memory.
-3. Add a runtime manifest endpoint or startup log summarizing registered routes and enabled contours.
+- `src/interfaces/webapp/routes.js` is not the authoritative runtime route map.
+- Legacy Python folders describe an older shape and must not be treated as the active runtime contour.
+- Placeholder env values such as `ENABLE_INTEGRATION_WORKER` can imply a worker topology that does not exist yet.
 
 ## Confidence level
-High.
+High for code-confirmed runtime flow; medium for production hosting behavior because no live runtime inspection was performed.
 
-## Follow-up checks
-- Validate actual webhook registration in Telegram/MAX control planes after each deploy.
-- Verify BotHost persistent volume behavior against the configured SQLite path.
+## Recommended follow-up checks
+- Verify the live process is launched from `app.js` and that scheduler logs appear after server start.
+- Confirm persistence survives a real BotHost restart on the configured SQLite path.
+- If multi-instance deployment is planned, re-audit scheduler, dedupe, rate limiting, and bot sessions immediately.
