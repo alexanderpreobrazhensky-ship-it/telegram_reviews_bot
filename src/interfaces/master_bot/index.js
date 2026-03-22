@@ -4,6 +4,7 @@ const logger = require('../../infrastructure/logging/logger');
 const { sendChannelMessage, answerChannelCallback } = require('../../infrastructure/messaging');
 const { extractIncomingEvent } = require('../shared/channelAdapters');
 const { validateMaxWebhookRequest } = require('../shared/maxSecurity');
+const { REQUEST_STATUSES } = require('../../core/shared/requestValidation');
 
 const sessions = new Map();
 
@@ -46,7 +47,10 @@ function buildRequestCardText(card) {
   const r = card.request;
   const client = card.client || {};
   const vehicle = card.vehicle || {};
-  const history = (card.statusHistory || []).map((h) => `${h.createdAt}: ${h.fromStatus} -> ${h.toStatus}`).join('\n') || 'Нет истории';
+  const history = (card.requestEvents || [])
+    .slice(-10)
+    .map((event) => `${event.createdAt}: ${event.canonicalEventType || event.eventType} ${event.oldValue || event.oldStatus || '-'} -> ${event.newValue || event.newStatus || '-'}${event.comment ? ` (${event.comment})` : ''}`)
+    .join('\n') || 'Нет истории';
   return [
     `ID: ${r.id}`,
     `Тип: ${r.requestType}`,
@@ -64,6 +68,7 @@ function buildRequestCardText(card) {
     `Источник: ${r.sourceChannel || '-'}`,
     `Назначено: ${r.assignedTo || r.assignedMasterId || '-'}`,
     `Назначил: ${r.assignedBy || '-'}`,
+    `Когда назначено: ${r.assignedAt || '-'}`,
     `Создано: ${r.createdAt || '-'}`,
     `Клиент ID: ${r.clientId || '-'}`,
     `Авто ID: ${r.vehicleId || '-'}`,
@@ -86,7 +91,7 @@ function helpText(channel) {
     '/whoami',
     '/search <query>',
     '/request <id>',
-    '/set_status <requestId> <status> [reason]',
+    `/set_status <requestId> <${REQUEST_STATUSES.join('|')}> [reason]`,
     '/comment <requestId> <text>',
     '/ask_client <requestId> <text>',
     `/access_grant <${channel === 'max' ? 'maxId' : 'telegramId'}> <master|manager> [ФИО]`,
@@ -205,8 +210,14 @@ async function handleMasterWebhook({ body, config, headers = {}, rawHeaders = []
         channel,
         token,
         recipientId,
-        text: `Ваш MAX user_id: ${channelUserId || '-'}. Добавьте это значение в MAX_MASTER_BOT_ADMIN_IDS при необходимости.`,
-        payload: { ok: true, action: 'whoami', channelUserId, channel }
+        text: [
+          `Identity: ${actor?.id || channelUserId || '-'}`,
+          `Role: ${actor?.role || 'unknown'}`,
+          `Channel: ${channel}`,
+          `Channel user id: ${channelUserId || '-'}`,
+          `Name: ${actor?.fullName || fullName || '-'}`
+        ].join('\n'),
+        payload: { ok: true, action: 'whoami', channelUserId, channel, actor }
       });
     }
 
@@ -386,7 +397,7 @@ async function handleMasterWebhook({ body, config, headers = {}, rawHeaders = []
         const card = masterService.getRequestCard(results.requests[0].id);
         return respondWithMessage({ channel, token, recipientId, text: buildRequestCardText(card), payload: { ok: true, ...results, card }, extra: { reply_markup: buildRequestActionsKeyboard(card.request.id) } });
       }
-      return { ok: true, ...results };
+      return respondWithMessage({ channel, token, recipientId, text: 'Ничего не найдено', payload: { ok: true, ...results } });
     }
 
     if (text.startsWith('/client ')) {

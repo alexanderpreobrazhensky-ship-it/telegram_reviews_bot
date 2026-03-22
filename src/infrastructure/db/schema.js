@@ -2,7 +2,7 @@ const schemaOverview = {
   clients: ['id', 'full_name', 'phone', 'telegram_id', 'max_id', 'preferred_channel', 'created_at', 'updated_at', 'data'],
   vehicles: ['id', 'client_id', 'vin', 'plate_number', 'brand', 'model', 'year', 'created_at', 'updated_at', 'data'],
   requests: ['id', 'client_id', 'vehicle_id', 'request_type', 'status', 'description', 'source_channel', 'assigned_master_id', 'assigned_to', 'assigned_at', 'assigned_by', 'lost_reason', 'created_at', 'updated_at', 'data'],
-  request_events: ['id', 'event_scope', 'event_type', 'request_id', 'client_id', 'quality_case_id', 'actor_id', 'actor_role', 'old_value', 'new_value', 'actor_type', 'meta_json', 'created_at', 'data', 'parent_event_id'],
+  request_events: ['id', 'event_scope', 'event_type', 'request_id', 'client_id', 'quality_case_id', 'actor_id', 'actor_role', 'old_value', 'new_value', 'actor_type', 'comment', 'meta_json', 'created_at', 'data', 'parent_event_id'],
   communications: ['id', 'client_id', 'request_id', 'source', 'channel', 'direction', 'created_at', 'data'],
   tasks: ['id', 'task_type', 'status', 'due_at', 'created_at', 'processed_at', 'attempt_count', 'last_error', 'processing_started_at', 'updated_at', 'payload', 'data'],
   staff_users: ['id', 'telegram_id', 'max_id', 'full_name', 'role', 'created_at', 'updated_at', 'data'],

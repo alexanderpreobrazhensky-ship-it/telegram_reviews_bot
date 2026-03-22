@@ -42,9 +42,10 @@ test('p2 export endpoint returns csv for authorized admin with filters', async (
     assert.equal(response.status, 200);
     assert.match(response.headers.get('content-type') || '', /text\/csv/);
     const body = await response.text();
-    assert.match(body, /id,created_at,status,channel,request_type,phone,assigned_to/);
+    assert.match(body, /id,created_at,request_type,status,phone,source_channel,assigned_to,description/);
     assert.match(body, /9991230001/);
     assert.match(body, /master-77/);
+    assert.ok(db.readStore().requestEvents.some((event) => event.requestId === request.id && event.canonicalEventType === 'export_requested'));
   }, { INTERNAL_ADMIN_WHITELIST: 'admin-1' });
 });
 
@@ -177,7 +178,7 @@ test('p2 retry helper retries transient failures', async () => {
 });
 
 test('p2 csv serializer keeps export schema stable', () => {
-  const csv = serializeCsv([{ id: 'r1', created_at: '2026-01-01T00:00:00.000Z', status: 'new', channel: 'webapp', request_type: 'service_request', phone: '9990000001', assigned_to: 'master-1' }]);
-  assert.match(csv, /^id,created_at,status,channel,request_type,phone,assigned_to/m);
+  const csv = serializeCsv([{ id: 'r1', created_at: '2026-01-01T00:00:00.000Z', request_type: 'service_request', status: 'new', phone: '9990000001', source_channel: 'webapp', assigned_to: 'master-1', description: 'Need service' }]);
+  assert.match(csv, /^id,created_at,request_type,status,phone,source_channel,assigned_to,description/m);
   assert.match(csv, /master-1/);
 });

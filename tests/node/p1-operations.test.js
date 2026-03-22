@@ -55,22 +55,14 @@ test('p1 flow: create request, assign, change status, and persist request/analyt
   });
   assert.equal(status.request.status, 'assigned');
 
-  db.createAnalyticsEvent({
-    eventType: 'request_created',
-    channel: 'telegram',
-    platform: 'telegram',
-    requestType: 'service_request',
-    requestId: request.id,
-    clientId: client.id,
-    status: 'assigned'
-  });
-
   const store = db.readStore();
   const requestEvents = store.requestEvents.filter((event) => event.requestId === request.id);
   assert.ok(requestEvents.some((event) => event.canonicalEventType === 'created'));
   assert.ok(requestEvents.some((event) => event.canonicalEventType === 'assigned'));
   assert.ok(requestEvents.some((event) => event.canonicalEventType === 'status_changed' && event.newStatus === 'assigned'));
   assert.ok(store.analyticsEvents.some((event) => event.eventType === 'request_created' && event.requestId === request.id));
+  assert.ok(store.analyticsEvents.some((event) => event.eventType === 'assignment_changed' && event.requestId === request.id));
+  assert.ok(store.analyticsEvents.some((event) => event.eventType === 'status_changed' && event.requestId === request.id));
 });
 
 test('p1 server: internal UI, health endpoints, analytics endpoint, and assignment/status APIs work', async () => {
@@ -121,7 +113,12 @@ test('p1 server: internal UI, health endpoints, analytics endpoint, and assignme
     assert.equal(health.status, 200);
     assert.equal(healthDb.status, 200);
     assert.equal(healthMax.status, 200);
-    assert.equal((await healthDb.json()).db.tables.includes('requests'), true);
+    const dbHealthBody = await healthDb.json();
+    assert.equal(dbHealthBody.connected, true);
+    assert.match(dbHealthBody.dbEngine, /sqlite/i);
+    const maxHealthBody = await healthMax.json();
+    assert.equal(Object.hasOwn(maxHealthBody, 'tokenConfigured'), true);
+    assert.equal(Object.hasOwn(maxHealthBody, 'secretConfigured'), true);
 
     const internal = await fetch(`${base}/internal/requests?admin_id=admin-77&status=assigned`);
     assert.equal(internal.status, 200);
@@ -129,11 +126,32 @@ test('p1 server: internal UI, health endpoints, analytics endpoint, and assignme
     assert.match(html, /Internal Requests/);
     assert.match(html, /manager-22/);
     assert.match(html, /Events/);
+    const detail = await fetch(`${base}/internal/requests/${created.id}?admin_id=admin-77`);
+    assert.equal(detail.status, 200);
+    assert.match(await detail.text(), /History/);
 
     const store = db.readStore();
     assert.ok(store.analyticsEvents.some((event) => event.eventType === 'form_started'));
     assert.ok(store.requestEvents.some((event) => event.requestId === created.id && event.canonicalEventType === 'assigned'));
   }, { INTERNAL_ADMIN_WHITELIST: 'admin-77' });
+});
+
+test('p1 master bot commands provide whoami request card and comment flow', async () => {
+  db.resetStore();
+  process.env.MASTER_BOT_ADMIN_IDS = '700';
+  const client = db.upsertClient({ fullName: 'Bot User', phone: '9997770001', telegramId: '701' });
+  const request = db.createRequest({ clientId: client.id, requestType: 'service_request', description: 'Bot card', sourceChannel: 'telegram_chat' });
+
+  const { handleMasterWebhook } = require('../../src/interfaces/master_bot');
+  const whoamiResult = await handleMasterWebhook({ body: { message: { text: '/whoami', chat: { id: 700 }, from: { id: 700, first_name: 'Admin' } } }, config: loadConfig() });
+  const requestResult = await handleMasterWebhook({ body: { message: { text: `/request ${request.id}`, chat: { id: 700 }, from: { id: 700, first_name: 'Admin' } } }, config: loadConfig() });
+  const commentResult = await handleMasterWebhook({ body: { message: { text: `/comment ${request.id} Checked`, chat: { id: 700 }, from: { id: 700, first_name: 'Admin' } } }, config: loadConfig() });
+  delete process.env.MASTER_BOT_ADMIN_IDS;
+
+  assert.equal(whoamiResult.ok, true);
+  assert.equal(requestResult.ok, true);
+  assert.equal(commentResult.ok, true);
+  assert.ok(db.readStore().requestEvents.some((event) => event.requestId === request.id && event.canonicalEventType === 'comment_added'));
 });
 
 test('p1 duplicate detection keeps request creation working and records duplicate markers', async () => {
