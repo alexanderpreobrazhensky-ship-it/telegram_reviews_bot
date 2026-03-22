@@ -10,5 +10,5 @@ test('production path is node-first', () => {
 });
 
 test('centralized repository audit file exists under audit/', () => {
-  assert.equal(fs.existsSync('audit/REPOSITORY_FULL_AUDIT.md'), true);
+  assert.equal(fs.existsSync('audit/MASTER_AUDIT.md'), true);
 });
