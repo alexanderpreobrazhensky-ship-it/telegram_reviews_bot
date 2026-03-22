@@ -1707,8 +1707,10 @@ function followupDelayDays() {
 }
 
 function maybeScheduleProcessedFollowup(request) {
-  if (request.status !== 'processed' || !['waiting_decision', 'consulted'].includes(request.substatus)) return null;
-  const taskType = request.substatus === 'waiting_decision' ? 'waiting_decision_followup' : 'consulted_followup';
+  const waitingDecisionActive = request.status === 'waiting_decision';
+  const consultedActive = request.status === 'processed' && request.substatus === 'consulted';
+  if (!waitingDecisionActive && !consultedActive) return null;
+  const taskType = waitingDecisionActive ? 'waiting_decision_followup' : 'consulted_followup';
   const existingTask = getDb().prepare(`
     SELECT id FROM tasks
     WHERE task_type = ? AND status IN ('scheduled', 'processing')
@@ -1728,7 +1730,7 @@ function maybeScheduleProcessedFollowup(request) {
     lastError: null,
     processingStartedAt: null,
     updatedAt: nowIso(),
-    payload: { requestId: request.id, assignedTo: request.assignedTo || null, substatus: request.substatus }
+    payload: { requestId: request.id, assignedTo: request.assignedTo || null, substatus: waitingDecisionActive ? 'waiting_decision' : request.substatus, status: request.status }
   });
   return { dueAt, taskType };
 }
@@ -1740,8 +1742,12 @@ function updateRequestStatus({ requestId, toStatus, substatus = null, actorId, a
   const request = requestRowToEntity(row);
   const fromStatus = request.status;
   const fromSubstatus = request.substatus || null;
-  const nextStatus = validateRequestStatus(toStatus);
-  const nextSubstatus = validateRequestSubstatus(substatus) || null;
+  let nextStatus = validateRequestStatus(toStatus);
+  let nextSubstatus = validateRequestSubstatus(substatus) || null;
+  if (nextStatus === 'processed' && nextSubstatus === 'waiting_decision') {
+    nextStatus = 'waiting_decision';
+    nextSubstatus = null;
+  }
   const statusComment = String(comment || lostReason || '').trim() || null;
   const transition = canTransitionRequest({ fromStatus, fromSubstatus, toStatus: nextStatus, toSubstatus: nextSubstatus, archived: request.archived });
 
@@ -1753,12 +1759,14 @@ function updateRequestStatus({ requestId, toStatus, substatus = null, actorId, a
 
   request.status = nextStatus;
   request.substatus = nextStatus === 'processed' ? nextSubstatus : null;
-  request.archived = isArchivedStatus({ status: request.status, substatus: request.substatus, archived: false });
+  if (nextStatus === 'waiting_decision') request.substatus = 'waiting_decision';
+  if (nextStatus === 'archived') request.substatus = request.substatus || null;
+  request.archived = isArchivedStatus({ status: request.status, substatus: request.substatus, archived: nextStatus === 'archived' });
   request.updatedAt = nowIso();
   request.lastFollowupAt = followupAt || request.lastFollowupAt || null;
   request.lostReason = request.substatus === 'rejected' ? statusComment : null;
   request.rejectionComment = request.substatus === 'rejected' ? statusComment : null;
-  request.completedAt = request.status === 'completed' ? request.updatedAt : null;
+  request.completedAt = request.status === 'completed' ? request.updatedAt : request.completedAt;
   request.lastOutboundError = request.status === 'error' ? (statusComment || request.lastOutboundError || 'outbound_delivery_error') : null;
   if (!request.assignedMasterId && actorId) request.assignedMasterId = actorId;
 
@@ -1783,7 +1791,7 @@ function updateRequestStatus({ requestId, toStatus, substatus = null, actorId, a
 
   const tx = getDb().transaction(() => {
     insertOrReplaceRequest(request);
-    if (!(request.status === 'processed' && ['waiting_decision', 'consulted'].includes(request.substatus))) {
+    if (!(request.status === 'waiting_decision' || (request.status === 'processed' && ['consulted'].includes(request.substatus)))) {
       const tasks = getDb().prepare(`
         SELECT * FROM tasks
         WHERE task_type IN ('waiting_decision_followup', 'consulted_followup')
@@ -1847,7 +1855,7 @@ function updateRequestStatus({ requestId, toStatus, substatus = null, actorId, a
       createdAt: nowIso()
     });
 
-    if (request.status === 'processed' && ['waiting_decision', 'consulted'].includes(request.substatus)) {
+    if (request.status === 'waiting_decision' || (request.status === 'processed' && ['consulted'].includes(request.substatus))) {
       const scheduled = maybeScheduleProcessedFollowup(request);
       insertRequestEvent({
         id: crypto.randomUUID(),
@@ -1859,8 +1867,8 @@ function updateRequestStatus({ requestId, toStatus, substatus = null, actorId, a
         actorRole,
         actorType: actorRole || 'system',
         comment: scheduled?.dueAt ? `followup_due:${scheduled.dueAt}` : 'followup_already_scheduled',
-        payload: { dueAt: scheduled?.dueAt || null, taskType: scheduled?.taskType || null, substatus: request.substatus },
-        metaJson: { dueAt: scheduled?.dueAt || null, taskType: scheduled?.taskType || null, substatus: request.substatus },
+        payload: { dueAt: scheduled?.dueAt || null, taskType: scheduled?.taskType || null, substatus: request.substatus, status: request.status },
+        metaJson: { dueAt: scheduled?.dueAt || null, taskType: scheduled?.taskType || null, substatus: request.substatus, status: request.status },
         createdAt: nowIso()
       });
     }
@@ -1900,7 +1908,7 @@ function updateRequestStatus({ requestId, toStatus, substatus = null, actorId, a
 function reactivateWaitingDecisionRequest({ requestId, actorId = 'system', actorRole = 'system' }) {
   initializeStore();
   const request = findRequestById(requestId);
-  if (!request || request.status !== 'processed' || request.substatus !== 'waiting_decision') return null;
+  if (!request || request.status !== 'waiting_decision') return null;
   request.status = 'in_progress';
   request.substatus = null;
   request.archived = false;

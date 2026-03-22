@@ -71,11 +71,11 @@ function createMasterService({ db, sendClientMessage, adminIds = [], actorChanne
     },
 
     listActiveRequests() {
-      return db.listRequests({ statuses: ['in_progress', 'processed', 'in_service', 'error'] }).filter((item) => !item.archived);
+      return db.listRequests({ statuses: ['in_progress', 'processed', 'in_service', 'waiting_decision', 'error'] }).filter((item) => !item.archived);
     },
 
     listArchiveRequests() {
-      return db.listRequests({ statuses: ['processed', 'completed'] }).filter((item) => item.archived);
+      return db.listRequests({ statuses: ['processed', 'completed', 'archived'] }).filter((item) => item.archived || item.status === 'archived');
     },
 
     search(query) {

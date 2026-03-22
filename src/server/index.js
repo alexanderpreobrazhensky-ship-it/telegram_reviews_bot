@@ -128,6 +128,9 @@ async function duplicateToMastersChat({ config, request, payload }) {
         ],
         [
           { text: 'Завершить', callback_data: `req:${request.id}:completed` },
+          { text: 'Комментарий', callback_data: `req:${request.id}:comment` }
+        ],
+        [
           { text: 'Подробнее', callback_data: `card:${request.id}` }
         ]
       ]
@@ -454,7 +457,10 @@ function createServer({ config, logger }) {
           MAX_MASTER_BOT_TOKEN: Boolean(config.maxMasterBotToken),
           MAX_WEBHOOK_SECRET: Boolean(config.maxWebhookSecret),
           MAX_MASTER_BOT_ADMIN_IDS: (config.maxMasterBotAdminIds || []).length,
-          MAX_WEBAPP_URL: Boolean(config.maxWebAppUrl)
+          MAX_WEBAPP_URL: Boolean(config.maxWebAppUrl),
+          AI_ENABLED: Boolean(config.ai?.enabled),
+          AI_PROVIDER: config.ai?.provider || '',
+          AI_MODEL: Boolean(config.ai?.model)
         },
         healthEndpoints: ['/health', '/health/db', '/health/max'],
         scheduler: {
@@ -523,6 +529,7 @@ function createServer({ config, logger }) {
       const result = db.updateRequestStatus({
         requestId,
         toStatus: formBody.status,
+        substatus: formBody.substatus || null,
         comment: formBody.comment || null,
         lostReason: formBody.comment || null,
         actorId: auth.adminId,
@@ -700,6 +707,7 @@ function createServer({ config, logger }) {
       const result = db.updateRequestStatus({
         requestId,
         toStatus: body.status,
+        substatus: body.substatus || null,
         comment: body.comment || null,
         lostReason: body.comment || null,
         actorId: body.actorId || null,

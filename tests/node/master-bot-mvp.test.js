@@ -76,7 +76,7 @@ test('status transitions and lost reason validation work', async () => {
 
     const waiting = await sendMaster(base, `/set_status ${reqA.id} processed waiting_decision`);
     assert.equal(waiting.ok, true);
-    assert.equal(waiting.request.status, 'processed');
+    assert.equal(waiting.request.status, 'waiting_decision');
     assert.equal(waiting.request.substatus, 'waiting_decision');
 
     const inProgressAgain = await sendMaster(base, `/set_status ${reqA.id} in_progress`);
@@ -102,7 +102,7 @@ test('status transitions and lost reason validation work', async () => {
   });
 });
 
-test('master bot inline flow supports assignment archive and protected transitions', async () => {
+test('master bot inline flow supports assignment archive and legacy callbacks refresh cards', async () => {
   await withServer(async (base) => {
     const req = await createClientRequest(base, { fullName: 'Архив Тест', phone: '0000000012', wasClientBefore: 'yes', brand: 'BMW', model: 'X1', year: '2023', vin: 'VIN-ARCHIVE', description: 'archive' });
 
@@ -119,6 +119,14 @@ test('master bot inline flow supports assignment archive and protected transitio
     assert.equal(invalid.ok, false);
     assert.equal(invalid.error, 'INVALID_TRANSITION');
 
+    const legacy = await fetch(`${base}/telegram/master_bot/webhook`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ callback_query: { id: 'cb-legacy', from: { id: 5001, first_name: 'Admin' }, message: { chat: { id: 5001 } }, data: `req:${doneFromNewReq.id}:assigned` } })
+    }).then((res) => res.json());
+    assert.equal(legacy.ok, true);
+    assert.equal(legacy.request.status, 'in_progress');
+
     const rejected = await sendMaster(base, `/set_status ${req.id} processed rejected дорого`);
     assert.equal(rejected.ok, true);
     assert.equal(rejected.request.archived, true);
@@ -130,6 +138,15 @@ test('master bot inline flow supports assignment archive and protected transitio
     const invalidArchivedMove = await sendMaster(base, `/set_status ${req.id} in_service`);
     assert.equal(invalidArchivedMove.ok, false);
     assert.equal(invalidArchivedMove.error, 'ARCHIVED_IMMUTABLE');
+
+    const legacyRefresh = await fetch(`${base}/telegram/master_bot/webhook`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ callback_query: { id: 'cb-legacy-2', from: { id: 5001, first_name: 'Admin' }, message: { chat: { id: 5001 } }, data: `req:${req.id}:awaiting_client` } })
+    }).then((res) => res.json());
+    assert.equal(legacyRefresh.ok, true);
+    assert.equal(legacyRefresh.legacy, true);
+    assert.match(legacyRefresh.text, /Карточка обновлена/i);
   });
 });
 
@@ -188,7 +205,7 @@ test('diagnostics and logs are available only for admin and do not expose raw se
   await withServer(async (base) => {
     const adminDiag = await sendMaster(base, '/diagnostics');
     assert.equal(adminDiag.ok, true);
-    assert.match(adminDiag.text, /TELEGRAM_CLIENT_BOT_TOKEN: configured/i);
+    assert.match(adminDiag.text, /Telegram bot: OK/i);
     assert.doesNotMatch(adminDiag.text, /ABCDEF_SECRET/);
 
     const adminLogs = await sendMaster(base, '/logs request:none');

@@ -63,7 +63,12 @@ function loadConfig() {
     'SCHEDULER_BATCH_SIZE',
     'SCHEDULER_MAX_ATTEMPTS',
     'SCHEDULER_STUCK_TIMEOUT_MS',
-    'FEEDBACK_REQUEST_DELAY_MINUTES'
+    'FEEDBACK_REQUEST_DELAY_MINUTES',
+    'AI_ENABLED',
+    'AI_PROVIDER',
+    'AI_MODEL',
+    'AI_API_KEY',
+    'AI_TIMEOUT_MS'
   ];
   const legacyEnv = ['DB_FILE_PATH', 'INTERNAL_ADMIN_WHITELIST_IDS', 'WEBAPP_TELEGRAM_CHANNEL_LINK'];
   const knownEnv = new Set([...requiredEnv, ...optionalEnv, ...legacyEnv, 'PORT', 'NODE_ENV', 'DB_DRIVER', 'DB_URL', 'QUEUE_DRIVER', 'ONE_C_WEBHOOK_SECRET', 'ENABLE_INTEGRATION_WORKER', 'INTEGRATION_RETRY_MAX', 'INTEGRATION_RETRY_DELAY_SECONDS', 'ONE_C_SYNC_ENABLED', 'EMAIL_IMPORT_ENABLED', 'MAX_DIAGNOSTICS_ENABLED']);
@@ -109,6 +114,13 @@ function loadConfig() {
     webappTelegramChannelLink: process.env.TELEGRAM_CHANNEL_URL || process.env.WEBAPP_TELEGRAM_CHANNEL_LINK || '',
     internalAdminWhitelist,
     maxDiagnosticsEnabled: parseBoolean(process.env.MAX_DIAGNOSTICS_ENABLED, true),
+    ai: {
+      enabled: parseBoolean(process.env.AI_ENABLED, false),
+      provider: process.env.AI_PROVIDER || 'openai',
+      model: process.env.AI_MODEL || '',
+      apiKey: process.env.AI_API_KEY || '',
+      timeoutMs: parseNumber(process.env.AI_TIMEOUT_MS, 5000, { min: 1000, max: 60000 })
+    },
     envAudit: {
       required: requiredEnv,
       optional: optionalEnv,
