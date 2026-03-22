@@ -290,10 +290,10 @@
       const response = await fetch(cfg.endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'REQUEST_FAILED');
-      track('submit_success', { requestType: cfg.type, requestId: data.id, status: 'created' });
+      track('request_created', { requestType: cfg.type, requestId: data.id, status: 'created' });
       renderResult(true, data.id);
     } catch {
-      track('request_failed', { requestType: cfg.type, status: 'client_error' });
+      track('request_rejected', { requestType: cfg.type, status: 'client_error' });
       renderResult(false);
     }
   }

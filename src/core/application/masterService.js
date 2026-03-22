@@ -1,4 +1,4 @@
-const REQUEST_STATUSES = ['new', 'assigned', 'awaiting_client', 'scheduled', 'in_service', 'done', 'cancelled'];
+const { REQUEST_STATUSES } = require('../shared/requestValidation');
 const QUALITY_CASE_STATUSES = ['new', 'assigned', 'in_progress', 'resolved', 'unresolved', 'archived'];
 
 function deriveClientChannel(requestCard) {

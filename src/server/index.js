@@ -5,7 +5,7 @@ const { URL } = require('url');
 const db = require('../infrastructure/db');
 const { REQUEST_TYPES } = require('../core/domain');
 const { normalizePhone10, isValidPhone10, resolvePhoneInput } = require('../core/shared/phone');
-const { validateClientRequestPayload: validateClientRequestPayloadDetailed } = require('../core/shared/requestValidation');
+const { REQUEST_STATUSES, validateClientRequestPayload: validateClientRequestPayloadDetailed } = require('../core/shared/requestValidation');
 const { createRateLimiter } = require('../infrastructure/rate_limit');
 const { filterRequestsForExport, mapRequestForExport, serializeCsv } = require('../infrastructure/export');
 const { createRepositories } = require('../infrastructure/repositories');
@@ -219,19 +219,21 @@ function escapeHtml(value) {
 
 function renderInternalRequestsPage({ requests, filters, adminId, requestCards }) {
   const selected = (value, expected) => String(value || '') === String(expected || '') ? ' selected' : '';
+  const requestTypeOptions = Object.values(REQUEST_TYPES);
+  const channelOptions = ['webapp', 'max_webapp', 'telegram_chat', 'max_chat'];
   const rows = requests.map((request) => {
     const card = requestCards.get(request.id);
     const eventsHtml = (card?.requestEvents || [])
-      .map((event) => `<li><strong>${escapeHtml(event.canonicalEventType || event.eventType)}</strong> · ${escapeHtml(event.createdAt)} · ${escapeHtml(event.actorType || event.actorRole || '-')} · ${escapeHtml(event.actorId || '-')} · ${escapeHtml(event.oldValue || event.oldStatus || '-')} → ${escapeHtml(event.newValue || event.newStatus || '-')}</li>`)
+      .map((event) => `<li><strong>${escapeHtml(event.canonicalEventType || event.eventType)}</strong> · ${escapeHtml(event.createdAt)} · ${escapeHtml(event.actorType || event.actorRole || '-')} · ${escapeHtml(event.actorId || '-')} · ${escapeHtml(event.oldValue || event.oldStatus || '-')} → ${escapeHtml(event.newValue || event.newStatus || '-')} ${event.comment ? `· ${escapeHtml(event.comment)}` : ''}</li>`)
       .join('');
     return `
       <tr>
-        <td>${escapeHtml(request.id)}</td>
+        <td><a href="/internal/requests/${encodeURIComponent(request.id)}?admin_id=${encodeURIComponent(adminId)}">${escapeHtml(request.id)}</a></td>
         <td>${escapeHtml(request.createdAt)}</td>
         <td>
           <form method="POST" action="/internal/requests/${encodeURIComponent(request.id)}/status?admin_id=${encodeURIComponent(adminId)}">
             <select name="status">
-              ${['new', 'assigned', 'awaiting_client', 'scheduled', 'in_service', 'done', 'cancelled'].map((status) => `<option value="${status}"${selected(request.status, status)}>${status}</option>`).join('')}
+              ${REQUEST_STATUSES.map((status) => `<option value="${status}"${selected(request.status, status)}>${status}</option>`).join('')}
             </select>
             <input type="text" name="comment" placeholder="comment / reason"/>
             <button type="submit">Save</button>
@@ -240,7 +242,15 @@ function renderInternalRequestsPage({ requests, filters, adminId, requestCards }
         <td>${escapeHtml(card?.client?.phone || '-')}</td>
         <td>${escapeHtml(request.sourceChannel || '-')}</td>
         <td>${escapeHtml(request.requestType || '-')}</td>
-        <td>${escapeHtml(request.assignedTo || '-')}</td>
+        <td>
+          <div>${escapeHtml(request.assignedTo || '-')}</div>
+          <small>${escapeHtml(request.assignedBy || '-')} · ${escapeHtml(request.assignedAt || '-')}</small>
+          <form method="POST" action="/internal/requests/${encodeURIComponent(request.id)}/assign?admin_id=${encodeURIComponent(adminId)}">
+            <input type="text" name="assignedTo" placeholder="operator id"/>
+            <button type="submit">Assign</button>
+            <button type="submit" name="assignedTo" value="">Clear</button>
+          </form>
+        </td>
       </tr>
       <tr>
         <td colspan="7">
@@ -272,10 +282,14 @@ function renderInternalRequestsPage({ requests, filters, adminId, requestCards }
       <p>Admin: ${escapeHtml(adminId)}</p>
       <form class="filters" method="GET" action="/internal/requests">
         <input type="hidden" name="admin_id" value="${escapeHtml(adminId)}"/>
-        <label>Status <select name="status"><option value="">all</option>${['new', 'assigned', 'awaiting_client', 'scheduled', 'in_service', 'done', 'cancelled'].map((status) => `<option value="${status}"${selected(filters.status, status)}>${status}</option>`).join('')}</select></label>
-        <label>Channel <select name="channel"><option value="">all</option>${['webapp', 'max_webapp', 'telegram_chat', 'max_chat'].map((channel) => `<option value="${channel}"${selected(filters.channel, channel)}>${channel}</option>`).join('')}</select></label>
-        <label>Type <select name="request_type"><option value="">all</option>${Object.values(REQUEST_TYPES).map((type) => `<option value="${type}"${selected(filters.requestType, type)}>${type}</option>`).join('')}</select></label>
+        <label>Status <select name="status"><option value="">all</option>${REQUEST_STATUSES.map((status) => `<option value="${status}"${selected(filters.status, status)}>${status}</option>`).join('')}</select></label>
+        <label>Channel <select name="channel"><option value="">all</option>${channelOptions.map((channel) => `<option value="${channel}"${selected(filters.channel, channel)}>${channel}</option>`).join('')}</select></label>
+        <label>Type <select name="request_type"><option value="">all</option>${requestTypeOptions.map((type) => `<option value="${type}"${selected(filters.requestType, type)}>${type}</option>`).join('')}</select></label>
+        <label>Assigned to <input name="assigned_to" value="${escapeHtml(filters.assignedTo || '')}"/></label>
+        <label>From <input type="date" name="from" value="${escapeHtml(filters.from || '')}"/></label>
+        <label>To <input type="date" name="to" value="${escapeHtml(filters.to || '')}"/></label>
         <button type="submit">Apply</button>
+        <a href="/internal/export?admin_id=${encodeURIComponent(adminId)}&status=${encodeURIComponent(filters.status || '')}&request_type=${encodeURIComponent(filters.requestType || '')}&source_channel=${encodeURIComponent(filters.channel || '')}&from=${encodeURIComponent(filters.from || '')}&to=${encodeURIComponent(filters.to || '')}">Export CSV</a>
       </form>
       <table>
         <thead>
@@ -283,6 +297,54 @@ function renderInternalRequestsPage({ requests, filters, adminId, requestCards }
         </thead>
         <tbody>${rows || '<tr><td colspan="7">No requests</td></tr>'}</tbody>
       </table>
+    </body>
+  </html>`;
+}
+
+function renderInternalRequestCardPage({ adminId, card }) {
+  const request = card.request;
+  const eventsHtml = (card.requestEvents || []).map((event) => `
+    <li>
+      <strong>${escapeHtml(event.canonicalEventType || event.eventType)}</strong>
+      <div>${escapeHtml(event.createdAt)}</div>
+      <div>${escapeHtml(event.actorType || event.actorRole || '-')} / ${escapeHtml(event.actorId || '-')}</div>
+      <div>${escapeHtml(event.oldValue || event.oldStatus || '-')} → ${escapeHtml(event.newValue || event.newStatus || '-')}</div>
+      ${event.comment ? `<div>${escapeHtml(event.comment)}</div>` : ''}
+    </li>
+  `).join('');
+  return `<!doctype html>
+  <html lang="en">
+    <head><meta charset="utf-8"/><title>Request ${escapeHtml(request.id)}</title></head>
+    <body style="font-family: Arial, sans-serif; margin: 24px;">
+      <p><a href="/internal/requests?admin_id=${encodeURIComponent(adminId)}">← Back to list</a></p>
+      <h1>Request ${escapeHtml(request.id)}</h1>
+      <ul>
+        <li>Status: ${escapeHtml(request.status)}</li>
+        <li>Type: ${escapeHtml(request.requestType)}</li>
+        <li>Created: ${escapeHtml(request.createdAt)}</li>
+        <li>Phone: ${escapeHtml(card.client?.phone || '-')}</li>
+        <li>Source: ${escapeHtml(request.sourceChannel || '-')}</li>
+        <li>Assignee: ${escapeHtml(request.assignedTo || '-')}</li>
+        <li>Assigned by: ${escapeHtml(request.assignedBy || '-')}</li>
+        <li>Assigned at: ${escapeHtml(request.assignedAt || '-')}</li>
+        <li>Description: ${escapeHtml(request.description || '-')}</li>
+      </ul>
+      <form method="POST" action="/internal/requests/${encodeURIComponent(request.id)}/assign?admin_id=${encodeURIComponent(adminId)}" style="margin-bottom:16px;">
+        <input type="text" name="assignedTo" placeholder="operator id"/>
+        <button type="submit">Assign / reassign</button>
+        <button type="submit" name="assignedTo" value="">Clear</button>
+      </form>
+      <form method="POST" action="/internal/requests/${encodeURIComponent(request.id)}/status?admin_id=${encodeURIComponent(adminId)}" style="margin-bottom:16px;">
+        <select name="status">${REQUEST_STATUSES.map((status) => `<option value="${status}"${String(request.status) === status ? ' selected' : ''}>${status}</option>`).join('')}</select>
+        <input type="text" name="comment" placeholder="comment / reason"/>
+        <button type="submit">Update status</button>
+      </form>
+      <form method="POST" action="/internal/requests/${encodeURIComponent(request.id)}/comment?admin_id=${encodeURIComponent(adminId)}" style="margin-bottom:16px;">
+        <input type="text" name="comment" placeholder="internal comment" style="min-width: 320px;"/>
+        <button type="submit">Add comment</button>
+      </form>
+      <h2>History</h2>
+      <ul>${eventsHtml || '<li>No events</li>'}</ul>
     </body>
   </html>`;
 }
@@ -299,35 +361,22 @@ function buildHealthPayload(config) {
 
 function buildDbHealthPayload() {
   const runtime = db.getDbRuntimeInfo();
-  const tables = db.listTables();
   return {
     status: 'ok',
-    db: {
-      type: runtime.type,
-      path: runtime.path,
-      initStatus: runtime.lastInitStatus,
-      tables
-    }
+    connected: true,
+    dbConnected: true,
+    dbPath: runtime.path,
+    dbEngine: runtime.type
   };
 }
 
 function buildMaxHealthPayload(config) {
-  const payload = {
-    status: config.maxEnabled ? 'enabled' : 'disabled',
-    maxEnabled: Boolean(config.maxEnabled),
-    tokensConfigured: Boolean(config.maxClientBotToken || config.maxMasterBotToken),
-    webhookSecretConfigured: Boolean(config.maxWebhookSecret),
-    botNameConfigured: Boolean(config.maxBotName)
+  return {
+    status: 'ok',
+    maxEnabled: config.maxEnabled ? 'enabled' : 'disabled',
+    tokenConfigured: Boolean(config.maxClientBotToken || config.maxMasterBotToken),
+    secretConfigured: Boolean(config.maxWebhookSecret)
   };
-  if (config.maxDiagnosticsEnabled) {
-    payload.diagnostics = {
-      hasClientBotToken: Boolean(config.maxClientBotToken),
-      hasMasterBotToken: Boolean(config.maxMasterBotToken),
-      hasWebAppUrl: Boolean(config.maxWebAppUrl),
-      hasDeepLinkBaseUrl: Boolean(config.maxDeepLinkBaseUrl)
-    };
-  }
-  return payload;
 }
 
 
@@ -356,15 +405,34 @@ function createServer({ config, logger }) {
       const filters = {
         status: requestUrl.searchParams.get('status') || '',
         channel: requestUrl.searchParams.get('channel') || '',
-        requestType: requestUrl.searchParams.get('request_type') || ''
+        requestType: requestUrl.searchParams.get('request_type') || '',
+        assignedTo: requestUrl.searchParams.get('assigned_to') || '',
+        from: requestUrl.searchParams.get('from') || '',
+        to: requestUrl.searchParams.get('to') || ''
       };
-      const requests = db.listRequests({
+      let requests = db.listRequests({
         statuses: filters.status ? [filters.status] : undefined,
         channel: filters.channel || undefined,
         requestType: filters.requestType || undefined
+      });
+      requests = requests.filter((item) => {
+        if (filters.assignedTo && String(item.assignedTo || '') !== filters.assignedTo) return false;
+        const createdAtMs = Date.parse(item.createdAt || '');
+        if (filters.from && (!Number.isFinite(createdAtMs) || createdAtMs < Date.parse(filters.from))) return false;
+        if (filters.to && (!Number.isFinite(createdAtMs) || createdAtMs > Date.parse(`${filters.to}T23:59:59.999Z`))) return false;
+        return true;
       }).slice(-100).reverse();
       const requestCards = new Map(requests.map((item) => [item.id, db.getRequestCard(item.id)]));
       return sendHtml(res, 200, renderInternalRequestsPage({ requests, filters, adminId: auth.adminId, requestCards }));
+    }
+
+    if (req.method === 'GET' && /^\/internal\/requests\/[^/]+$/.test(pathname)) {
+      const auth = isInternalAuthorized(req, requestUrl, config);
+      if (!auth.ok) return sendJson(res, 403, { error: 'FORBIDDEN' });
+      const requestId = pathname.split('/')[3];
+      const card = db.getRequestCard(requestId);
+      if (!card) return sendJson(res, 404, { error: 'REQUEST_NOT_FOUND' });
+      return sendHtml(res, 200, renderInternalRequestCardPage({ adminId: auth.adminId, card }));
     }
 
     if (req.method === 'GET' && pathname === '/internal/export') {
@@ -372,9 +440,28 @@ function createServer({ config, logger }) {
       if (!auth.ok) return sendJson(res, 403, { error: 'FORBIDDEN' });
       const format = requestUrl.searchParams.get('format') === 'json' ? 'json' : 'csv';
       const statuses = (requestUrl.searchParams.get('status') || '').split(',').map((item) => item.trim()).filter(Boolean);
-      const filters = { from: requestUrl.searchParams.get('from') || '', to: requestUrl.searchParams.get('to') || '', statuses };
+      const requestTypes = (requestUrl.searchParams.get('request_type') || '').split(',').map((item) => item.trim()).filter(Boolean);
+      const sourceChannels = (requestUrl.searchParams.get('source_channel') || requestUrl.searchParams.get('channel') || '').split(',').map((item) => item.trim()).filter(Boolean);
+      const filters = { from: requestUrl.searchParams.get('from') || '', to: requestUrl.searchParams.get('to') || '', statuses, requestTypes, sourceChannels };
       const items = filterRequestsForExport(repositories.requests.list({ statuses: statuses.length ? statuses : undefined }), filters)
         .map((request) => mapRequestForExport(request, repositories.requests.getCard(request.id) || {}));
+      for (const item of items) {
+        db.recordRequestEvent({
+          requestId: item.id,
+          eventType: 'export_requested',
+          actorId: auth.adminId,
+          actorRole: 'admin',
+          actorType: 'admin',
+          metaJson: { format, filters }
+        });
+      }
+      db.createAnalyticsEvent({
+        eventType: 'export_requested',
+        channel: 'internal',
+        platform: 'internal',
+        status: 'ok',
+        metaJson: { adminId: auth.adminId, format, count: items.length, filters }
+      });
       logger.info('internal export generated', { adminId: auth.adminId, format, count: items.length, filters });
       if (format === 'json') {
         return sendText(res, 200, JSON.stringify({ items }, null, 2), 'application/json', { 'Content-Disposition': `attachment; filename="${exportFilename(format)}"` });
@@ -401,6 +488,42 @@ function createServer({ config, logger }) {
         return sendJson(res, result?.error ? 400 : 200, result);
       }
       res.writeHead(303, { Location: `/internal/requests?admin_id=${encodeURIComponent(auth.adminId)}` });
+      return res.end();
+    }
+
+    if (req.method === 'POST' && /^\/internal\/requests\/[^/]+\/assign$/.test(pathname)) {
+      const auth = isInternalAuthorized(req, requestUrl, config);
+      if (!auth.ok) return sendJson(res, 403, { error: 'FORBIDDEN' });
+      const requestId = pathname.split('/')[3];
+      const { body, invalidJson } = await readBody(req);
+      if (invalidJson) return sendJson(res, 400, { error: 'Invalid JSON payload' });
+      const result = db.updateRequestAssignment({
+        requestId,
+        assignedTo: body.assignedTo || '',
+        assignedBy: auth.adminId,
+        actorId: auth.adminId,
+        actorRole: 'admin',
+        actorType: 'admin',
+        metaJson: { source: 'internal_page' }
+      });
+      if ((req.headers['content-type'] || '').includes('application/json')) {
+        return sendJson(res, result?.error ? 400 : 200, result);
+      }
+      res.writeHead(303, { Location: `/internal/requests/${encodeURIComponent(requestId)}?admin_id=${encodeURIComponent(auth.adminId)}` });
+      return res.end();
+    }
+
+    if (req.method === 'POST' && /^\/internal\/requests\/[^/]+\/comment$/.test(pathname)) {
+      const auth = isInternalAuthorized(req, requestUrl, config);
+      if (!auth.ok) return sendJson(res, 403, { error: 'FORBIDDEN' });
+      const requestId = pathname.split('/')[3];
+      const { body, invalidJson } = await readBody(req);
+      if (invalidJson) return sendJson(res, 400, { error: 'Invalid JSON payload' });
+      const result = db.addInternalComment({ requestId, actorId: auth.adminId, actorRole: 'admin', text: body.comment || '' });
+      if ((req.headers['content-type'] || '').includes('application/json')) {
+        return sendJson(res, result ? 200 : 404, result || { error: 'REQUEST_NOT_FOUND' });
+      }
+      res.writeHead(303, { Location: `/internal/requests/${encodeURIComponent(requestId)}?admin_id=${encodeURIComponent(auth.adminId)}` });
       return res.end();
     }
 
@@ -450,7 +573,7 @@ function createServer({ config, logger }) {
       body.phone = normalizedPhone;
       if (errors.length) {
         trackAnalytics({
-          eventType: 'request_failed',
+          eventType: 'request_rejected',
           channel: body.sourceChannel === 'max_webapp' ? 'max' : 'telegram',
           platform: body.sourceChannel === 'max_webapp' ? 'max' : 'telegram',
           requestType: type,
@@ -487,16 +610,6 @@ function createServer({ config, logger }) {
           metaJson: { duplicateRequestId: duplicate.id }
         });
       }
-      trackAnalytics({
-        eventType: 'request_created',
-        channel: sourceChannel === 'max_webapp' ? 'max' : 'telegram',
-        platform: sourceChannel === 'max_webapp' ? 'max' : 'telegram',
-        requestType: type,
-        requestId: created.id,
-        clientId: client.id,
-        status: created.status,
-        metaJson: { sourceChannel }
-      });
       await duplicateToMastersChat({ config, request: created, payload: body });
       if (created.requestType === REQUEST_TYPES.COMPLAINT) {
         await duplicateToMastersChat({ config, request: created, payload: body });

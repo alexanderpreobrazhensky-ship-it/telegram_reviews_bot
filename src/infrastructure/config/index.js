@@ -17,6 +17,7 @@ function parseList(value) {
 }
 
 function loadConfig() {
+  const strictConfig = parseBoolean(process.env.CONFIG_STRICT, String(process.env.NODE_ENV || '').toLowerCase() === 'production');
   const port = parseNumber(process.env.PORT, 3000, { min: 1, max: 65535 });
   const integrationRetryMax = parseNumber(process.env.INTEGRATION_RETRY_MAX, 3, { min: 1, max: 20 });
   const integrationRetryDelaySeconds = parseNumber(process.env.INTEGRATION_RETRY_DELAY_SECONDS, 60, { min: 1, max: 3600 });
@@ -34,6 +35,38 @@ function loadConfig() {
   const masterBotAdminIds = parseList(process.env.MASTER_BOT_ADMIN_IDS);
   const maxMasterBotAdminIds = parseList(process.env.MAX_MASTER_BOT_ADMIN_IDS);
   const internalAdminWhitelist = parseList(process.env.INTERNAL_ADMIN_WHITELIST || process.env.INTERNAL_ADMIN_WHITELIST_IDS);
+
+  const requiredEnv = ['WEBAPP_URL', 'DB_SQLITE_PATH'];
+  const optionalEnv = [
+    'TELEGRAM_CLIENT_BOT_TOKEN',
+    'TELEGRAM_MASTER_BOT_TOKEN',
+    'TELEGRAM_INTEGRATION_BOT_TOKEN',
+    'MASTER_BOT_ADMIN_IDS',
+    'INTERNAL_ADMIN_WHITELIST',
+    'MAX_ENABLED',
+    'MAX_CLIENT_BOT_TOKEN',
+    'MAX_MASTER_BOT_TOKEN',
+    'MAX_WEBHOOK_SECRET',
+    'MAX_MASTER_BOT_ADMIN_IDS',
+    'MAX_WEBAPP_URL',
+    'MAX_BOT_NAME',
+    'MAX_DEEPLINK_BASE_URL',
+    'TELEGRAM_MASTERS_CHAT_ID',
+    'TELEGRAM_DEBUG_CHAT_ID',
+    'TELEGRAM_CHANNEL_URL',
+    'WEBAPP_DEDUPE_WINDOW_MS',
+    'WEBAPP_RATE_LIMIT_WINDOW_MS',
+    'WEBAPP_RATE_LIMIT_MAX',
+    'WEBHOOK_RATE_LIMIT_WINDOW_MS',
+    'WEBHOOK_RATE_LIMIT_MAX',
+    'SCHEDULER_INTERVAL_MS',
+    'SCHEDULER_BATCH_SIZE',
+    'SCHEDULER_MAX_ATTEMPTS',
+    'SCHEDULER_STUCK_TIMEOUT_MS',
+    'FEEDBACK_REQUEST_DELAY_MINUTES'
+  ];
+  const legacyEnv = ['DB_FILE_PATH', 'INTERNAL_ADMIN_WHITELIST_IDS', 'WEBAPP_TELEGRAM_CHANNEL_LINK'];
+  const knownEnv = new Set([...requiredEnv, ...optionalEnv, ...legacyEnv, 'PORT', 'NODE_ENV', 'DB_DRIVER', 'DB_URL', 'QUEUE_DRIVER', 'ONE_C_WEBHOOK_SECRET', 'ENABLE_INTEGRATION_WORKER', 'INTEGRATION_RETRY_MAX', 'INTEGRATION_RETRY_DELAY_SECONDS', 'ONE_C_SYNC_ENABLED', 'EMAIL_IMPORT_ENABLED', 'MAX_DIAGNOSTICS_ENABLED']);
 
   const config = {
     nodeEnv: process.env.NODE_ENV || 'development',
@@ -77,6 +110,9 @@ function loadConfig() {
     internalAdminWhitelist,
     maxDiagnosticsEnabled: parseBoolean(process.env.MAX_DIAGNOSTICS_ENABLED, true),
     envAudit: {
+      required: requiredEnv,
+      optional: optionalEnv,
+      legacyAccepted: legacyEnv,
       requiredMissing: [
         !process.env.WEBAPP_URL ? 'WEBAPP_URL' : null,
         !process.env.DB_SQLITE_PATH && !process.env.DB_FILE_PATH ? 'DB_SQLITE_PATH/DB_FILE_PATH' : null
@@ -85,12 +121,13 @@ function loadConfig() {
         process.env.DB_FILE_PATH ? 'DB_FILE_PATH' : null,
         process.env.INTERNAL_ADMIN_WHITELIST_IDS ? 'INTERNAL_ADMIN_WHITELIST_IDS' : null,
         process.env.WEBAPP_TELEGRAM_CHANNEL_LINK ? 'WEBAPP_TELEGRAM_CHANNEL_LINK' : null
-      ].filter(Boolean)
+      ].filter(Boolean),
+      unknownConfigured: Object.keys(process.env).filter((key) => /^(TELEGRAM|MAX|WEBAPP|DB_|QUEUE_|ONE_C_|INTEGRATION_|MASTER_BOT_|INTERNAL_ADMIN_|SCHEDULER_|FEEDBACK_|PORT|NODE_ENV)/.test(key) && !knownEnv.has(key)).sort()
     }
   };
 
-  if (!config.dbSqlitePath) {
-    throw new Error('DB_SQLITE_PATH (or legacy DB_FILE_PATH) is required');
+  if (strictConfig && config.envAudit.requiredMissing.length) {
+    throw new Error(`Missing required env: ${config.envAudit.requiredMissing.join(', ')}`);
   }
 
   return config;

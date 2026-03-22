@@ -188,6 +188,7 @@ const schemaStatements = [
     old_value TEXT,
     new_value TEXT,
     actor_type TEXT,
+    comment TEXT,
     meta_json TEXT,
     created_at TEXT NOT NULL,
     data TEXT NOT NULL,
@@ -338,6 +339,7 @@ function ensureOptionalColumns() {
   ensureColumn('request_events', 'old_value', 'TEXT');
   ensureColumn('request_events', 'new_value', 'TEXT');
   ensureColumn('request_events', 'actor_type', 'TEXT');
+  ensureColumn('request_events', 'comment', 'TEXT');
   ensureColumn('request_events', 'meta_json', 'TEXT');
   ensureColumn('analytics_events', 'channel', 'TEXT');
   ensureColumn('analytics_events', 'platform', 'TEXT');
@@ -460,10 +462,10 @@ function requestEventRowToEntity(row) {
     actor,
     oldValue: row.old_value || data.oldValue || null,
     newValue: row.new_value || data.newValue || null,
+    comment: row.comment || data.comment || comment,
     metaJson: parseJson(row.meta_json, data.metaJson || {}),
     oldStatus,
     newStatus,
-    comment,
     createdAt: row.created_at,
     parentEventId: row.parent_event_id,
     fromStatus: oldStatus,
@@ -631,7 +633,7 @@ function readStore() {
     staffUsers: listRows('staff_users').map(staffUserRowToEntity),
     requestEvents: requestEvents.map(requestEventRowToEntity),
     requestStatusHistory: requestEvents.filter((item) => ['request_status_changed', 'status_changed'].includes(item.event_type)).map(requestEventRowToEntity),
-    requestInternalComments: requestEvents.filter((item) => item.event_type === 'request_internal_comment').map(requestEventRowToEntity),
+    requestInternalComments: requestEvents.filter((item) => ['request_internal_comment', 'comment_added'].includes(item.event_type)).map(requestEventRowToEntity),
     clientInternalNotes: requestEvents.filter((item) => item.event_type === 'client_internal_note').map(requestEventRowToEntity),
     masterActions: requestEvents.filter((item) => item.event_type === 'master_action').map(requestEventRowToEntity),
     qualityCases: listRows('quality_cases').map(qualityCaseRowToEntity),
@@ -746,10 +748,10 @@ function insertRequestEvent(event) {
   getDb().prepare(`
     INSERT OR REPLACE INTO request_events (
       id, event_scope, event_type, request_id, client_id, quality_case_id,
-      actor_id, actor_role, old_value, new_value, actor_type, meta_json, created_at, data, parent_event_id
+      actor_id, actor_role, old_value, new_value, actor_type, comment, meta_json, created_at, data, parent_event_id
     ) VALUES (
       @id, @event_scope, @event_type, @request_id, @client_id, @quality_case_id,
-      @actor_id, @actor_role, @old_value, @new_value, @actor_type, @meta_json, @created_at, @data, @parent_event_id
+      @actor_id, @actor_role, @old_value, @new_value, @actor_type, @comment, @meta_json, @created_at, @data, @parent_event_id
     )
   `).run({
     id: entity.id,
@@ -763,6 +765,7 @@ function insertRequestEvent(event) {
     old_value: entity.oldValue ?? null,
     new_value: entity.newValue ?? null,
     actor_type: entity.actorType || entity.actorRole || null,
+    comment: entity.comment ?? null,
     meta_json: JSON.stringify(entity.metaJson || {}),
     created_at: entity.createdAt || nowIso(),
     data: serializeEntity(entity),
@@ -1236,6 +1239,18 @@ function createRequest({ clientId, vehicleId, requestType, description, sourceCh
       metaJson: { target: 'one_c', mappingVersion: 1 },
       createdAt
     });
+    insertOrReplaceAnalyticsEvent({
+      id: crypto.randomUUID(),
+      eventType: 'request_created',
+      channel: String(sourceChannel || '').startsWith('max') ? 'max' : 'telegram',
+      platform: String(sourceChannel || '').startsWith('max') ? 'max' : 'telegram',
+      requestType,
+      requestId: request.id,
+      clientId: request.clientId,
+      status: normalizedStatus,
+      metaJson: { sourceChannel },
+      createdAt
+    });
   });
   tx();
   return request;
@@ -1686,6 +1701,18 @@ function updateRequestStatus({ requestId, toStatus, actorId, actorRole, lostReas
       payload: { fromStatus, toStatus: nextStatus, comment: statusComment },
       createdAt: nowIso()
     });
+    insertOrReplaceAnalyticsEvent({
+      id: crypto.randomUUID(),
+      eventType: 'status_changed',
+      channel: String(request.sourceChannel || '').startsWith('max') ? 'max' : 'telegram',
+      platform: String(request.sourceChannel || '').startsWith('max') ? 'max' : 'telegram',
+      requestType: request.requestType,
+      requestId,
+      clientId: request.clientId,
+      status: nextStatus,
+      metaJson: { fromStatus, toStatus: nextStatus, actorId, actorRole, comment: statusComment },
+      createdAt: nowIso()
+    });
 
     if (nextStatus === 'done') {
       const existingTask = getDb().prepare(`
@@ -1731,8 +1758,8 @@ function updateRequestAssignment({ requestId, assignedTo, assignedBy = null, act
   const oldValue = request.assignedTo || null;
   request.assignedTo = normalizedAssignedTo;
   request.assignedMasterId = normalizedAssignedTo;
-  request.assignedBy = assignedBy || actorId || actorRole || 'system';
-  request.assignedAt = nowIso();
+  request.assignedBy = normalizedAssignedTo ? (assignedBy || actorId || actorRole || 'system') : null;
+  request.assignedAt = normalizedAssignedTo ? nowIso() : null;
   request.updatedAt = nowIso();
 
   const event = {
@@ -1746,6 +1773,7 @@ function updateRequestAssignment({ requestId, assignedTo, assignedBy = null, act
     actorType: actorType || actorRole || 'system',
     oldValue,
     newValue: normalizedAssignedTo,
+    comment: normalizedAssignedTo ? null : 'assignment_cleared',
     metaJson: {
       assignedAt: request.assignedAt,
       assignedBy: request.assignedBy,
@@ -1769,6 +1797,18 @@ function updateRequestAssignment({ requestId, assignedTo, assignedBy = null, act
       payload: { oldValue, assignedTo: normalizedAssignedTo, assignedBy: request.assignedBy },
       createdAt: nowIso()
     });
+    insertOrReplaceAnalyticsEvent({
+      id: crypto.randomUUID(),
+      eventType: 'assignment_changed',
+      channel: String(request.sourceChannel || '').startsWith('max') ? 'max' : 'telegram',
+      platform: String(request.sourceChannel || '').startsWith('max') ? 'max' : 'telegram',
+      requestType: request.requestType,
+      requestId,
+      clientId: request.clientId,
+      status: request.status,
+      metaJson: { oldValue, newValue: normalizedAssignedTo, assignedBy: request.assignedBy, assignedAt: request.assignedAt },
+      createdAt: nowIso()
+    });
   });
   tx();
   return { request, event };
@@ -1781,11 +1821,13 @@ function addInternalComment({ requestId, actorId, actorRole, text }) {
   const comment = {
     id: crypto.randomUUID(),
     eventScope: 'request',
-    eventType: 'request_internal_comment',
+    eventType: 'comment_added',
     requestId,
     clientId: request.clientId,
     actorId,
     actorRole,
+    actorType: actorRole || 'system',
+    comment: text,
     text,
     createdAt: nowIso()
   };

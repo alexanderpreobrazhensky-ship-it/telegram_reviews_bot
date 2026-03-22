@@ -15,6 +15,9 @@ test('config loads defaults', () => {
   assert.equal(Object.hasOwn(config, 'maxEnabled'), true);
   assert.equal(Object.hasOwn(config, 'maxClientBotToken'), true);
   assert.equal(Object.hasOwn(config, 'maxMasterBotAdminIds'), true);
+  assert.equal(Array.isArray(config.envAudit.required), true);
+  assert.equal(Array.isArray(config.envAudit.optional), true);
+  assert.equal(Array.isArray(config.envAudit.legacyAccepted), true);
 });
 
 
@@ -52,6 +55,27 @@ test('config reads MAX and DB path related env values', () => {
   const config = loadConfig();
   assert.equal(config.maxEnabled, true);
   assert.equal(process.env.DB_FILE_PATH, '/tmp/telegram-reviews-bot/db.json');
+
+  for (const [key, value] of Object.entries(original)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+});
+
+test('config fails fast when required env is missing', () => {
+  const original = {
+    CONFIG_STRICT: process.env.CONFIG_STRICT,
+    WEBAPP_URL: process.env.WEBAPP_URL,
+    DB_SQLITE_PATH: process.env.DB_SQLITE_PATH,
+    DB_FILE_PATH: process.env.DB_FILE_PATH
+  };
+
+  process.env.CONFIG_STRICT = 'true';
+  delete process.env.WEBAPP_URL;
+  delete process.env.DB_SQLITE_PATH;
+  delete process.env.DB_FILE_PATH;
+
+  assert.throws(() => loadConfig(), /Missing required env/);
 
   for (const [key, value] of Object.entries(original)) {
     if (value === undefined) delete process.env[key];

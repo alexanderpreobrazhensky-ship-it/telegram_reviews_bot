@@ -1,5 +1,18 @@
 
 const REQUEST_STATUSES = Object.freeze(['new', 'assigned', 'awaiting_client', 'scheduled', 'in_service', 'done', 'cancelled']);
+const REQUEST_EVENT_TYPES = Object.freeze(['created', 'status_changed', 'assigned', 'comment_added', 'duplicate_detected', 'export_requested']);
+const ANALYTICS_EVENT_TYPES = Object.freeze([
+  'webapp_opened',
+  'form_started',
+  'invalid_phone',
+  'submit_attempt',
+  'request_created',
+  'request_rejected',
+  'status_changed',
+  'assignment_changed',
+  'max_webhook_received',
+  'max_webhook_rejected'
+]);
 const ASSIGNMENT_ID_PATTERN = /^[a-zA-Z0-9:_-]{2,128}$/;
 
 function resolveStrictClientPhone(body = {}) {
@@ -57,12 +70,14 @@ function validateRequestStatus(status) {
 
 function validateAssignment(assignedTo) {
   const value = String(assignedTo || '').trim();
-  if (!value) return { ok: false, error: 'ASSIGNED_TO_REQUIRED' };
+  if (!value) return { ok: true, value: null };
   if (!ASSIGNMENT_ID_PATTERN.test(value)) return { ok: false, error: 'ASSIGNED_TO_INVALID' };
   return { ok: true, value };
 }
 
 module.exports = {
+  ANALYTICS_EVENT_TYPES,
+  REQUEST_EVENT_TYPES,
   REQUEST_STATUSES,
   validateClientRequestPayload,
   validateRequestStatus,
