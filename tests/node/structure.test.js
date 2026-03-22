@@ -6,7 +6,7 @@ const requiredPaths = [
   'app.js',
   'package.json',
   'readme/README.md',
-  'audit/REPOSITORY_FULL_AUDIT.md',
+  'audit/MASTER_AUDIT.md',
   'src/core/domain',
   'src/core/application',
   'src/interfaces/client_bot',
