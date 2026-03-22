@@ -1,7 +1,7 @@
-const REQUEST_STATUSES = Object.freeze(['new', 'in_progress', 'processed', 'in_service', 'completed', 'error']);
-const REQUEST_SUBSTATUSES = Object.freeze(['recorded', 'consulted', 'spam', 'waiting_decision', 'rejected']);
+const REQUEST_STATUSES = Object.freeze(['new', 'in_progress', 'processed', 'in_service', 'waiting_decision', 'completed', 'archived', 'error']);
+const REQUEST_SUBSTATUSES = Object.freeze(['booked', 'consulted', 'spam', 'waiting_decision', 'rejected']);
 const ARCHIVED_SUBSTATUSES = new Set(['spam', 'rejected']);
-const TERMINAL_STATUSES = new Set(['completed']);
+const TERMINAL_STATUSES = new Set(['completed', 'archived']);
 const IMMUTABLE_SUBSTATUSES = new Set(['spam', 'rejected']);
 const FOLLOWUP_SUBSTATUSES = new Set(['waiting_decision', 'consulted']);
 const REQUEST_EVENT_TYPES = Object.freeze([
@@ -40,12 +40,12 @@ const STATUS_ALIASES = Object.freeze({
   done: 'completed',
   cancelled: 'processed',
   lost: 'processed',
-  archived: 'completed'
+  archived: 'archived'
 });
 
 const SUBSTATUS_ALIASES = Object.freeze({
-  booked: 'recorded',
-  recorded: 'recorded',
+  booked: 'booked',
+  recorded: 'booked',
   consulted: 'consulted',
   consultation: 'consulted',
   spam: 'spam',
@@ -57,12 +57,14 @@ const SUBSTATUS_ALIASES = Object.freeze({
 });
 
 const STATUS_TRANSITIONS = Object.freeze({
-  new: ['in_progress', 'processed', 'error'],
-  in_progress: ['processed', 'in_service', 'error'],
-  processed: ['in_progress', 'in_service', 'completed', 'error'],
-  in_service: ['completed', 'error', 'processed'],
+  new: ['in_progress', 'processed', 'waiting_decision', 'error', 'archived'],
+  in_progress: ['processed', 'in_service', 'waiting_decision', 'error', 'archived'],
+  processed: ['in_progress', 'in_service', 'waiting_decision', 'completed', 'archived', 'error'],
+  in_service: ['completed', 'error', 'processed', 'archived'],
+  waiting_decision: ['in_progress', 'processed', 'in_service', 'completed', 'archived', 'error'],
   completed: [],
-  error: ['in_progress', 'processed']
+  archived: [],
+  error: ['in_progress', 'processed', 'waiting_decision', 'archived']
 });
 
 function resolveStrictClientPhone(body = {}) {
@@ -157,10 +159,10 @@ function normalizeLegacyRequestState({ status, substatus = null, comment = null,
     normalizedArchived = true;
   }
   if (status === 'awaiting_client' || status === 'waiting_data') normalizedStatus = 'error';
-  if (status === 'scheduled' && !normalizedSubstatus) normalizedSubstatus = 'recorded';
+  if (status === 'scheduled' && !normalizedSubstatus) normalizedSubstatus = 'booked';
   if (status === 'done' || status === 'archived') normalizedArchived = true;
   if (ARCHIVED_SUBSTATUSES.has(normalizedSubstatus)) normalizedArchived = true;
-  if (normalizedStatus === 'completed') normalizedArchived = true;
+  if (normalizedStatus === 'completed' || normalizedStatus === 'archived') normalizedArchived = true;
   return { status: normalizedStatus, substatus: normalizedSubstatus, archived: normalizedArchived, comment: comment || null };
 }
 
@@ -182,6 +184,7 @@ function canTransitionRequest({ fromStatus, fromSubstatus = null, toStatus, toSu
     return { ok: false, error: 'INVALID_TRANSITION' };
   }
   if (nextStatus === 'processed' && !nextSubstatus) return { ok: false, error: 'SUBSTATUS_REQUIRED' };
+  if (nextStatus === 'waiting_decision' && nextSubstatus) return { ok: false, error: 'INVALID_SUBSTATUS' };
   if (nextStatus !== 'processed' && nextSubstatus && !REQUEST_SUBSTATUSES.includes(nextSubstatus)) return { ok: false, error: 'INVALID_SUBSTATUS' };
   return { ok: true, noop: false, fromStatus: currentStatus, toStatus: nextStatus, fromSubstatus: currentSubstatus, toSubstatus: nextSubstatus };
 }

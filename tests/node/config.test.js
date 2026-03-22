@@ -15,6 +15,7 @@ test('config loads defaults', () => {
   assert.equal(Object.hasOwn(config, 'maxEnabled'), true);
   assert.equal(Object.hasOwn(config, 'maxClientBotToken'), true);
   assert.equal(Object.hasOwn(config, 'maxMasterBotAdminIds'), true);
+  assert.equal(Object.hasOwn(config, 'ai'), true);
   assert.equal(Array.isArray(config.envAudit.required), true);
   assert.equal(Array.isArray(config.envAudit.optional), true);
   assert.equal(Array.isArray(config.envAudit.legacyAccepted), true);

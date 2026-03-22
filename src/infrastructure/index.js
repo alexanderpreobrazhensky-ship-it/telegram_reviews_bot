@@ -1,4 +1,5 @@
 module.exports = {
+  ai: require('./ai'),
   config: require('./config'),
   db: require('./db'),
   logger: require('./logging/logger'),

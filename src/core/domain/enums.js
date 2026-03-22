@@ -15,12 +15,14 @@ const REQUEST_STATUSES = Object.freeze({
   IN_PROGRESS: 'in_progress',
   PROCESSED: 'processed',
   IN_SERVICE: 'in_service',
+  WAITING_DECISION: 'waiting_decision',
   COMPLETED: 'completed',
+  ARCHIVED: 'archived',
   ERROR: 'error'
 });
 
 const REQUEST_SUBSTATUSES = Object.freeze({
-  RECORDED: 'recorded',
+  BOOKED: 'booked',
   CONSULTED: 'consulted',
   SPAM: 'spam',
   WAITING_DECISION: 'waiting_decision',
