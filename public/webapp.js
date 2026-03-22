@@ -7,7 +7,7 @@
   const startAppPayload = params.get('startapp') || '';
   const channelLink = window.__WEBAPP_TELEGRAM_CHANNEL_LINK__ || '#';
   const logoSrc = '/logo.png';
-  const PHONE_HINT = 'Введите 10 цифр';
+  const PHONE_HINT = 'Введите корректный номер (10 цифр)';
   const PHONE_MAX_LENGTH = 10;
   let phoneValidityState = null;
   let nativeContactState = null;
@@ -36,170 +36,72 @@
     data_change_request: ['fullName', 'phone', 'changeDetails']
   };
 
-  function extractPhoneDigits(value) {
-    return String(value || '').replace(/\D/g, '');
-  }
-
-  function stripRussianPrefix(digits) {
-    if (digits.length >= PHONE_MAX_LENGTH + 1 && /^[78]/.test(digits)) return digits.slice(1);
-    return digits;
-  }
-
-  function sanitizePhoneDigits(value, options = {}) {
-    const digits = stripRussianPrefix(extractPhoneDigits(value));
-    if (!digits) return '';
-    if (options.truncate === false) return digits;
-    return digits.slice(0, PHONE_MAX_LENGTH);
+  function normalizePhone(value) {
+    return String(value || '').replace(/\D/g, '').slice(0, PHONE_MAX_LENGTH);
   }
 
   function normalizePhone10(value) {
-    const digits = extractPhoneDigits(value);
-    if (!digits) return '';
-    if (digits.length === PHONE_MAX_LENGTH) return digits;
-    if (digits.length === PHONE_MAX_LENGTH + 1 && /^[78]/.test(digits)) return digits.slice(1);
-    return digits;
-  }
-
-  function normalizePhoneInputValue(value) {
-    return sanitizePhoneDigits(value);
+    return normalizePhone(value);
   }
 
   function onlyPhoneDigits(value) {
-    return normalizePhoneInputValue(value);
-  }
-
-  function countDigitsBeforeCaret(value, caret) {
-    const safeValue = String(value || '');
-    const safeCaret = Math.max(0, Math.min(Number(caret) || 0, safeValue.length));
-    return normalizePhoneInputValue(safeValue.slice(0, safeCaret)).length;
+    return normalizePhone(value);
   }
 
   function formatPhoneMask(rawValue) {
-    const digits = normalizePhoneInputValue(rawValue);
+    const digits = normalizePhone(rawValue);
     return { masked: digits, digits };
-  }
-
-  function phoneDigitIndexFromCaret(caret) {
-    return Math.max(0, Math.min(PHONE_MAX_LENGTH, Number(caret) || 0));
-  }
-
-  function phoneCaretFromDigitIndex(index) {
-    return phoneDigitIndexFromCaret(index);
-  }
-
-  function applyPhoneEdit(rawValue, selection, inputType, text) {
-    const currentDigits = normalizePhoneInputValue(rawValue);
-    const start = phoneCaretFromDigitIndex(selection?.start);
-    const end = phoneCaretFromDigitIndex(selection?.end);
-    const replacementDigits = sanitizePhoneDigits(text, { truncate: false });
-    let nextDigits = currentDigits;
-    let caret = start;
-
-    if (inputType === 'deleteContentBackward') {
-      if (start !== end) {
-        nextDigits = `${currentDigits.slice(0, start)}${currentDigits.slice(end)}`;
-        caret = start;
-      } else if (start > 0) {
-        nextDigits = `${currentDigits.slice(0, start - 1)}${currentDigits.slice(start)}`;
-        caret = start - 1;
-      }
-    } else if (inputType === 'deleteContentForward') {
-      if (start !== end) {
-        nextDigits = `${currentDigits.slice(0, start)}${currentDigits.slice(end)}`;
-      } else {
-        nextDigits = `${currentDigits.slice(0, start)}${currentDigits.slice(start + 1)}`;
-      }
-      caret = start;
-    } else if (inputType === 'deleteByCut') {
-      nextDigits = `${currentDigits.slice(0, start)}${currentDigits.slice(end)}`;
-      caret = start;
-    } else {
-      nextDigits = `${currentDigits.slice(0, start)}${replacementDigits}${currentDigits.slice(end)}`;
-      caret = start + replacementDigits.length;
-    }
-
-    nextDigits = normalizePhoneInputValue(nextDigits);
-    return {
-      digits: nextDigits,
-      caret: Math.min(caret, nextDigits.length)
-    };
   }
 
   function createPhoneInputController(input, options = {}) {
     if (!input) return null;
 
     const onChange = typeof options.onChange === 'function' ? options.onChange : () => {};
-    let digits = normalizePhoneInputValue(input.value);
 
-    function render(caret = digits.length) {
-      digits = normalizePhoneInputValue(digits);
-      input.value = digits;
+    function sync() {
+      const digits = normalizePhone(input.value);
+      if (input.value !== digits) input.value = digits;
       input.dataset.phoneDigits = digits;
-      if (typeof input.setSelectionRange === 'function') {
-        const nextCaret = phoneCaretFromDigitIndex(Math.min(caret, digits.length));
-        input.setSelectionRange(nextCaret, nextCaret);
-      }
       onChange(digits);
-    }
-
-    function syncFromDom() {
-      const caret = countDigitsBeforeCaret(input.value, input.selectionStart);
-      digits = normalizePhoneInputValue(input.value);
-      render(caret);
-    }
-
-    function applyEdit(inputType, text = '') {
-      const result = applyPhoneEdit(digits, {
-        start: input.selectionStart,
-        end: input.selectionEnd
-      }, inputType, text);
-      digits = result.digits;
-      render(result.caret);
-    }
-
-    function onBeforeInput(event) {
-      if (event.isComposing || !event.cancelable) return;
-      const supported = new Set(['insertText', 'insertFromPaste', 'deleteContentBackward', 'deleteContentForward']);
-      if (!supported.has(event.inputType)) return;
-      event.preventDefault();
-      applyEdit(event.inputType, event.data || '');
+      return digits;
     }
 
     function onInput() {
-      syncFromDom();
+      sync();
     }
 
     function onPaste(event) {
-      if (!event.clipboardData && !window.clipboardData) return;
+      const clipboard = event.clipboardData || window.clipboardData;
+      if (!clipboard) return;
       event.preventDefault();
-      applyEdit('insertFromPaste', (event.clipboardData || window.clipboardData).getData('text') || '');
+      const digits = normalizePhone(clipboard.getData('text') || '');
+      if (typeof input.setRangeText === 'function') {
+        const start = input.selectionStart ?? input.value.length;
+        const end = input.selectionEnd ?? start;
+        input.setRangeText(digits, start, end, 'end');
+      } else {
+        const start = input.selectionStart ?? input.value.length;
+        const end = input.selectionEnd ?? start;
+        input.value = `${input.value.slice(0, start)}${digits}${input.value.slice(end)}`;
+      }
+      sync();
     }
 
-    function onCut(event) {
-      event.preventDefault();
-      applyEdit('deleteByCut');
-    }
-
-    input.addEventListener('beforeinput', onBeforeInput);
     input.addEventListener('input', onInput);
     input.addEventListener('paste', onPaste);
-    input.addEventListener('cut', onCut);
 
-    render(digits.length);
+    sync();
 
     return {
-      getDigits: () => digits,
+      getDigits: () => normalizePhone(input.value),
       setDigits(value) {
-        digits = normalizePhoneInputValue(value);
-        render(digits.length);
+        input.value = normalizePhone(value);
+        sync();
       },
-      syncFromDom,
-      applyEdit,
+      syncFromDom: sync,
       destroy() {
-        input.removeEventListener('beforeinput', onBeforeInput);
         input.removeEventListener('input', onInput);
         input.removeEventListener('paste', onPaste);
-        input.removeEventListener('cut', onCut);
       }
     };
   }
@@ -262,7 +164,7 @@
       return `<fieldset data-field="wasClientBefore"><legend>${label(name)}</legend><label><input type="radio" name="wasClientBefore" value="yes"> Да</label><label><input type="radio" name="wasClientBefore" value="no"> Нет</label><small class="field-error"></small></fieldset>`;
     }
     if (name === 'description' || name === 'question' || name === 'changeDetails') return `<label data-field="${name}">${label(name)}<textarea name="${name}"></textarea><small class="field-error"></small></label>`;
-    if (name === 'phone') return `<label data-field="phone">Телефон<input name="phone" inputmode="tel" autocomplete="tel" maxlength="10" placeholder="9991234567"/><button type="button" class="inline native-contact-btn" hidden>Заполнить из профиля</button><small class="hint">Введите 10 цифр без кода страны.</small><small class="field-error"></small></label>`;
+    if (name === 'phone') return `<label data-field="phone">Телефон<input name="phone" inputmode="tel" autocomplete="tel" maxlength="10" placeholder="9999999999"/><button type="button" class="inline native-contact-btn" hidden>Заполнить из профиля</button><small class="hint">Введите 10 цифр без кода страны.</small><small class="field-error"></small></label>`;
     if (name === 'visitDate') return `<label data-field="visitDate">${label(name)}<input type="date" name="visitDate"/><small class="field-error"></small></label>`;
     return `<label data-field="${name}">${label(name)}<input name="${name}"/><small class="field-error"></small></label>`;
   }
@@ -344,7 +246,7 @@
     const nextState = isValid ? 'valid' : (String(digits || '').length ? 'invalid' : 'empty');
     if (nextState !== phoneValidityState) {
       if (nextState === 'valid') track('phone_valid');
-      if (nextState === 'invalid') track('phone_invalid', { status: 'invalid_phone', metaJson: { digitsLength: String(digits || '').length, path } });
+      if (nextState === 'invalid') track('invalid_phone', { status: 'invalid_phone', metaJson: { digitsLength: String(digits || '').length, path } });
       phoneValidityState = nextState;
     }
 
@@ -388,7 +290,7 @@
       const response = await fetch(cfg.endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'REQUEST_FAILED');
-      track('request_created', { requestType: cfg.type, requestId: data.id, status: 'created' });
+      track('submit_success', { requestType: cfg.type, requestId: data.id, status: 'created' });
       renderResult(true, data.id);
     } catch {
       track('request_failed', { requestType: cfg.type, status: 'client_error' });
@@ -397,7 +299,7 @@
   }
 
   async function renderRequests() {
-    mount.innerHTML = '<section><img class="brand-logo" src="/logo.png" alt="logo"/><h2>Мои обращения</h2><p><label data-field="phone"><input id="phone" inputmode="tel" autocomplete="tel" maxlength="10" placeholder="9991234567"/><small class="field-error"></small></label> <button id="load" class="inline">Показать</button></p><ul id="list"></ul></section>'; 
+    mount.innerHTML = '<section><img class="brand-logo" src="/logo.png" alt="logo"/><h2>Мои обращения</h2><p><label data-field="phone"><input id="phone" inputmode="tel" autocomplete="tel" maxlength="10" placeholder="9999999999"/><small class="field-error"></small></label> <button id="load" class="inline">Показать</button></p><ul id="list"></ul></section>'; 
     const input = document.getElementById('phone');
     const error = mount.querySelector('[data-field="phone"] .field-error');
     const phoneMask = createPhoneInputController(input, {
@@ -450,12 +352,10 @@
 
   window.__WEBAPP_TEST_API__ = {
     PHONE_HINT,
+    normalizePhone,
     onlyPhoneDigits,
     normalizePhone10,
     formatPhoneMask,
-    phoneDigitIndexFromCaret,
-    phoneCaretFromDigitIndex,
-    applyPhoneEdit,
     createPhoneInputController,
     validatePayload
   };

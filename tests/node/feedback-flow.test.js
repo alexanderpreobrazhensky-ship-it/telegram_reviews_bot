@@ -45,7 +45,7 @@ test('processed request creates feedback task and low feedback creates quality c
     const reqResponse = await fetch(`${base}/api/client/requests/service`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ fullName: 'Клиент Фидбек', phone: '+70000000100', telegramId, wasClientBefore: 'yes', brand: 'Lada', model: 'Vesta', year: '2020', vin: 'VIN-FB', description: 'Нужен ремонт' })
+      body: JSON.stringify({ fullName: 'Клиент Фидбек', phone: '0000000100', telegramId, wasClientBefore: 'yes', brand: 'Lada', model: 'Vesta', year: '2020', vin: 'VIN-FB', description: 'Нужен ремонт' })
     });
     const request = await reqResponse.json();
 

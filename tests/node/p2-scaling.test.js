@@ -94,7 +94,7 @@ test('p2 native contact payload is accepted by request endpoint', async () => {
       body: JSON.stringify({
         fullName: 'Native Contact Client',
         phone: '',
-        nativeContact: { phoneNumber: '+7 (999) 555-44-33', source: 'max_webapp_requestContact' },
+        nativeContact: { phoneNumber: '9995554433', source: 'max_webapp_requestContact' },
         wasClientBefore: 'yes',
         brand: 'Kia',
         model: 'Rio',

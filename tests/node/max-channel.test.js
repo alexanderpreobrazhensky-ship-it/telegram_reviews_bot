@@ -101,7 +101,7 @@ test('MAX master bot enforces access, works with roles and sends clarification f
 
     await post(base, '/api/client/requests/service', {
       fullName: 'Клиент MAX WebApp',
-      phone: '+79990000067',
+      phone: '9990000067',
       wasClientBefore: 'yes',
       brand: 'Lada',
       model: 'Vesta',

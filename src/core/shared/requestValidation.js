@@ -1,7 +1,28 @@
-const { isValidPhone10, resolvePhoneInput } = require('./phone');
 
 const REQUEST_STATUSES = Object.freeze(['new', 'assigned', 'awaiting_client', 'scheduled', 'in_service', 'done', 'cancelled']);
 const ASSIGNMENT_ID_PATTERN = /^[a-zA-Z0-9:_-]{2,128}$/;
+
+function resolveStrictClientPhone(body = {}) {
+  const candidates = [
+    body.phone,
+    body.phoneNumber,
+    body.nativeContact?.phoneNumber,
+    body.nativeContact?.phone,
+    body.contact?.phoneNumber,
+    body.contact?.phone,
+    body.telegramContact?.phone_number,
+    body.maxContact?.phoneNumber
+  ];
+
+  for (const value of candidates) {
+    if (value === undefined || value === null) continue;
+    const normalizedValue = String(value).trim();
+    if (!normalizedValue) continue;
+    return normalizedValue;
+  }
+
+  return '';
+}
 
 function validateClientRequestPayload(body = {}, type) {
   const errors = [];
@@ -13,19 +34,17 @@ function validateClientRequestPayload(body = {}, type) {
     data_change_request: ['fullName', 'phone', 'changeDetails']
   };
 
-  const phone = resolvePhoneInput(body);
+  const phone = resolveStrictClientPhone(body);
   for (const field of requiredByType[type] || []) {
     if (field === 'phone') {
-      if (!isValidPhone10(phone)) errors.push('phone must normalize to exactly 10 digits without +7/8');
+      if (!/^\d{10}$/.test(phone)) errors.push('phone must contain exactly 10 digits');
       continue;
     }
     if (!String(body[field] || '').trim()) errors.push(`${field} is required`);
   }
 
-  if ((requiredByType[type] || []).includes('phone') && !isValidPhone10(phone)) {
-    if (!errors.includes('phone must normalize to exactly 10 digits without +7/8')) {
-      errors.push('phone must normalize to exactly 10 digits without +7/8');
-    }
+  if ((requiredByType[type] || []).includes('phone') && !/^\d{10}$/.test(phone) && !errors.includes('phone must contain exactly 10 digits')) {
+    errors.push('phone must contain exactly 10 digits');
   }
 
   return { errors, normalizedPhone: phone };

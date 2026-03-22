@@ -131,7 +131,7 @@ test('integration flow survives restart with sqlite persistence', async () => wi
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       fullName: 'Рестарт Клиент',
-      phone: '+79990000009',
+      phone: '9990000009',
       wasClientBefore: 'yes',
       brand: 'Toyota',
       model: 'Camry',
