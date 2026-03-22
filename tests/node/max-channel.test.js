@@ -119,12 +119,12 @@ test('MAX master bot enforces access, works with roles and sends clarification f
     assert.equal(list.data.items.length, 1);
 
     const ask = await post(base, '/max/master_bot/webhook', { message: { body: { text: `/ask_client ${list.data.items[0].id} Уточните VIN` }, chat_id: 'staff-chat-2', from: { user_id: 'mx-master-2', first_name: 'Master' } } }, webhookHeaders);
-    assert.equal(ask.data.ok, true);
-    assert.equal(ask.data.channel, 'max');
+    assert.equal(ask.data.error, 'CLIENT_MESSAGE_DELIVERY_FAILED');
 
     const state = db.readStore();
     assert.equal(state.staffUsers.some((item) => item.maxId === 'mx-master-2' && item.role === 'master'), true);
     assert.equal(state.communicationEvents.some((item) => item.payload?.action === 'client_clarification_requested' && item.channel === 'max' && item.direction === 'outbound'), true);
+    assert.equal(state.requests.some((item) => item.id === list.data.items[0].id && item.status === 'error'), true);
   }, { MAX_ENABLED: 'true', MAX_CLIENT_BOT_TOKEN: 'max-client-token', MAX_MASTER_BOT_TOKEN: 'max-master-token', MAX_WEBHOOK_SECRET: 'secret-max', MAX_MASTER_BOT_ADMIN_IDS: 'mx-admin-1' });
 });
 

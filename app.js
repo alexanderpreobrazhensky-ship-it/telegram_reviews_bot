@@ -70,6 +70,29 @@ function bootstrap() {
           payload: { action: 'feedback_request_sent', taskId: task.id }
         });
       },
+      async waiting_decision_followup(task) {
+        const requestId = task.payload?.requestId;
+        if (!requestId) throw new Error('REQUEST_ID_REQUIRED');
+        const result = db.reactivateWaitingDecisionRequest({ requestId, actorId: 'scheduler', actorRole: 'system' });
+        if (!result?.request) throw new Error('REQUEST_NOT_WAITING_DECISION');
+        const requestCard = db.getRequestCard(requestId);
+        const master = requestCard?.assignedMaster;
+        if (master?.telegramId && config.telegramMasterBotToken) {
+          await sendChannelMessage({
+            channel: 'telegram',
+            token: config.telegramMasterBotToken,
+            recipientId: Number(master.telegramId),
+            text: `Заявка ${requestId} возвращена в работу после статуса ждём решения.`
+          });
+        } else if (master?.maxId && config.maxMasterBotToken) {
+          await sendChannelMessage({
+            channel: 'max',
+            token: config.maxMasterBotToken,
+            recipientId: master.maxId,
+            text: `Заявка ${requestId} возвращена в работу после статуса ждём решения.`
+          });
+        }
+      },
       async quality_followup() {},
       async recommendation_reminder() {},
       async maintenance_reminder() {}

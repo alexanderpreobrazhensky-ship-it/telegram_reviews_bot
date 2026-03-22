@@ -72,28 +72,33 @@ test('status transitions and lost reason validation work', async () => {
 
     const assigned = await sendMaster(base, `/set_status ${reqA.id} assigned`);
     assert.equal(assigned.ok, true);
-    assert.equal(assigned.request.status, 'assigned');
+    assert.equal(assigned.request.status, 'in_progress');
 
-    const waiting = await sendMaster(base, `/set_status ${reqA.id} awaiting_client`);
+    const waiting = await sendMaster(base, `/set_status ${reqA.id} processed waiting_decision`);
     assert.equal(waiting.ok, true);
-    assert.equal(waiting.request.status, 'awaiting_client');
+    assert.equal(waiting.request.status, 'processed');
+    assert.equal(waiting.request.substatus, 'waiting_decision');
+
+    const inProgressAgain = await sendMaster(base, `/set_status ${reqA.id} in_progress`);
+    assert.equal(inProgressAgain.ok, true);
 
     const inService = await sendMaster(base, `/set_status ${reqA.id} in_service`);
     assert.equal(inService.ok, true);
 
     const done = await sendMaster(base, `/set_status ${reqA.id} done`);
     assert.equal(done.ok, true);
-    assert.equal(done.request.status, 'done');
+    assert.equal(done.request.status, 'completed');
 
     const assignedB = await sendMaster(base, `/set_status ${reqB.id} assigned`);
     assert.equal(assignedB.ok, true);
-    const cancelledInvalid = await sendMaster(base, `/set_status ${reqB.id} cancelled`);
+    const cancelledInvalid = await sendMaster(base, `/set_status ${reqB.id} processed rejected`);
     assert.equal(cancelledInvalid.ok, false);
-    assert.equal(cancelledInvalid.error, 'CANCELLATION_COMMENT_REQUIRED');
+    assert.equal(cancelledInvalid.error, 'COMMENT_REQUIRED');
 
-    const cancelledValid = await sendMaster(base, `/set_status ${reqB.id} cancelled клиент не ответил`);
+    const cancelledValid = await sendMaster(base, `/set_status ${reqB.id} processed rejected клиент не ответил`);
     assert.equal(cancelledValid.ok, true);
-    assert.equal(cancelledValid.request.status, 'cancelled');
+    assert.equal(cancelledValid.request.status, 'processed');
+    assert.equal(cancelledValid.request.substatus, 'rejected');
   });
 });
 

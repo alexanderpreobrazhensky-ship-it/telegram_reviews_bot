@@ -2,7 +2,15 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const Database = require('better-sqlite3');
-const { validateAssignment } = require('../../core/shared/requestValidation');
+const {
+  validateAssignment,
+  validateRequestStatus,
+  validateRequestSubstatus,
+  normalizeRequestStatus,
+  normalizeLegacyRequestState,
+  canTransitionRequest,
+  isArchivedStatus
+} = require('../../core/shared/requestValidation');
 
 const DEFAULT_SQLITE_PATH = path.join(process.cwd(), 'data', 'db.sqlite');
 const DEFAULT_LEGACY_JSON_PATH = path.join(process.cwd(), 'data', 'db.json');
@@ -169,6 +177,9 @@ const schemaStatements = [
     assigned_to TEXT,
     assigned_at TEXT,
     assigned_by TEXT,
+    substatus TEXT,
+    archived INTEGER NOT NULL DEFAULT 0,
+    last_followup_at TEXT,
     lost_reason TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
@@ -189,6 +200,8 @@ const schemaStatements = [
     new_value TEXT,
     actor_type TEXT,
     comment TEXT,
+    type TEXT,
+    payload TEXT,
     meta_json TEXT,
     created_at TEXT NOT NULL,
     data TEXT NOT NULL,
@@ -336,10 +349,15 @@ function ensureOptionalColumns() {
   ensureColumn('requests', 'assigned_to', 'TEXT');
   ensureColumn('requests', 'assigned_at', 'TEXT');
   ensureColumn('requests', 'assigned_by', 'TEXT');
+  ensureColumn('requests', 'substatus', 'TEXT');
+  ensureColumn('requests', 'archived', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn('requests', 'last_followup_at', 'TEXT');
   ensureColumn('request_events', 'old_value', 'TEXT');
   ensureColumn('request_events', 'new_value', 'TEXT');
   ensureColumn('request_events', 'actor_type', 'TEXT');
   ensureColumn('request_events', 'comment', 'TEXT');
+  ensureColumn('request_events', 'type', 'TEXT');
+  ensureColumn('request_events', 'payload', 'TEXT');
   ensureColumn('request_events', 'meta_json', 'TEXT');
   ensureColumn('analytics_events', 'channel', 'TEXT');
   ensureColumn('analytics_events', 'platform', 'TEXT');
@@ -348,6 +366,17 @@ function ensureOptionalColumns() {
   ensureColumn('analytics_events', 'client_id', 'TEXT');
   ensureColumn('analytics_events', 'status', 'TEXT');
   ensureColumn('analytics_events', 'meta_json', 'TEXT');
+}
+
+function normalizeExistingRequestStatuses() {
+  const rows = getDb().prepare('SELECT * FROM requests').all();
+  const tx = getDb().transaction(() => {
+    for (const row of rows) {
+      const entity = requestRowToEntity(row);
+      insertOrReplaceRequest(entity);
+    }
+  });
+  tx();
 }
 
 function tableCount(tableName) {
@@ -419,19 +448,28 @@ function vehicleRowToEntity(row) {
 
 function requestRowToEntity(row) {
   const entity = parseJson(row.data, {});
+  const normalized = normalizeLegacyRequestState({
+    status: row.status || entity.status,
+    substatus: row.substatus || entity.substatus || null,
+    comment: row.lost_reason || entity.lostReason || null,
+    archived: Boolean(row.archived || entity.archived)
+  });
   Object.assign(entity, {
     id: row.id,
     clientId: row.client_id,
     vehicleId: row.vehicle_id,
     requestType: row.request_type,
-    status: normalizeRequestStatusInput(row.status),
+    status: normalized.status,
+    substatus: normalized.substatus,
     description: row.description,
     sourceChannel: row.source_channel,
     assignedMasterId: row.assigned_master_id,
     assignedTo: row.assigned_to || row.assigned_master_id || entity.assignedTo || entity.assignedMasterId || null,
     assignedAt: row.assigned_at || entity.assignedAt || null,
     assignedBy: row.assigned_by || entity.assignedBy || null,
-    lostReason: row.lost_reason,
+    archived: isArchivedStatus({ status: normalized.status, substatus: normalized.substatus, archived: Boolean(row.archived || entity.archived) }),
+    lastFollowupAt: row.last_followup_at || entity.lastFollowupAt || null,
+    lostReason: row.lost_reason || normalized.comment,
     createdAt: row.created_at,
     updatedAt: row.updated_at
   });
@@ -440,10 +478,11 @@ function requestRowToEntity(row) {
 }
 
 function requestEventRowToEntity(row) {
-  const data = parseJson(row.data, {});
+  const payload = parseJson(row.payload, {});
+  const data = { ...parseJson(row.data, {}), ...payload };
   const canonicalEventType = row.event_type === 'request_status_changed' ? 'status_changed' : row.event_type;
-  const oldStatus = normalizeRequestStatusInput(data.oldStatus ?? data.fromStatus ?? null) || null;
-  const newStatus = normalizeRequestStatusInput(data.newStatus ?? data.toStatus ?? null, oldStatus) || null;
+  const oldStatus = normalizeRequestStatus(data.oldStatus ?? data.fromStatus ?? row.old_value ?? null) || null;
+  const newStatus = normalizeRequestStatus(data.newStatus ?? data.toStatus ?? row.new_value ?? null) || null;
   const actor = data.actor ?? data.changedBy ?? row.actor_id ?? null;
   const comment = data.comment ?? data.reason ?? data.text ?? null;
   return {
@@ -463,6 +502,8 @@ function requestEventRowToEntity(row) {
     oldValue: row.old_value || data.oldValue || null,
     newValue: row.new_value || data.newValue || null,
     comment: row.comment || data.comment || comment,
+    type: row.type || row.event_type,
+    payload: payload,
     metaJson: parseJson(row.meta_json, data.metaJson || {}),
     oldStatus,
     newStatus,
@@ -718,10 +759,10 @@ function insertOrReplaceRequest(request) {
   getDb().prepare(`
     INSERT OR REPLACE INTO requests (
       id, client_id, vehicle_id, request_type, status, description, source_channel,
-      assigned_master_id, assigned_to, assigned_at, assigned_by, lost_reason, created_at, updated_at, data
+      assigned_master_id, assigned_to, assigned_at, assigned_by, substatus, archived, last_followup_at, lost_reason, created_at, updated_at, data
     ) VALUES (
       @id, @client_id, @vehicle_id, @request_type, @status, @description, @source_channel,
-      @assigned_master_id, @assigned_to, @assigned_at, @assigned_by, @lost_reason, @created_at, @updated_at, @data
+      @assigned_master_id, @assigned_to, @assigned_at, @assigned_by, @substatus, @archived, @last_followup_at, @lost_reason, @created_at, @updated_at, @data
     )
   `).run({
     id: entity.id,
@@ -735,6 +776,9 @@ function insertOrReplaceRequest(request) {
     assigned_to: entity.assignedTo || entity.assignedMasterId || null,
     assigned_at: entity.assignedAt || null,
     assigned_by: entity.assignedBy || null,
+    substatus: entity.substatus || null,
+    archived: entity.archived ? 1 : 0,
+    last_followup_at: entity.lastFollowupAt || null,
     lost_reason: entity.lostReason || null,
     created_at: entity.createdAt,
     updated_at: entity.updatedAt,
@@ -748,10 +792,10 @@ function insertRequestEvent(event) {
   getDb().prepare(`
     INSERT OR REPLACE INTO request_events (
       id, event_scope, event_type, request_id, client_id, quality_case_id,
-      actor_id, actor_role, old_value, new_value, actor_type, comment, meta_json, created_at, data, parent_event_id
+      actor_id, actor_role, old_value, new_value, actor_type, comment, type, payload, meta_json, created_at, data, parent_event_id
     ) VALUES (
       @id, @event_scope, @event_type, @request_id, @client_id, @quality_case_id,
-      @actor_id, @actor_role, @old_value, @new_value, @actor_type, @comment, @meta_json, @created_at, @data, @parent_event_id
+      @actor_id, @actor_role, @old_value, @new_value, @actor_type, @comment, @type, @payload, @meta_json, @created_at, @data, @parent_event_id
     )
   `).run({
     id: entity.id,
@@ -766,6 +810,8 @@ function insertRequestEvent(event) {
     new_value: entity.newValue ?? null,
     actor_type: entity.actorType || entity.actorRole || null,
     comment: entity.comment ?? null,
+    type: entity.type || entity.eventType,
+    payload: JSON.stringify(entity.payload || entity.metaJson || {}),
     meta_json: JSON.stringify(entity.metaJson || {}),
     created_at: entity.createdAt || nowIso(),
     data: serializeEntity(entity),
@@ -968,6 +1014,7 @@ function insertOrReplaceReportSnapshot(item) {
 
 function importLegacyJsonToSqlite(jsonPath = getLegacyJsonPath()) {
   ensureSchema();
+  normalizeExistingRequestStatuses();
   const legacyStore = safeReadLegacyStore(jsonPath);
   const db = getDb();
   const migrate = db.transaction(() => {
@@ -1160,7 +1207,7 @@ function upsertVehicle({ clientId, brand, model, year, vin, plateNumber }) {
 
 function createRequest({ clientId, vehicleId, requestType, description, sourceChannel, payload = {}, status = 'new' }) {
   initializeStore();
-  const normalizedStatus = normalizeRequestStatusInput(status) || 'new';
+  const normalizedStatus = validateRequestStatus(status) || 'new';
   const createdAt = nowIso();
   const request = {
     id: crypto.randomUUID(),
@@ -1175,6 +1222,9 @@ function createRequest({ clientId, vehicleId, requestType, description, sourceCh
     assignedTo: null,
     assignedAt: null,
     assignedBy: null,
+    substatus: null,
+    archived: false,
+    lastFollowupAt: null,
     lostReason: null,
     externalIds: {},
     sourceSystem: sourceChannel || 'system',
@@ -1199,6 +1249,7 @@ function createRequest({ clientId, vehicleId, requestType, description, sourceCh
       actorType: 'system',
       oldValue: null,
       newValue: normalizedStatus,
+      payload: { requestType, sourceChannel },
       metaJson: { requestType, sourceChannel },
       createdAt
     });
@@ -1220,6 +1271,8 @@ function createRequest({ clientId, vehicleId, requestType, description, sourceCh
       actorType: 'system',
       oldValue: null,
       newValue: normalizedStatus,
+      payload: { requestType, sourceChannel },
+      payload: { requestType, sourceChannel },
       metaJson: { requestType, sourceChannel },
       comment: null,
       reason: null,
@@ -1581,36 +1634,20 @@ function upsertRecommendationFromSync({ externalId = null, clientId = null, text
   return item;
 }
 
-const REQUEST_STATUS_ALIASES = {
-  waiting_data: 'awaiting_client',
-  in_progress: 'in_service',
-  processed: 'done',
-  lost: 'cancelled'
-};
 
 const REQUEST_STATUS_COMPATIBILITY = {
   new: ['new'],
-  assigned: ['assigned'],
-  awaiting_client: ['awaiting_client', 'waiting_data'],
-  scheduled: ['scheduled'],
-  in_service: ['in_service', 'in_progress'],
-  done: ['done', 'processed', 'archived'],
-  cancelled: ['cancelled', 'lost']
+  in_progress: ['in_progress', 'assigned'],
+  processed: ['processed', 'scheduled'],
+  in_service: ['in_service'],
+  completed: ['completed', 'done', 'cancelled', 'lost', 'archived'],
+  error: ['error', 'awaiting_client', 'waiting_data']
 };
-
-function normalizeRequestStatusInput(status, currentStatus = null) {
-  const rawStatus = String(status || '').trim();
-  if (!rawStatus) return '';
-  if (rawStatus === 'archived') {
-    return currentStatus === 'cancelled' ? 'cancelled' : 'done';
-  }
-  return REQUEST_STATUS_ALIASES[rawStatus] || rawStatus;
-}
 
 function expandRequestStatuses(statuses = []) {
   const result = new Set();
   for (const status of statuses || []) {
-    const normalized = normalizeRequestStatusInput(status);
+    const normalized = validateRequestStatus(status);
     if (!normalized) continue;
     result.add(normalized);
     for (const alias of REQUEST_STATUS_COMPATIBILITY[normalized] || []) result.add(alias);
@@ -1618,50 +1655,19 @@ function expandRequestStatuses(statuses = []) {
   return [...result];
 }
 
-const allowedRequestTransitions = {
-  new: ['assigned', 'awaiting_client', 'scheduled', 'in_service', 'cancelled'],
-  assigned: ['awaiting_client', 'scheduled', 'in_service', 'cancelled', 'done'],
-  awaiting_client: ['assigned', 'scheduled', 'in_service', 'cancelled', 'done'],
-  scheduled: ['awaiting_client', 'in_service', 'cancelled', 'done'],
-  in_service: ['awaiting_client', 'scheduled', 'cancelled', 'done'],
-  done: [],
-  cancelled: []
-};
-
-function updateRequestStatus({ requestId, toStatus, actorId, actorRole, lostReason = null, comment = null }) {
-  initializeStore();
-  const row = getDb().prepare('SELECT * FROM requests WHERE id = ? LIMIT 1').get(requestId);
-  if (!row) return { error: 'REQUEST_NOT_FOUND' };
-  const request = requestRowToEntity(row);
-  const fromStatus = normalizeRequestStatusInput(request.status);
-  const nextStatus = normalizeRequestStatusInput(toStatus, fromStatus);
-  const statusComment = String(comment || lostReason || '').trim() || null;
-  const rawStatus = String(toStatus || '').trim();
-
-  if (!nextStatus) return { error: 'INVALID_STATUS' };
-  if (nextStatus === fromStatus) return { request, history: null };
-  if (!allowedRequestTransitions[fromStatus]?.includes(nextStatus)) {
-    return { error: 'INVALID_TRANSITION', fromStatus, toStatus: nextStatus };
-  }
-  if ((rawStatus === 'lost' || nextStatus === 'cancelled') && !statusComment) {
-    return { error: 'CANCELLATION_COMMENT_REQUIRED' };
-  }
-
-  request.status = nextStatus;
-  request.updatedAt = nowIso();
-  request.lostReason = nextStatus === 'cancelled' ? statusComment : null;
-  if (!request.assignedMasterId && actorId) request.assignedMasterId = actorId;
-
-  const history = {
+function createRequestStatusHistoryEvent({ request, fromStatus, toStatus, fromSubstatus = null, toSubstatus = null, actorId, actorRole, comment = null, eventType = 'status_changed', metaJson = {} }) {
+  return {
     id: crypto.randomUUID(),
     eventScope: 'request',
-    eventType: 'status_changed',
-    requestId,
+    eventType,
+    requestId: request.id,
     clientId: request.clientId,
     oldStatus: fromStatus,
-    newStatus: nextStatus,
+    newStatus: toStatus,
     fromStatus,
-    toStatus: nextStatus,
+    toStatus,
+    fromSubstatus,
+    toSubstatus,
     changedBy: actorId,
     changedByRole: actorRole,
     actor: actorId,
@@ -1669,12 +1675,78 @@ function updateRequestStatus({ requestId, toStatus, actorId, actorRole, lostReas
     actorRole,
     actorType: actorRole || 'system',
     oldValue: fromStatus,
-    newValue: nextStatus,
-    metaJson: { comment: statusComment, lostReason },
-    comment: statusComment,
-    reason: statusComment,
+    newValue: toStatus,
+    payload: { fromStatus, toStatus, fromSubstatus, toSubstatus, comment, ...metaJson },
+    metaJson: { fromStatus, toStatus, fromSubstatus, toSubstatus, comment, ...metaJson },
+    comment,
+    reason: comment,
     createdAt: nowIso()
   };
+}
+
+function maybeScheduleWaitingDecisionFollowup(request) {
+  if (request.status !== 'processed' || request.substatus !== 'waiting_decision') return null;
+  const existingTask = getDb().prepare(`
+    SELECT id FROM tasks
+    WHERE task_type = 'waiting_decision_followup' AND status IN ('scheduled', 'processing')
+      AND json_extract(payload, '$.requestId') = ?
+    LIMIT 1
+  `).get(request.id);
+  if (existingTask) return null;
+  const dueAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+  insertOrReplaceTask({
+    id: crypto.randomUUID(),
+    taskType: 'waiting_decision_followup',
+    status: 'scheduled',
+    dueAt,
+    createdAt: nowIso(),
+    processedAt: null,
+    attemptCount: 0,
+    lastError: null,
+    processingStartedAt: null,
+    updatedAt: nowIso(),
+    payload: { requestId: request.id, assignedTo: request.assignedTo || null }
+  });
+  return dueAt;
+}
+
+function updateRequestStatus({ requestId, toStatus, substatus = null, actorId, actorRole, lostReason = null, comment = null, followupAt = null }) {
+  initializeStore();
+  const row = getDb().prepare('SELECT * FROM requests WHERE id = ? LIMIT 1').get(requestId);
+  if (!row) return { error: 'REQUEST_NOT_FOUND' };
+  const request = requestRowToEntity(row);
+  const fromStatus = request.status;
+  const fromSubstatus = request.substatus || null;
+  const nextStatus = validateRequestStatus(toStatus);
+  const nextSubstatus = validateRequestSubstatus(substatus) || null;
+  const statusComment = String(comment || lostReason || '').trim() || null;
+  const transition = canTransitionRequest({ fromStatus, fromSubstatus, toStatus: nextStatus, toSubstatus: nextSubstatus });
+
+  if (!nextStatus) return { error: 'INVALID_STATUS' };
+  if (!transition.ok) return { error: transition.error, fromStatus, toStatus: nextStatus, fromSubstatus, toSubstatus: nextSubstatus };
+  if (transition.noop) return { request, history: null };
+  if (nextStatus === 'processed' && !nextSubstatus) return { error: 'SUBSTATUS_REQUIRED' };
+  if (nextSubstatus === 'rejected' && !statusComment) return { error: 'COMMENT_REQUIRED' };
+
+  request.status = nextStatus;
+  request.substatus = nextStatus === 'processed' ? nextSubstatus : null;
+  request.archived = isArchivedStatus({ status: request.status, substatus: request.substatus, archived: false });
+  request.updatedAt = nowIso();
+  request.lastFollowupAt = followupAt || request.lastFollowupAt || null;
+  request.lostReason = request.substatus === 'rejected' ? statusComment : null;
+  if (!request.assignedMasterId && actorId) request.assignedMasterId = actorId;
+
+  const history = createRequestStatusHistoryEvent({
+    request,
+    fromStatus,
+    toStatus: request.status,
+    fromSubstatus,
+    toSubstatus: request.substatus,
+    actorId,
+    actorRole,
+    comment: statusComment,
+    metaJson: { archived: request.archived, lostReason: request.lostReason }
+  });
 
   const tx = getDb().transaction(() => {
     insertOrReplaceRequest(request);
@@ -1686,7 +1758,7 @@ function updateRequestStatus({ requestId, toStatus, actorId, actorRole, lostReas
       source: 'master_bot',
       channel: 'master_bot',
       direction: 'internal',
-      payload: { action: 'request_status_changed', fromStatus, toStatus: nextStatus, actorId, actorRole, comment: statusComment },
+      payload: { action: 'request_status_changed', fromStatus, toStatus: request.status, fromSubstatus, toSubstatus: request.substatus, actorId, actorRole, comment: statusComment },
       createdAt: nowIso()
     });
     insertRequestEvent({
@@ -1698,7 +1770,7 @@ function updateRequestStatus({ requestId, toStatus, actorId, actorRole, lostReas
       action: 'request_status_changed',
       requestId,
       clientId: request.clientId,
-      payload: { fromStatus, toStatus: nextStatus, comment: statusComment },
+      payload: { fromStatus, toStatus: request.status, fromSubstatus, toSubstatus: request.substatus, comment: statusComment },
       createdAt: nowIso()
     });
     insertOrReplaceAnalyticsEvent({
@@ -1709,12 +1781,30 @@ function updateRequestStatus({ requestId, toStatus, actorId, actorRole, lostReas
       requestType: request.requestType,
       requestId,
       clientId: request.clientId,
-      status: nextStatus,
-      metaJson: { fromStatus, toStatus: nextStatus, actorId, actorRole, comment: statusComment },
+      status: request.status,
+      metaJson: { fromStatus, toStatus: request.status, fromSubstatus, toSubstatus: request.substatus, actorId, actorRole, comment: statusComment, archived: request.archived },
       createdAt: nowIso()
     });
 
-    if (nextStatus === 'done') {
+    if (request.status === 'processed' && request.substatus === 'waiting_decision') {
+      const dueAt = maybeScheduleWaitingDecisionFollowup(request);
+      insertRequestEvent({
+        id: crypto.randomUUID(),
+        eventScope: 'request',
+        eventType: 'followup_scheduled',
+        requestId,
+        clientId: request.clientId,
+        actorId,
+        actorRole,
+        actorType: actorRole || 'system',
+        comment: dueAt ? `followup_due:${dueAt}` : 'followup_already_scheduled',
+        payload: { dueAt },
+        metaJson: { dueAt },
+        createdAt: nowIso()
+      });
+    }
+
+    if (request.status === 'completed') {
       const existingTask = getDb().prepare(`
         SELECT id FROM tasks
         WHERE task_type = 'feedback_request' AND status <> 'cancelled' AND json_extract(payload, '$.requestId') = ?
@@ -1741,6 +1831,47 @@ function updateRequestStatus({ requestId, toStatus, actorId, actorRole, lostReas
         });
       }
     }
+  });
+  tx();
+  return { request, history };
+}
+
+function reactivateWaitingDecisionRequest({ requestId, actorId = 'system', actorRole = 'system' }) {
+  initializeStore();
+  const request = findRequestById(requestId);
+  if (!request || request.status !== 'processed' || request.substatus !== 'waiting_decision') return null;
+  request.status = 'in_progress';
+  request.substatus = null;
+  request.archived = false;
+  request.lastFollowupAt = nowIso();
+  request.updatedAt = request.lastFollowupAt;
+  const history = createRequestStatusHistoryEvent({
+    request,
+    fromStatus: 'processed',
+    toStatus: 'in_progress',
+    fromSubstatus: 'waiting_decision',
+    toSubstatus: null,
+    actorId,
+    actorRole,
+    comment: 'scheduler_followup_reactivated',
+    eventType: 'followup_reactivated',
+    metaJson: { scheduler: true, lastFollowupAt: request.lastFollowupAt }
+  });
+  const tx = getDb().transaction(() => {
+    insertOrReplaceRequest(request);
+    insertRequestEvent(history);
+    insertRequestEvent({
+      id: crypto.randomUUID(),
+      eventScope: 'master_action',
+      eventType: 'master_action',
+      actorId,
+      actorRole,
+      action: 'request_followup_reactivated',
+      requestId,
+      clientId: request.clientId,
+      payload: { requestId, assignedTo: request.assignedTo || null },
+      createdAt: nowIso()
+    });
   });
   tx();
   return { request, history };
@@ -2398,6 +2529,46 @@ function applyEntitySyncMetadata({ collection, entityId, metadata = {} }) {
 }
 
 
+
+function listRequestEvents({ requestId = null, since = null, until = null, eventType = null, actorId = null, limit = 100 } = {}) {
+  initializeStore();
+  return listRows('request_events', 'created_at DESC')
+    .map(requestEventRowToEntity)
+    .filter((item) => {
+      const createdAt = Date.parse(item.createdAt || '');
+      if (requestId && item.requestId !== requestId) return false;
+      if (eventType && item.canonicalEventType !== eventType && item.eventType !== eventType && item.type !== eventType) return false;
+      if (actorId && item.actorId !== actorId) return false;
+      if (since && (!Number.isFinite(createdAt) || createdAt < Date.parse(since))) return false;
+      if (until && (!Number.isFinite(createdAt) || createdAt > Date.parse(until))) return false;
+      return true;
+    })
+    .slice(0, limit);
+}
+
+function listOperationalLogs({ requestId = null, since = null, eventType = null, bot = null, limit = 100 } = {}) {
+  initializeStore();
+  const events = listRequestEvents({ requestId, since, eventType, limit });
+  const communications = listRows('communications', 'created_at DESC').map(communicationRowToEntity)
+    .filter((item) => {
+      if (requestId && item.requestId !== requestId) return false;
+      if (since && Date.parse(item.createdAt || '') < Date.parse(since)) return false;
+      if (bot && String(item.source || item.channel || '').indexOf(bot) === -1) return false;
+      return true;
+    })
+    .slice(0, limit);
+  const integration = listRows('analytics_events', 'created_at DESC').map(analyticsEventRowToEntity)
+    .filter((item) => {
+      if (requestId && item.requestId !== requestId) return false;
+      if (since && Date.parse(item.createdAt || '') < Date.parse(since)) return false;
+      if (bot && String(item.channel || item.platform || item.sourceSystem || '').indexOf(bot) === -1) return false;
+      if (eventType && item.eventType !== eventType) return false;
+      return item.eventType.includes('webhook') || item.eventType.includes('integration') || item.status === 'error' || item.processingStatus === 'failed';
+    })
+    .slice(0, limit);
+  return { events, communications, integration };
+}
+
 function replaceStore(store) {
   const tempDir = fs.mkdtempSync(path.join(path.dirname(getDbPath()), 'sqlite-import-'));
   const tempJsonPath = path.join(tempDir, 'import.json');
@@ -2472,11 +2643,14 @@ const api = {
   getIntegrationEventById,
   listIntegrationEvents,
   getIntegrationEventCard,
+  listRequestEvents,
+  listOperationalLogs,
   applyEntitySyncMetadata,
   listTables,
   replaceStore,
   shutdown,
-  normalizePhone10
+  normalizePhone10,
+  reactivateWaitingDecisionRequest
 };
 
 module.exports = api;

@@ -1,4 +1,4 @@
-const { REQUEST_STATUSES, SOURCE_SYSTEM } = require('./enums');
+const { REQUEST_STATUSES, REQUEST_SUBSTATUSES, SOURCE_SYSTEM } = require('./enums');
 
 const baseEntity = {
   id: 'uuid',
@@ -43,6 +43,11 @@ const Request = {
   vehicleId: 'Vehicle.id|null',
   requestType: 'REQUEST_TYPES',
   status: REQUEST_STATUSES.NEW,
+  substatus: 'REQUEST_SUBSTATUSES|null',
+  assignedTo: 'string|null',
+  assignedAt: 'ISODate|null',
+  archived: false,
+  lastFollowupAt: 'ISODate|null',
   description: 'string',
   communicationEvents: ['CommunicationEvent.id']
 };

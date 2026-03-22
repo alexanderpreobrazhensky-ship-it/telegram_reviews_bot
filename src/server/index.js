@@ -119,18 +119,17 @@ async function duplicateToMastersChat({ config, request, payload }) {
     reply_markup: {
       inline_keyboard: [
         [
-          { text: 'Назначить', callback_data: `req:${request.id}:assigned` },
-          { text: 'Ждём клиента', callback_data: `req:${request.id}:awaiting_client` }
+          { text: 'Взять в работу', callback_data: `req:${request.id}:in_progress` },
+          { text: 'Запросить данные', callback_data: `req:${request.id}:ask_client` }
         ],
         [
-          { text: 'Запланировать', callback_data: `req:${request.id}:scheduled` },
+          { text: 'Обработана', callback_data: `req:${request.id}:processed_menu` },
           { text: 'В сервисе', callback_data: `req:${request.id}:in_service` }
         ],
         [
-          { text: 'Завершить', callback_data: `req:${request.id}:done` },
-          { text: 'Отменить', callback_data: `req:${request.id}:cancelled` }
-        ],
-        [{ text: 'Подробнее', callback_data: `card:${request.id}` }]
+          { text: 'Завершить', callback_data: `req:${request.id}:completed` },
+          { text: 'Подробнее', callback_data: `card:${request.id}` }
+        ]
       ]
     }
   });
@@ -327,6 +326,9 @@ function renderInternalRequestCardPage({ adminId, card }) {
         <li>Assignee: ${escapeHtml(request.assignedTo || '-')}</li>
         <li>Assigned by: ${escapeHtml(request.assignedBy || '-')}</li>
         <li>Assigned at: ${escapeHtml(request.assignedAt || '-')}</li>
+        <li>Substatus: ${escapeHtml(request.substatus || '-')}</li>
+        <li>Archived: ${escapeHtml(request.archived ? 'true' : 'false')}</li>
+        <li>Last follow-up: ${escapeHtml(request.lastFollowupAt || '-')}</li>
         <li>Description: ${escapeHtml(request.description || '-')}</li>
       </ul>
       <form method="POST" action="/internal/requests/${encodeURIComponent(request.id)}/assign?admin_id=${encodeURIComponent(adminId)}" style="margin-bottom:16px;">
@@ -433,6 +435,39 @@ function createServer({ config, logger }) {
       const card = db.getRequestCard(requestId);
       if (!card) return sendJson(res, 404, { error: 'REQUEST_NOT_FOUND' });
       return sendHtml(res, 200, renderInternalRequestCardPage({ adminId: auth.adminId, card }));
+    }
+
+    if (req.method === 'GET' && pathname === '/internal/diagnostics') {
+      const auth = isInternalAuthorized(req, requestUrl, config);
+      if (!auth.ok) return sendJson(res, 403, { error: 'FORBIDDEN' });
+      const runtime = db.getDbRuntimeInfo();
+      return sendJson(res, 200, {
+        db: { connected: true, path: runtime.path, type: runtime.type },
+        env: {
+          WEBAPP_URL: Boolean(config.webAppUrl),
+          TELEGRAM_CLIENT_BOT_TOKEN: Boolean(config.telegramClientBotToken),
+          TELEGRAM_MASTER_BOT_TOKEN: Boolean(config.telegramMasterBotToken),
+          TELEGRAM_INTEGRATION_BOT_TOKEN: Boolean(config.telegramIntegrationBotToken),
+          MAX_CLIENT_BOT_TOKEN: Boolean(config.maxClientBotToken),
+          MAX_MASTER_BOT_TOKEN: Boolean(config.maxMasterBotToken),
+          MAX_WEBHOOK_SECRET: Boolean(config.maxWebhookSecret)
+        },
+        healthEndpoints: ['/health', '/health/db', '/health/max'],
+        scheduler: { waitingDecisionScheduled: db.listTasks(['scheduled', 'processing']).filter((item) => item.taskType === 'waiting_decision_followup').length },
+        webhooks: router.filter((item) => item.path.includes('/webhook')).map((item) => `${item.method} ${item.path}`)
+      });
+    }
+
+    if (req.method === 'GET' && pathname === '/internal/logs') {
+      const auth = isInternalAuthorized(req, requestUrl, config);
+      if (!auth.ok) return sendJson(res, 403, { error: 'FORBIDDEN' });
+      return sendJson(res, 200, db.listOperationalLogs({
+        requestId: requestUrl.searchParams.get('request') || null,
+        since: requestUrl.searchParams.get('since') || null,
+        eventType: requestUrl.searchParams.get('type') || null,
+        bot: requestUrl.searchParams.get('bot') || null,
+        limit: Number(requestUrl.searchParams.get('limit') || 100)
+      }));
     }
 
     if (req.method === 'GET' && pathname === '/internal/export') {

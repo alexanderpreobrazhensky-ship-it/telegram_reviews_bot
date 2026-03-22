@@ -65,10 +65,10 @@ function buildRequestsMetrics(store, filters) {
   const byStatus = groupBy(items, (item) => item.status || 'unknown');
   const bySourceChannel = groupBy(items, (item) => item.sourceChannel || 'unknown');
   const bySourceSystem = groupBy(items, (item) => item.sourceSystem || 'unknown');
-  const processedCount = byStatus.done?.length || 0;
-  const lostCount = byStatus.cancelled?.length || 0;
-  const inProgressCount = (byStatus.assigned?.length || 0) + (byStatus.awaiting_client?.length || 0) + (byStatus.scheduled?.length || 0) + (byStatus.in_service?.length || 0);
-  const archivedCount = 0;
+  const processedCount = (byStatus.processed?.length || 0) + (byStatus.completed?.length || 0);
+  const lostCount = byStatus.error?.length || 0;
+  const inProgressCount = (byStatus.in_progress?.length || 0) + (byStatus.processed?.length || 0) + (byStatus.in_service?.length || 0);
+  const archivedCount = items.filter((item) => item.archived).length;
 
   return {
     totalRequests: total,
@@ -142,8 +142,8 @@ function buildMasterMetrics(store, filters, requestsMetrics) {
         qualityResolved: 0
       };
     }
-    if (request.status === 'done') metrics[key].processed += 1;
-    if (request.status === 'cancelled') metrics[key].lost += 1;
+    if (request.status === 'completed' || request.status === 'processed') metrics[key].processed += 1;
+    if (request.status === 'error') metrics[key].lost += 1;
   }
 
   for (const qualityCase of store.qualityCases) {
@@ -207,8 +207,8 @@ function buildTimingMetrics(store, filters) {
     if (!created) continue;
     const history = (historyByRequest[request.id] || []).sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
     const firstNotNew = history.find((item) => item.toStatus && item.toStatus !== 'new');
-    const inProgress = history.find((item) => item.toStatus === 'in_service');
-    const processed = history.find((item) => item.toStatus === 'done');
+    const inProgress = history.find((item) => item.toStatus === 'in_progress' || item.toStatus === 'in_service');
+    const processed = history.find((item) => item.toStatus === 'completed' || item.toStatus === 'processed');
     const feedbackTask = store.tasks.find((task) => task.taskType === 'feedback_request' && task.payload?.requestId === request.id);
 
     if (firstNotNew) firstMove.push((toDate(firstNotNew.createdAt) - created) / 60000);
