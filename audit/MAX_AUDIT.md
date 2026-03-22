@@ -1,61 +1,65 @@
 # MAX Audit
 
 ## Scope
-MAX route registration, secret validation, payload handling, identity path, outbound flow, security posture, and production-readiness level.
+MAX webhook routes, env usage, secret protection, identity assumptions, callback/message handling, mini-app linkage, and current readiness level.
 
 ## Current state
-- MAX client route: `/max/client_bot/webhook`.
-- MAX master route: `/max/master_bot/webhook`.
-- MAX uses the same core services as Telegram where possible, but remains a partial-production contour.
+- MAX support is embedded in the same Node runtime as Telegram; there is no separate MAX project.
+- Two MAX webhook routes exist: client bot and master bot.
+- MAX readiness is materially better than a placeholder, but still more runtime-dependent and less proven than Telegram.
 
 ## Confirmed facts
 ### Confirmed
-- MAX routes are registered in the same server as Telegram routes.
-- `validateMaxWebhookRequest()` enforces:
-  - `MAX_ENABLED`
-  - presence of the relevant MAX bot token
-  - presence of `MAX_WEBHOOK_SECRET`
-  - exact `X-Max-Bot-Api-Secret` header match
-  - object-shaped payload
-- Headers are sanitized in logs so secrets are not fully dumped.
-- MAX client and master flows share the same business logic style as Telegram.
-- MAX mini-app links are generated from `MAX_WEBAPP_URL`, `MAX_BOT_NAME`, and optional deep-link metadata.
+- MAX client webhook route: `/max/client_bot/webhook`.
+- MAX master webhook route: `/max/master_bot/webhook`.
+- Both MAX routes call `validateMaxWebhookRequest()` before business logic is processed.
+- MAX validation requires: `MAX_ENABLED=true`, presence of the relevant MAX bot token, presence of `MAX_WEBHOOK_SECRET`, exact `X-Max-Bot-Api-Secret` match, and object-shaped payload.
+- Secret-bearing headers are sanitized before logging.
+- MAX client and master flows reuse the same core request/master services used by Telegram where possible.
+- MAX outbound messaging and callback answering are implemented against `https://platform-api.max.ru`.
+- MAX mini-app URLs are built from `MAX_WEBAPP_URL` or `WEBAPP_URL`, with optional `MAX_BOT_NAME` and deep-link payload handling.
+- WebApp runtime can detect a MAX context and submit requests with `sourceChannel = max_webapp` plus `maxId`.
 
 ### Partially confirmed
-- Identity is derived from MAX webhook/user payloads and WebApp runtime objects; this is code-confirmed but not cryptographically proven in this repo.
-- Outbound flow is implemented against `https://platform-api.max.ru`, but live delivery still depends on real credentials and network.
+- MAX identity is taken from webhook payloads and from `MAX.WebApp.initDataUnsafe`, which is code-confirmed but not cryptographically validated by this repo.
+- MAX contact-request support is implemented in the WebApp, but real provider behavior still needs live runtime confirmation.
+- MAX master access bootstrap through `MAX_MASTER_BOT_ADMIN_IDS` is implemented, but live correctness depends on actual configured IDs.
 
 ### Not confirmed
-- Real production webhook registration state in MAX control plane.
-- Real device-specific MAX WebView quirks beyond automated Node tests.
+- Live MAX webhook registration state in the external MAX platform.
+- Real delivery success with production MAX tokens.
+- Device-specific MAX WebView behavior outside the automated tests.
 
 ### Hypothesis only
-- Any claim that MAX is fully production-ready would be overstated. The code is foundation-plus-MVP, not a fully hardened contour.
+- It would be too strong to claim full production parity with Telegram based on repository evidence alone.
+
+## What changed after modernization
+- MAX is now documented as an embedded, code-backed contour of the Node production runtime rather than a hypothetical add-on.
+- Secret validation and route rejection semantics are explicit in code.
+- MAX mini-app launch handling is integrated with the shared WebApp shell.
+- Earlier blanket statements that MAX is only skeletal are now outdated; the code supports meaningful request and master workflows, though runtime proof remains partial.
+
+## Remaining gaps
+- No cryptographic verification of MAX WebApp identity beyond trusted runtime objects.
+- No MAX integration bot exists.
+- No separate MAX-specific operator broadcast equivalent to Telegram masters-chat duplication is present.
+- No live runtime evidence was collected for production MAX webhook registration or outbound delivery.
 
 ## Risks
-- Trust in MAX identity is still based on provided webhook/runtime payloads.
-- No MAX integration bot exists.
-- There is no separate MAX staff broadcast/fan-out equivalent to Telegram masters chat.
-- MAX route presence plus misconfiguration can create confusing operator expectations unless env is documented clearly.
-
-## Gaps
-- No signature verification beyond shared-secret header checking.
-- No distinct MAX analytics/reporting dashboard beyond shared APIs.
-- No explicit MAX-specific fallback when outbound API calls fail, beyond logs and boolean failure.
+- Misconfiguration of `MAX_ENABLED`, tokens, or webhook secret causes routes to exist but reject traffic.
+- Identity spoofing risk remains if downstream logic over-trusts webhook/user payloads or `initDataUnsafe`.
+- MAX readiness can be overstated if code-confirmed behavior is confused with live platform confirmation.
+- Operational confusion remains possible if MAX env is partially filled and the health endpoint appears superficially okay.
 
 ## Legacy / dead / misleading parts
-- `MAX_ENABLED` is not a route-registration switch; it is an acceptance gate inside validation.
-- MAX is not an independent BotHost project and must remain embedded in the current Node foundation.
-
-## Recommendations
-1. Keep MAX embedded inside the current Node runtime, as required.
-2. Treat current MAX support as “usable foundation with tests,” not “fully hardened production parity.”
-3. Add stronger identity verification if MAX platform tooling supports it later.
-4. Re-run live MAX device QA after deploys that touch callback, WebApp, or access logic.
+- `MAX_ENABLED` is an acceptance gate, not a route-registration switch.
+- MAX should not be described as a separate deployment topology for this project.
+- Any stale doc claiming MAX has no meaningful implementation is no longer accurate.
 
 ## Confidence level
-Medium-high.
+Medium-high for code-confirmed behavior; medium for real production readiness because live MAX runtime validation was not part of this pass.
 
-## Follow-up checks
-- Perform live webhook and WebView smoke tests in MAX.
-- Confirm admin bootstrap with a real `MAX_MASTER_BOT_ADMIN_IDS` value in production.
+## Recommended follow-up checks
+- Verify live MAX webhook registration and secret/header behavior.
+- Test `/max/client_bot/webhook` and `/max/master_bot/webhook` with real credentials.
+- Run live MAX mini-app smoke tests for launch, submit, and callback flows.
