@@ -93,6 +93,29 @@ function bootstrap() {
           });
         }
       },
+      async consulted_followup(task) {
+        const requestId = task.payload?.requestId;
+        if (!requestId) throw new Error('REQUEST_ID_REQUIRED');
+        const result = db.registerConsultedFollowup({ requestId, actorId: 'scheduler', actorRole: 'system' });
+        if (!result?.request) throw new Error('REQUEST_NOT_CONSULTED');
+        const requestCard = db.getRequestCard(requestId);
+        const master = requestCard?.assignedMaster;
+        if (master?.telegramId && config.telegramMasterBotToken) {
+          await sendChannelMessage({
+            channel: 'telegram',
+            token: config.telegramMasterBotToken,
+            recipientId: Number(master.telegramId),
+            text: `Напоминание: свяжитесь с клиентом повторно по заявке ${requestId} (подстатус: проконсультирован).`
+          });
+        } else if (master?.maxId && config.maxMasterBotToken) {
+          await sendChannelMessage({
+            channel: 'max',
+            token: config.maxMasterBotToken,
+            recipientId: master.maxId,
+            text: `Напоминание: свяжитесь с клиентом повторно по заявке ${requestId} (подстатус: проконсультирован).`
+          });
+        }
+      },
       async quality_followup() {},
       async recommendation_reminder() {},
       async maintenance_reminder() {}

@@ -1,11 +1,14 @@
-const { REQUEST_STATUSES, REQUEST_SUBSTATUSES, validateRequestStatus, validateRequestSubstatus } = require('../shared/requestValidation');
+const { REQUEST_STATUSES, REQUEST_SUBSTATUSES, validateRequestStatus, validateRequestSubstatus, canTransitionRequest } = require('../shared/requestValidation');
 const QUALITY_CASE_STATUSES = ['new', 'assigned', 'in_progress', 'resolved', 'unresolved', 'archived'];
 
 function deriveClientChannel(requestCard) {
-  if (requestCard.client?.preferredChannel === 'max' || String(requestCard.request?.sourceChannel || '').startsWith('max_')) {
+  const source = String(requestCard.request?.sourceChannel || '').toLowerCase();
+  if (source.startsWith('telegram')) return 'telegram';
+  if (source.startsWith('max')) return 'max';
+  if (requestCard.client?.preferredChannel === 'max') {
     return 'max';
   }
-  return 'telegram';
+  return 'unknown';
 }
 
 function deriveClientRecipientId(requestCard, channel) {
@@ -13,30 +16,21 @@ function deriveClientRecipientId(requestCard, channel) {
   return requestCard.client?.telegramId || null;
 }
 
-async function sendViaPreferredOrFallback({ requestCard, text, sendClientMessage, telegramClientBotToken, maxClientBotToken, actorChannel }) {
+async function sendViaPreferredOrFallback({ requestCard, text, sendClientMessage, telegramClientBotToken, maxClientBotToken }) {
   const preferredChannel = deriveClientChannel(requestCard);
-  const primaryToken = preferredChannel === 'max' ? maxClientBotToken : telegramClientBotToken;
-  const primaryRecipientId = deriveClientRecipientId(requestCard, preferredChannel);
-  const fallbackChannel = preferredChannel === 'max' ? 'telegram' : 'max';
-  const fallbackToken = fallbackChannel === 'max' ? maxClientBotToken : telegramClientBotToken;
-  const fallbackRecipientId = deriveClientRecipientId(requestCard, fallbackChannel);
-
   const attempts = [];
-  if (preferredChannel === 'telegram' || preferredChannel === 'max') {
-    attempts.push({ channel: preferredChannel, token: primaryToken, recipientId: primaryRecipientId, mode: 'preferred' });
-  }
-  if (preferredChannel !== 'telegram' && actorChannel !== 'max') {
-    attempts.push({ channel: 'telegram', token: telegramClientBotToken, recipientId: requestCard.client?.telegramId || null, mode: 'fallback' });
-  }
-  if (preferredChannel !== 'max' && actorChannel !== 'telegram') {
-    attempts.push({ channel: 'max', token: maxClientBotToken, recipientId: requestCard.client?.maxId || null, mode: 'fallback' });
-  }
   if (preferredChannel === 'telegram') {
-    attempts.push({ channel: 'max', token: fallbackToken, recipientId: fallbackRecipientId, mode: 'fallback' });
+    attempts.push({ channel: 'telegram', token: telegramClientBotToken, recipientId: requestCard.client?.telegramId || null, mode: 'primary' });
+    if (requestCard.client?.maxId) attempts.push({ channel: 'max', token: maxClientBotToken, recipientId: requestCard.client?.maxId, mode: 'fallback' });
+  } else if (preferredChannel === 'max') {
+    attempts.push({ channel: 'max', token: maxClientBotToken, recipientId: requestCard.client?.maxId || null, mode: 'primary' });
+    if (requestCard.client?.telegramId) attempts.push({ channel: 'telegram', token: telegramClientBotToken, recipientId: requestCard.client?.telegramId, mode: 'fallback' });
+  } else {
+    if (requestCard.client?.maxId) attempts.push({ channel: 'max', token: maxClientBotToken, recipientId: requestCard.client?.maxId, mode: 'primary' });
+    if (requestCard.client?.telegramId) attempts.push({ channel: 'telegram', token: telegramClientBotToken, recipientId: requestCard.client?.telegramId, mode: attempts.length ? 'fallback' : 'primary' });
   }
-  if (preferredChannel === 'max') {
-    attempts.push({ channel: 'telegram', token: fallbackToken, recipientId: fallbackRecipientId, mode: 'fallback' });
-  }
+
+  if (!attempts.length) return { ok: false, error: 'CLIENT_CHANNEL_UNRESOLVED', attempts: [] };
 
   const seen = new Set();
   for (const attempt of attempts) {
@@ -44,9 +38,9 @@ async function sendViaPreferredOrFallback({ requestCard, text, sendClientMessage
     if (!attempt.token || !attempt.recipientId || seen.has(key)) continue;
     seen.add(key);
     const delivered = await sendClientMessage({ channel: attempt.channel, token: attempt.token, recipientId: attempt.channel === 'telegram' ? Number(attempt.recipientId) : attempt.recipientId, text });
-    if (delivered) return { ok: true, channel: attempt.channel, mode: attempt.mode };
+    if (delivered) return { ok: true, channel: attempt.channel, mode: attempt.mode, attempts: [attempt.channel] };
   }
-  return { ok: false, error: 'CLIENT_MESSAGE_DELIVERY_FAILED' };
+  return { ok: false, error: 'CLIENT_MESSAGE_DELIVERY_FAILED', attempts: attempts.map((item) => item.channel) };
 }
 
 function createMasterService({ db, sendClientMessage, adminIds = [], actorChannel = 'telegram' }) {
@@ -80,6 +74,10 @@ function createMasterService({ db, sendClientMessage, adminIds = [], actorChanne
       return db.listRequests({ statuses: ['in_progress', 'processed', 'in_service', 'error'] }).filter((item) => !item.archived);
     },
 
+    listArchiveRequests() {
+      return db.listRequests({ statuses: ['processed', 'completed'] }).filter((item) => item.archived);
+    },
+
     search(query) {
       return db.searchCRM(query);
     },
@@ -90,6 +88,19 @@ function createMasterService({ db, sendClientMessage, adminIds = [], actorChanne
 
     getRequestCard(requestId) {
       return db.getRequestCard(requestId);
+    },
+
+    canChangeRequestStatus({ requestId, toStatus, substatus = null, allowArchived = false }) {
+      const requestCard = db.getRequestCard(requestId);
+      if (!requestCard) return { ok: false, error: 'REQUEST_NOT_FOUND' };
+      return canTransitionRequest({
+        fromStatus: requestCard.request.status,
+        fromSubstatus: requestCard.request.substatus,
+        toStatus,
+        toSubstatus: substatus,
+        archived: requestCard.request.archived,
+        allowArchived
+      });
     },
 
     getClientRecommendations(clientId) {
@@ -144,6 +155,8 @@ function createMasterService({ db, sendClientMessage, adminIds = [], actorChanne
     async requestClientClarification({ requestId, actorId, actorRole, text, telegramClientBotToken, maxClientBotToken }) {
       const requestCard = db.getRequestCard(requestId);
       if (!requestCard) return { error: 'REQUEST_NOT_FOUND' };
+      if (requestCard.request.status === 'completed') return { error: 'COMPLETED_IMMUTABLE' };
+      if (requestCard.request.archived) return { error: 'ARCHIVED_IMMUTABLE' };
       db.recordMasterAction({
         actorId,
         role: actorRole,
@@ -166,21 +179,38 @@ function createMasterService({ db, sendClientMessage, adminIds = [], actorChanne
         text: `Сообщение мастера по заявке ${requestId}: ${text}`,
         sendClientMessage,
         telegramClientBotToken,
-        maxClientBotToken,
-        actorChannel
+        maxClientBotToken
       });
 
       if (!delivery.ok) {
-        db.updateRequestStatus({ requestId, toStatus: 'error', actorId, actorRole, comment: 'client_message_delivery_failed' });
+        db.updateRequestStatus({
+          requestId,
+          toStatus: 'error',
+          actorId,
+          actorRole,
+          comment: delivery.error,
+          metaJson: {
+            channel: deriveClientChannel(requestCard),
+            text,
+            reason: delivery.error,
+            attempts: delivery.attempts || []
+          }
+        });
         db.recordRequestEvent({
           requestId,
           clientId: requestCard.request.clientId,
-          eventType: 'message_delivery_failed',
+          eventType: 'outbound_message_failed',
           actorId,
           actorRole,
           actorType: actorRole,
-          comment: 'client_message_delivery_failed',
-          metaJson: { requestedText: text }
+          comment: delivery.error,
+          metaJson: {
+            requestedText: text,
+            channel: deriveClientChannel(requestCard),
+            reason: delivery.error,
+            attempts: delivery.attempts || [],
+            timestamp: new Date().toISOString()
+          }
         });
         return delivery;
       }

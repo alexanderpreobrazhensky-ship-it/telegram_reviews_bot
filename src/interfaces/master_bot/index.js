@@ -7,6 +7,14 @@ const { validateMaxWebhookRequest } = require('../shared/maxSecurity');
 const { REQUEST_STATUSES, REQUEST_SUBSTATUSES } = require('../../core/shared/requestValidation');
 
 const sessions = new Map();
+const STATUS_LABELS = {
+  new: 'Новая',
+  in_progress: 'В работе',
+  processed: 'Обработана',
+  in_service: 'В сервисе',
+  completed: 'Завершена',
+  error: 'Ошибка отправки'
+};
 const PROCESSED_SUBSTATUS_LABELS = {
   recorded: 'записан',
   consulted: 'проконсультирован',
@@ -26,7 +34,7 @@ function isAdmin(actor) {
 }
 
 function formatRequestLine(request) {
-  return `${request.id} | ${request.requestType} | ${request.status}${request.substatus ? `/${request.substatus}` : ''} | ${request.description || '-'}`;
+  return `${request.id} | ${request.requestType} | ${STATUS_LABELS[request.status] || request.status}${request.substatus ? `/${PROCESSED_SUBSTATUS_LABELS[request.substatus] || request.substatus}` : ''} | ${request.description || '-'}`;
 }
 
 function buildProcessedSubstatusKeyboard(requestId) {
@@ -45,7 +53,17 @@ function buildAdminKeyboard(requestId) {
   return [{ text: 'Подробнее', callback_data: `card:${requestId}` }];
 }
 
-function buildRequestActionsKeyboard(requestId) {
+function buildRequestActionsKeyboard(requestId, card = null) {
+  const request = card?.request || {};
+  const archived = Boolean(request.archived);
+  const completed = request.status === 'completed';
+  if (archived || completed) {
+    return {
+      inline_keyboard: [
+        [{ text: 'Подробнее', callback_data: `card:${requestId}` }]
+      ]
+    };
+  }
   return {
     inline_keyboard: [
       [
@@ -76,7 +94,7 @@ function buildRequestCardText(card) {
   return [
     `ID: ${r.id}`,
     `Тип: ${r.requestType}`,
-    `Статус: ${r.status}`,
+    `Статус: ${STATUS_LABELS[r.status] || r.status}`,
     `Подстатус: ${r.substatus ? PROCESSED_SUBSTATUS_LABELS[r.substatus] || r.substatus : '-'}`,
     `Архив: ${r.archived ? 'да' : 'нет'}`,
     `ФИО: ${client.fullName || '-'}`,
@@ -91,6 +109,9 @@ function buildRequestCardText(card) {
     `Назначил: ${r.assignedBy || '-'}`,
     `Когда назначено: ${r.assignedAt || '-'}`,
     `Последнее повторное касание: ${r.lastFollowupAt || '-'}`,
+    `Завершена: ${r.completedAt || '-'}`,
+    `Ошибка отправки: ${r.lastOutboundError || '-'}`,
+    `Комментарий отказа: ${r.rejectionComment || '-'}`,
     `Создано: ${r.createdAt || '-'}`,
     `История:\n${history}`
   ].join('\n');
@@ -107,26 +128,56 @@ function staffIdentity(user) {
 function helpText(channel) {
   return [
     'Инструкция по заявкам:',
-    '- new: новая заявка, ещё не взята мастером.',
-    '- in_progress: мастер взял заявку в работу.',
-    '- processed/recorded: клиент записан, заявка активна.',
-    '- processed/consulted: клиент проконсультирован, заявка активна и под наблюдением.',
-    '- processed/spam: архив, повторные касания выключены.',
-    '- processed/waiting_decision: через 7 дней scheduler вернёт заявку в in_progress и уведомит мастера.',
-    '- processed/rejected: архив, обязателен комментарий.',
-    '- in_service: машина в сервисе.',
-    '- completed: финально закрыта и архивирована.',
-    '- error: сообщение клиенту не доставлено, проверьте контакты и повторите отправку.',
+    'Статусы:',
+    '- Новая (new): заявка только пришла, ещё никем не взята.',
+    '- В работе (in_progress): мастер взял заявку в обработку и отвечает за следующий шаг.',
+    '- Обработана (processed): заявка обработана, но обязательно с подстатусом.',
+    '- В сервисе (in_service): клиент уже приехал/машина в работе сервиса.',
+    '- Завершена (completed): финальное закрытие, заявка уходит в архив.',
+    '- Ошибка отправки (error): не удалось отправить сообщение клиенту в исходный канал.',
     '',
-    'Как работать:',
+    'Подстатусы processed:',
+    '- записан: клиент записан, можно двигать дальше в «В сервисе» или «Завершить».',
+    '- проконсультирован: заявку не архивируем, через scheduler придёт напоминание о повторном контакте.',
+    '- спам: заявка архивируется и больше не участвует в работе.',
+    '- ждём решения: заявка остаётся активной, через 7 дней scheduler вернёт её в «В работе».',
+    '- отказ: заявка архивируется, комментарий обязателен и хранится как причина отказа.',
+    '',
+    'Кнопки:',
+    '- «Взять в работу»: назначает мастера и переводит заявку в «В работе». Свободную заявку может взять мастер, переназначение — только админ.',
+    '- «Запросить данные»: открывает режим ввода текста и отправляет сообщение клиенту в исходный подтверждённый канал.',
+    '- «Обработана»: показывает выбор подстатуса.',
+    '- «В сервисе»: переводит заявку в этап выполнения работ.',
+    '- «Завершить»: финально закрывает заявку и архивирует её.',
+    '- «Подробнее»: полная карточка заявки с историей.',
+    '',
+    'Как обрабатывать заявку:',
     '1) Нажмите «Взять в работу».',
     '2) Если данных мало — «Запросить данные».',
     '3) После общения — «Обработана» и выберите подстатус.',
     '4) Когда клиент приехал — «В сервисе».',
     '5) После завершения — «Завершить».',
     '',
-    'Архив: spam, rejected и completed.',
-    'Ошибка отправки: статус error, смотрите Логи и повторите запрос.',
+    'Запрос данных:',
+    '- Telegram-заявки получают ответ в Telegram.',
+    '- MAX-заявки получают ответ в MAX.',
+    '- Для остальных источников сначала пробуем MAX, затем Telegram, но только при наличии подтверждённых maxId/telegramId.',
+    '- Email как канал ответа не используем.',
+    '- При ошибке отправки заявка получает статус error, подробности смотрите в логах.',
+    '',
+    'Повторные касания:',
+    '- «Ждём решения»: каждые 7 дней возврат в «В работе» + уведомление мастеру.',
+    '- «Проконсультирован»: каждые 7 дней напоминание мастеру о повторном контакте без автоархивации.',
+    '',
+    'Архив и аналитика:',
+    '- В архив автоматически попадают spam, rejected и completed.',
+    '- Отказ и спам считаются отдельно для аналитики.',
+    '- Причина отказа хранится в карточке и логах.',
+    '',
+    'Права:',
+    '- Админ: всё, включая диагностику, логи и переназначение.',
+    '- Мастер/менеджер: работа с заявками в рамках access flow.',
+    '- Инструкция доступна всем пользователям master-бота.',
     '',
     'Команды:',
     '/start',
@@ -183,39 +234,79 @@ function parseLogsFilter(text = '') {
   }, {});
 }
 
-function buildDiagnosticsText({ config, actor, channel }) {
+function maskConfigValue(value) {
+  if (!value) return 'missing';
+  const raw = String(value);
+  if (raw.length <= 6) return 'configured';
+  return `${raw.slice(0, 2)}***${raw.slice(-2)}`;
+}
+
+function buildDiagnosticsText({ config, actor, channel, detailed = false }) {
   const runtime = db.getDbRuntimeInfo();
-  const schedulerTasks = db.listTasks(['scheduled', 'processing', 'failed']).filter((item) => item.taskType === 'waiting_decision_followup');
-  return [
+  const followupTasks = db.listTasks(['scheduled', 'processing', 'failed']).filter((item) => ['waiting_decision_followup', 'consulted_followup'].includes(item.taskType));
+  const writable = require('node:fs').existsSync(runtime.dir || '.');
+  const base = [
     'Диагностика:',
     `DB: ok (${runtime.type})`,
     `SQLite path: ${runtime.path}`,
+    `DB path writable: ${writable ? 'yes' : 'no'}`,
     `WEBAPP_URL: ${config.webAppUrl ? 'configured' : 'missing'}`,
-    `TELEGRAM tokens: ${config.telegramClientBotToken && config.telegramMasterBotToken ? 'configured' : 'partial/missing'}`,
-    `MAX tokens: ${config.maxClientBotToken && config.maxMasterBotToken ? 'configured' : 'partial/missing'}`,
+    `TELEGRAM_CLIENT_BOT_TOKEN: ${config.telegramClientBotToken ? 'configured' : 'missing'}`,
+    `TELEGRAM_MASTER_BOT_TOKEN: ${config.telegramMasterBotToken ? 'configured' : 'missing'}`,
+    `TELEGRAM_INTEGRATION_BOT_TOKEN: ${config.telegramIntegrationBotToken ? 'configured' : 'missing'}`,
+    `MASTER_BOT_ADMIN_IDS: ${(config.masterBotAdminIds || []).length}`,
+    `MAX_ENABLED: ${config.maxEnabled ? 'enabled' : 'disabled'}`,
+    `MAX_CLIENT_BOT_TOKEN: ${config.maxClientBotToken ? 'configured' : 'missing'}`,
+    `MAX_MASTER_BOT_TOKEN: ${config.maxMasterBotToken ? 'configured' : 'missing'}`,
+    `MAX_WEBHOOK_SECRET: ${config.maxWebhookSecret ? 'configured' : 'missing'}`,
+    `MAX_MASTER_BOT_ADMIN_IDS: ${(config.maxMasterBotAdminIds || []).length}`,
+    `MAX_WEBAPP_URL: ${config.maxWebAppUrl ? 'configured' : 'missing'}`,
     `Health endpoints: /health, /health/db, /health/max`,
-    `Scheduler waiting_decision tasks: ${schedulerTasks.length}`,
+    `Scheduler follow-up tasks: ${followupTasks.length}`,
     `Webhook routes: /${channel}/master_bot/webhook, /telegram/client_bot/webhook, /max/client_bot/webhook, /telegram/integration_bot/webhook`,
-    `Bots availability: master=${Boolean(masterToken(config, channel))}, client=${Boolean(config.telegramClientBotToken || config.maxClientBotToken)}, integration=${Boolean(config.telegramIntegrationBotToken)}`,
+    `Internal routes: /internal/requests, /internal/export, /internal/diagnostics, /internal/logs`,
+    `Bots availability: master=${Boolean(masterToken(config, channel))}, client=${Boolean(config.telegramClientBotToken || config.maxClientBotToken)}, integration=${Boolean(config.telegramIntegrationBotToken)}, max=${config.maxEnabled ? Boolean(config.maxClientBotToken && config.maxMasterBotToken) : 'disabled'}`,
     `Actor: ${actor.id} (${actor.role})`
+  ];
+  if (!detailed) return base.join('\n');
+  return [
+    ...base,
+    '',
+    'Masked values:',
+    `telegram client token: ${maskConfigValue(config.telegramClientBotToken)}`,
+    `telegram master token: ${maskConfigValue(config.telegramMasterBotToken)}`,
+    `telegram integration token: ${maskConfigValue(config.telegramIntegrationBotToken)}`,
+    `max client token: ${maskConfigValue(config.maxClientBotToken)}`,
+    `max master token: ${maskConfigValue(config.maxMasterBotToken)}`,
+    `max webhook secret: ${maskConfigValue(config.maxWebhookSecret)}`
   ].join('\n');
 }
 
-function buildLogsText(filters = {}) {
+function buildLogsText(filters = {}, detailed = false) {
   const logs = db.listOperationalLogs({
     requestId: filters.request,
     since: filters.since,
     eventType: filters.type,
     bot: filters.bot,
-    limit: 20
+    channel: filters.channel,
+    user: filters.user,
+    limit: detailed ? 50 : 20
   });
   const sections = [];
+  sections.push(`Логи (${detailed ? 'подробно' : 'кратко'}):`);
+  sections.push(`Фильтры: request=${filters.request || '-'} type=${filters.type || '-'} bot=${filters.bot || '-'} since=${filters.since || '-'} channel=${filters.channel || '-'} user=${filters.user || '-'}`);
   sections.push('Errors / events:');
-  sections.push((logs.events || []).slice(0, 10).map((item) => `${item.createdAt} | ${item.canonicalEventType || item.eventType} | ${item.requestId || '-'} | ${item.comment || '-'}`).join('\n') || 'Нет request_events');
+  sections.push((logs.events || []).slice(0, detailed ? 20 : 10).map((item) => detailed
+    ? `${item.createdAt} | ${item.canonicalEventType || item.eventType} | req=${item.requestId || '-'} | actor=${item.actorId || '-'} | comment=${item.comment || '-'} | meta=${JSON.stringify(item.metaJson || {})}`
+    : `${item.createdAt} | ${item.canonicalEventType || item.eventType} | ${item.requestId || '-'} | ${item.comment || '-'}`).join('\n') || 'Нет request_events');
   sections.push('Communications:');
-  sections.push((logs.communications || []).slice(0, 10).map((item) => `${item.createdAt} | ${item.source || item.channel} | ${item.requestId || '-'} | ${item.direction || '-'}`).join('\n') || 'Нет communications');
+  sections.push((logs.communications || []).slice(0, detailed ? 20 : 10).map((item) => detailed
+    ? `${item.createdAt} | ${item.source || item.channel} | req=${item.requestId || '-'} | dir=${item.direction || '-'} | payload=${JSON.stringify(item.payload || {})}`
+    : `${item.createdAt} | ${item.source || item.channel} | ${item.requestId || '-'} | ${item.direction || '-'}`).join('\n') || 'Нет communications');
   sections.push('Integration/webhook:');
-  sections.push((logs.integration || []).slice(0, 10).map((item) => `${item.createdAt} | ${item.eventType} | ${item.status || item.processingStatus || '-'} | ${item.requestId || '-'}`).join('\n') || 'Нет analytics/integration ошибок');
+  sections.push((logs.integration || []).slice(0, detailed ? 20 : 10).map((item) => detailed
+    ? `${item.createdAt} | ${item.eventType} | status=${item.status || item.processingStatus || '-'} | req=${item.requestId || '-'} | meta=${JSON.stringify(item.metaJson || {})}`
+    : `${item.createdAt} | ${item.eventType} | ${item.status || item.processingStatus || '-'} | ${item.requestId || '-'}`).join('\n') || 'Нет analytics/integration ошибок');
   return sections.join('\n\n');
 }
 
@@ -266,14 +357,18 @@ async function handleMasterWebhook({ body, config, headers = {}, rawHeaders = []
         const card = masterService.getRequestCard(requestId);
         await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: card ? 'Открываю карточку' : 'Заявка не найдена' });
         if (!card) return { ok: false, error: 'REQUEST_NOT_FOUND' };
-        return respondWithMessage({ channel, token, recipientId, text: buildRequestCardText(card), payload: { ok: true, card }, extra: { reply_markup: buildRequestActionsKeyboard(requestId) } });
+        return respondWithMessage({ channel, token, recipientId, text: buildRequestCardText(card), payload: { ok: true, card }, extra: { reply_markup: buildRequestActionsKeyboard(requestId, card) } });
       }
-      if (data === 'admin:diagnostics') {
+      if (data === 'admin:diagnostics' || data === 'admin:diagnostics_short') {
         await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: 'Готово' });
-        return respondWithMessage({ channel, token, recipientId, text: buildDiagnosticsText({ config, actor, channel }), payload: { ok: true } });
+        return respondWithMessage({ channel, token, recipientId, text: buildDiagnosticsText({ config, actor, channel, detailed: false }), payload: { ok: true } });
       }
-      if (data === 'admin:logs') {
-        sessions.set(sessionKey, { step: 'logs_filter' });
+      if (data === 'admin:diagnostics_detailed') {
+        await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: 'Подробно' });
+        return respondWithMessage({ channel, token, recipientId, text: buildDiagnosticsText({ config, actor, channel, detailed: true }), payload: { ok: true } });
+      }
+      if (data === 'admin:logs' || data === 'admin:logs_short' || data === 'admin:logs_detailed') {
+        sessions.set(sessionKey, { step: 'logs_filter', detailed: data === 'admin:logs_detailed' });
         await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: 'Введите фильтр' });
         return respondWithMessage({ channel, token, recipientId, text: 'Введите фильтр логов в формате request:<id> type:<type> bot:<bot> since:YYYY-MM-DD' });
       }
@@ -299,7 +394,11 @@ async function handleMasterWebhook({ body, config, headers = {}, rawHeaders = []
           return respondWithMessage({ channel, token, recipientId, text: result?.error ? `Ошибка: ${result.error}` : `Заявка ${requestId} → processed/${maybeSubstatus}`, payload: { ok: !result?.error, ...result } });
         }
         if (action === 'in_progress') {
-          masterService.assignRequest({ requestId, assignedTo: actor.id, assignedBy: actor.id, actorId: actor.id, actorRole: actor.role, actorType: actor.role, metaJson: { channel, source: 'take_in_progress' } });
+          const assignment = masterService.assignRequest({ requestId, assignedTo: actor.id, assignedBy: actor.id, actorId: actor.id, actorRole: actor.role, actorType: actor.role, metaJson: { channel, source: 'take_in_progress' } });
+          if (assignment?.error) {
+            await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: 'Назначение недоступно' });
+            return respondWithMessage({ channel, token, recipientId, text: `Ошибка: ${assignment.error}`, payload: { ok: false, ...assignment } });
+          }
         }
         const result = masterService.changeRequestStatus({ requestId, toStatus: action, actorId: actor.id, actorRole: actor.role });
         await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: result?.error ? 'Ошибка' : 'Готово' });
@@ -308,7 +407,7 @@ async function handleMasterWebhook({ body, config, headers = {}, rawHeaders = []
     }
 
     if (text === '/start') {
-      const baseKeyboard = [['Новые заявки', 'В работе'], ['Поиск', 'Quality Cases'], ['Инструкция']];
+      const baseKeyboard = [['Новые заявки', 'В работе'], ['Архив', 'Поиск'], ['Quality Cases', 'Инструкция']];
       if (isAdmin(actor)) baseKeyboard.push(['Диагностика', 'Логи']);
       if (canManageAccess(actor)) baseKeyboard.push(['Доступы']);
       await sendChannelMessage({ channel, token, recipientId, text: `Master Bot запущен. Роль: ${actor.role}.`, extra: { reply_markup: { keyboard: baseKeyboard, resize_keyboard: true } } });
@@ -319,7 +418,13 @@ async function handleMasterWebhook({ body, config, headers = {}, rawHeaders = []
     if (text === 'Новые заявки' || text === 'В работе') {
       const items = text === 'Новые заявки' ? masterService.listRequestsByStatus('new') : masterService.listActiveRequests();
       await respondWithMessage({ channel, token, recipientId, text: items.map(formatRequestLine).join('\n') || (text === 'Новые заявки' ? 'Нет новых заявок' : 'Нет заявок в работе') });
-      for (const item of items.slice(0, 10)) await sendChannelMessage({ channel, token, recipientId, text: `Заявка ${item.id}`, extra: { reply_markup: buildRequestActionsKeyboard(item.id) } });
+      for (const item of items.slice(0, 10)) await sendChannelMessage({ channel, token, recipientId, text: `Заявка ${item.id}`, extra: { reply_markup: buildRequestActionsKeyboard(item.id, { request: item }) } });
+      return { ok: true, items };
+    }
+    if (text === 'Архив') {
+      const items = masterService.listArchiveRequests();
+      await respondWithMessage({ channel, token, recipientId, text: items.map(formatRequestLine).join('\n') || 'Архив пуст' });
+      for (const item of items.slice(0, 10)) await sendChannelMessage({ channel, token, recipientId, text: `Архивная заявка ${item.id}`, extra: { reply_markup: buildRequestActionsKeyboard(item.id, { request: item }) } });
       return { ok: true, items };
     }
 
@@ -329,7 +434,21 @@ async function handleMasterWebhook({ body, config, headers = {}, rawHeaders = []
     }
     if (text === 'Диагностика' || text === '/diagnostics') {
       if (!isAdmin(actor)) return respondWithMessage({ channel, token, recipientId, text: 'Недостаточно прав.' });
-      return respondWithMessage({ channel, token, recipientId, text: buildDiagnosticsText({ config, actor, channel }), payload: { ok: true }, extra: { reply_markup: { inline_keyboard: [[{ text: 'обновить', callback_data: 'admin:diagnostics' }, { text: 'прогнать проверку', callback_data: 'admin:diagnostics' }]] } } });
+      return respondWithMessage({
+        channel,
+        token,
+        recipientId,
+        text: buildDiagnosticsText({ config, actor, channel, detailed: false }),
+        payload: { ok: true },
+        extra: {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: 'обновить', callback_data: 'admin:diagnostics' }, { text: 'прогнать проверку', callback_data: 'admin:diagnostics' }],
+              [{ text: 'краткий статус', callback_data: 'admin:diagnostics_short' }, { text: 'подробный статус', callback_data: 'admin:diagnostics_detailed' }]
+            ]
+          }
+        }
+      });
     }
     if (text === 'Логи' || text.startsWith('/logs')) {
       if (!isAdmin(actor)) return respondWithMessage({ channel, token, recipientId, text: 'Недостаточно прав.' });
@@ -338,7 +457,14 @@ async function handleMasterWebhook({ body, config, headers = {}, rawHeaders = []
         sessions.set(sessionKey, { step: 'logs_filter' });
         return respondWithMessage({ channel, token, recipientId, text: 'Введите фильтр логов в формате request:<id> type:<type> bot:<bot> since:YYYY-MM-DD' });
       }
-      return respondWithMessage({ channel, token, recipientId, text: buildLogsText(filters), payload: { ok: true, filters } });
+      return respondWithMessage({
+        channel,
+        token,
+        recipientId,
+        text: buildLogsText(filters, false),
+        payload: { ok: true, filters },
+        extra: { reply_markup: { inline_keyboard: [[{ text: 'кратко', callback_data: 'admin:logs_short' }, { text: 'подробно', callback_data: 'admin:logs_detailed' }]] } }
+      });
     }
     if (text === 'Доступы') {
       if (!canManageAccess(actor)) return respondWithMessage({ channel, token, recipientId, text: 'Недостаточно прав.' });
@@ -355,7 +481,7 @@ async function handleMasterWebhook({ body, config, headers = {}, rawHeaders = []
       const results = masterService.search(text);
       if (results.requests[0]) {
         const card = masterService.getRequestCard(results.requests[0].id);
-        return respondWithMessage({ channel, token, recipientId, text: buildRequestCardText(card), payload: { ok: true, action: 'search_results', card, ...results }, extra: { reply_markup: buildRequestActionsKeyboard(card.request.id) } });
+        return respondWithMessage({ channel, token, recipientId, text: buildRequestCardText(card), payload: { ok: true, action: 'search_results', card, ...results }, extra: { reply_markup: buildRequestActionsKeyboard(card.request.id, card) } });
       }
       return respondWithMessage({ channel, token, recipientId, text: 'Ничего не найдено', payload: { ok: true, action: 'search_results', ...results } });
     }
@@ -371,7 +497,7 @@ async function handleMasterWebhook({ body, config, headers = {}, rawHeaders = []
     }
     if (session?.step === 'logs_filter') {
       sessions.delete(sessionKey);
-      return respondWithMessage({ channel, token, recipientId, text: buildLogsText(parseLogsFilter(text)), payload: { ok: true } });
+      return respondWithMessage({ channel, token, recipientId, text: buildLogsText(parseLogsFilter(text), Boolean(session.detailed)), payload: { ok: true } });
     }
 
     if (text.startsWith('/access_list')) {
@@ -395,7 +521,7 @@ async function handleMasterWebhook({ body, config, headers = {}, rawHeaders = []
       const results = masterService.search(text.slice(8));
       if (results.requests[0]) {
         const card = masterService.getRequestCard(results.requests[0].id);
-        return respondWithMessage({ channel, token, recipientId, text: buildRequestCardText(card), payload: { ok: true, ...results, card }, extra: { reply_markup: buildRequestActionsKeyboard(card.request.id) } });
+        return respondWithMessage({ channel, token, recipientId, text: buildRequestCardText(card), payload: { ok: true, ...results, card }, extra: { reply_markup: buildRequestActionsKeyboard(card.request.id, card) } });
       }
       return respondWithMessage({ channel, token, recipientId, text: 'Ничего не найдено', payload: { ok: true, ...results } });
     }
@@ -406,7 +532,7 @@ async function handleMasterWebhook({ body, config, headers = {}, rawHeaders = []
 
     if (text.startsWith('/request ')) {
       const card = masterService.getRequestCard(text.split(' ')[1]);
-      return card ? respondWithMessage({ channel, token, recipientId, text: buildRequestCardText(card), payload: { ok: true, card }, extra: { reply_markup: buildRequestActionsKeyboard(card.request.id) } }) : { ok: false, error: 'REQUEST_NOT_FOUND' };
+      return card ? respondWithMessage({ channel, token, recipientId, text: buildRequestCardText(card), payload: { ok: true, card }, extra: { reply_markup: buildRequestActionsKeyboard(card.request.id, card) } }) : { ok: false, error: 'REQUEST_NOT_FOUND' };
     }
     if (text.startsWith('/set_status ')) {
       const [, requestId, toStatus, maybeSubstatus, ...rest] = text.split(' ');

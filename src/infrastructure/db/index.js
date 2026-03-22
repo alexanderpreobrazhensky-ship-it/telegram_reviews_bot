@@ -181,6 +181,9 @@ const schemaStatements = [
     archived INTEGER NOT NULL DEFAULT 0,
     last_followup_at TEXT,
     lost_reason TEXT,
+    completed_at TEXT,
+    last_outbound_error TEXT,
+    rejection_comment TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     data TEXT NOT NULL
@@ -352,6 +355,9 @@ function ensureOptionalColumns() {
   ensureColumn('requests', 'substatus', 'TEXT');
   ensureColumn('requests', 'archived', 'INTEGER NOT NULL DEFAULT 0');
   ensureColumn('requests', 'last_followup_at', 'TEXT');
+  ensureColumn('requests', 'completed_at', 'TEXT');
+  ensureColumn('requests', 'last_outbound_error', 'TEXT');
+  ensureColumn('requests', 'rejection_comment', 'TEXT');
   ensureColumn('request_events', 'old_value', 'TEXT');
   ensureColumn('request_events', 'new_value', 'TEXT');
   ensureColumn('request_events', 'actor_type', 'TEXT');
@@ -470,6 +476,9 @@ function requestRowToEntity(row) {
     archived: isArchivedStatus({ status: normalized.status, substatus: normalized.substatus, archived: Boolean(row.archived || entity.archived) }),
     lastFollowupAt: row.last_followup_at || entity.lastFollowupAt || null,
     lostReason: row.lost_reason || normalized.comment,
+    completedAt: row.completed_at || entity.completedAt || null,
+    lastOutboundError: row.last_outbound_error || entity.lastOutboundError || null,
+    rejectionComment: row.rejection_comment || entity.rejectionComment || row.lost_reason || normalized.comment || null,
     createdAt: row.created_at,
     updatedAt: row.updated_at
   });
@@ -759,10 +768,12 @@ function insertOrReplaceRequest(request) {
   getDb().prepare(`
     INSERT OR REPLACE INTO requests (
       id, client_id, vehicle_id, request_type, status, description, source_channel,
-      assigned_master_id, assigned_to, assigned_at, assigned_by, substatus, archived, last_followup_at, lost_reason, created_at, updated_at, data
+      assigned_master_id, assigned_to, assigned_at, assigned_by, substatus, archived, last_followup_at, lost_reason,
+      completed_at, last_outbound_error, rejection_comment, created_at, updated_at, data
     ) VALUES (
       @id, @client_id, @vehicle_id, @request_type, @status, @description, @source_channel,
-      @assigned_master_id, @assigned_to, @assigned_at, @assigned_by, @substatus, @archived, @last_followup_at, @lost_reason, @created_at, @updated_at, @data
+      @assigned_master_id, @assigned_to, @assigned_at, @assigned_by, @substatus, @archived, @last_followup_at, @lost_reason,
+      @completed_at, @last_outbound_error, @rejection_comment, @created_at, @updated_at, @data
     )
   `).run({
     id: entity.id,
@@ -780,6 +791,9 @@ function insertOrReplaceRequest(request) {
     archived: entity.archived ? 1 : 0,
     last_followup_at: entity.lastFollowupAt || null,
     lost_reason: entity.lostReason || null,
+    completed_at: entity.completedAt || null,
+    last_outbound_error: entity.lastOutboundError || null,
+    rejection_comment: entity.rejectionComment || null,
     created_at: entity.createdAt,
     updated_at: entity.updatedAt,
     data: serializeEntity(entity)
@@ -1226,6 +1240,9 @@ function createRequest({ clientId, vehicleId, requestType, description, sourceCh
     archived: false,
     lastFollowupAt: null,
     lostReason: null,
+    completedAt: null,
+    lastOutboundError: null,
+    rejectionComment: null,
     externalIds: {},
     sourceSystem: sourceChannel || 'system',
     sourceOfTruth: 'local',
@@ -1684,19 +1701,25 @@ function createRequestStatusHistoryEvent({ request, fromStatus, toStatus, fromSu
   };
 }
 
-function maybeScheduleWaitingDecisionFollowup(request) {
-  if (request.status !== 'processed' || request.substatus !== 'waiting_decision') return null;
+function followupDelayDays() {
+  const parsed = Number(process.env.REQUEST_FOLLOWUP_INTERVAL_DAYS || 7);
+  return Math.max(1, Number.isFinite(parsed) ? parsed : 7);
+}
+
+function maybeScheduleProcessedFollowup(request) {
+  if (request.status !== 'processed' || !['waiting_decision', 'consulted'].includes(request.substatus)) return null;
+  const taskType = request.substatus === 'waiting_decision' ? 'waiting_decision_followup' : 'consulted_followup';
   const existingTask = getDb().prepare(`
     SELECT id FROM tasks
-    WHERE task_type = 'waiting_decision_followup' AND status IN ('scheduled', 'processing')
+    WHERE task_type = ? AND status IN ('scheduled', 'processing')
       AND json_extract(payload, '$.requestId') = ?
     LIMIT 1
-  `).get(request.id);
+  `).get(taskType, request.id);
   if (existingTask) return null;
-  const dueAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+  const dueAt = new Date(Date.now() + followupDelayDays() * 24 * 60 * 60 * 1000).toISOString();
   insertOrReplaceTask({
     id: crypto.randomUUID(),
-    taskType: 'waiting_decision_followup',
+    taskType,
     status: 'scheduled',
     dueAt,
     createdAt: nowIso(),
@@ -1705,12 +1728,12 @@ function maybeScheduleWaitingDecisionFollowup(request) {
     lastError: null,
     processingStartedAt: null,
     updatedAt: nowIso(),
-    payload: { requestId: request.id, assignedTo: request.assignedTo || null }
+    payload: { requestId: request.id, assignedTo: request.assignedTo || null, substatus: request.substatus }
   });
-  return dueAt;
+  return { dueAt, taskType };
 }
 
-function updateRequestStatus({ requestId, toStatus, substatus = null, actorId, actorRole, lostReason = null, comment = null, followupAt = null }) {
+function updateRequestStatus({ requestId, toStatus, substatus = null, actorId, actorRole, lostReason = null, comment = null, followupAt = null, metaJson = {} }) {
   initializeStore();
   const row = getDb().prepare('SELECT * FROM requests WHERE id = ? LIMIT 1').get(requestId);
   if (!row) return { error: 'REQUEST_NOT_FOUND' };
@@ -1720,7 +1743,7 @@ function updateRequestStatus({ requestId, toStatus, substatus = null, actorId, a
   const nextStatus = validateRequestStatus(toStatus);
   const nextSubstatus = validateRequestSubstatus(substatus) || null;
   const statusComment = String(comment || lostReason || '').trim() || null;
-  const transition = canTransitionRequest({ fromStatus, fromSubstatus, toStatus: nextStatus, toSubstatus: nextSubstatus });
+  const transition = canTransitionRequest({ fromStatus, fromSubstatus, toStatus: nextStatus, toSubstatus: nextSubstatus, archived: request.archived });
 
   if (!nextStatus) return { error: 'INVALID_STATUS' };
   if (!transition.ok) return { error: transition.error, fromStatus, toStatus: nextStatus, fromSubstatus, toSubstatus: nextSubstatus };
@@ -1734,6 +1757,9 @@ function updateRequestStatus({ requestId, toStatus, substatus = null, actorId, a
   request.updatedAt = nowIso();
   request.lastFollowupAt = followupAt || request.lastFollowupAt || null;
   request.lostReason = request.substatus === 'rejected' ? statusComment : null;
+  request.rejectionComment = request.substatus === 'rejected' ? statusComment : null;
+  request.completedAt = request.status === 'completed' ? request.updatedAt : null;
+  request.lastOutboundError = request.status === 'error' ? (statusComment || request.lastOutboundError || 'outbound_delivery_error') : null;
   if (!request.assignedMasterId && actorId) request.assignedMasterId = actorId;
 
   const history = createRequestStatusHistoryEvent({
@@ -1745,11 +1771,34 @@ function updateRequestStatus({ requestId, toStatus, substatus = null, actorId, a
     actorId,
     actorRole,
     comment: statusComment,
-    metaJson: { archived: request.archived, lostReason: request.lostReason }
+    metaJson: {
+      archived: request.archived,
+      lostReason: request.lostReason,
+      rejectionComment: request.rejectionComment,
+      completedAt: request.completedAt,
+      lastOutboundError: request.lastOutboundError,
+      ...metaJson
+    }
   });
 
   const tx = getDb().transaction(() => {
     insertOrReplaceRequest(request);
+    if (!(request.status === 'processed' && ['waiting_decision', 'consulted'].includes(request.substatus))) {
+      const tasks = getDb().prepare(`
+        SELECT * FROM tasks
+        WHERE task_type IN ('waiting_decision_followup', 'consulted_followup')
+          AND status IN ('scheduled', 'processing')
+          AND json_extract(payload, '$.requestId') = ?
+      `).all(requestId).map(taskRowToEntity);
+      tasks.forEach((task) => {
+        task.status = 'cancelled';
+        task.lastError = 'FOLLOWUP_CANCELLED_BY_STATUS_CHANGE';
+        task.processingStartedAt = null;
+        task.updatedAt = nowIso();
+        task.processedAt = task.processedAt || nowIso();
+        insertOrReplaceTask(task);
+      });
+    }
     insertRequestEvent(history);
     insertCommunication({
       id: crypto.randomUUID(),
@@ -1782,12 +1831,24 @@ function updateRequestStatus({ requestId, toStatus, substatus = null, actorId, a
       requestId,
       clientId: request.clientId,
       status: request.status,
-      metaJson: { fromStatus, toStatus: request.status, fromSubstatus, toSubstatus: request.substatus, actorId, actorRole, comment: statusComment, archived: request.archived },
+      metaJson: {
+        fromStatus,
+        toStatus: request.status,
+        fromSubstatus,
+        toSubstatus: request.substatus,
+        actorId,
+        actorRole,
+        comment: statusComment,
+        archived: request.archived,
+        completedAt: request.completedAt,
+        lastOutboundError: request.lastOutboundError,
+        ...metaJson
+      },
       createdAt: nowIso()
     });
 
-    if (request.status === 'processed' && request.substatus === 'waiting_decision') {
-      const dueAt = maybeScheduleWaitingDecisionFollowup(request);
+    if (request.status === 'processed' && ['waiting_decision', 'consulted'].includes(request.substatus)) {
+      const scheduled = maybeScheduleProcessedFollowup(request);
       insertRequestEvent({
         id: crypto.randomUUID(),
         eventScope: 'request',
@@ -1797,9 +1858,9 @@ function updateRequestStatus({ requestId, toStatus, substatus = null, actorId, a
         actorId,
         actorRole,
         actorType: actorRole || 'system',
-        comment: dueAt ? `followup_due:${dueAt}` : 'followup_already_scheduled',
-        payload: { dueAt },
-        metaJson: { dueAt },
+        comment: scheduled?.dueAt ? `followup_due:${scheduled.dueAt}` : 'followup_already_scheduled',
+        payload: { dueAt: scheduled?.dueAt || null, taskType: scheduled?.taskType || null, substatus: request.substatus },
+        metaJson: { dueAt: scheduled?.dueAt || null, taskType: scheduled?.taskType || null, substatus: request.substatus },
         createdAt: nowIso()
       });
     }
@@ -1877,6 +1938,47 @@ function reactivateWaitingDecisionRequest({ requestId, actorId = 'system', actor
   return { request, history };
 }
 
+function registerConsultedFollowup({ requestId, actorId = 'system', actorRole = 'system' }) {
+  initializeStore();
+  const request = findRequestById(requestId);
+  if (!request || request.status !== 'processed' || request.substatus !== 'consulted') return null;
+  request.lastFollowupAt = nowIso();
+  request.updatedAt = request.lastFollowupAt;
+  const history = createRequestStatusHistoryEvent({
+    request,
+    fromStatus: 'processed',
+    toStatus: 'processed',
+    fromSubstatus: 'consulted',
+    toSubstatus: 'consulted',
+    actorId,
+    actorRole,
+    comment: 'consulted_followup_reminder',
+    eventType: 'followup_reactivated',
+    metaJson: { scheduler: true, reminderOnly: true, lastFollowupAt: request.lastFollowupAt }
+  });
+  const tx = getDb().transaction(() => {
+    insertOrReplaceRequest(request);
+    insertRequestEvent(history);
+    const scheduled = maybeScheduleProcessedFollowup(request);
+    insertRequestEvent({
+      id: crypto.randomUUID(),
+      eventScope: 'request',
+      eventType: 'followup_scheduled',
+      requestId,
+      clientId: request.clientId,
+      actorId,
+      actorRole,
+      actorType: actorRole || 'system',
+      comment: scheduled?.dueAt ? `followup_due:${scheduled.dueAt}` : 'followup_already_scheduled',
+      payload: { dueAt: scheduled?.dueAt || null, taskType: scheduled?.taskType || 'consulted_followup', substatus: 'consulted' },
+      metaJson: { dueAt: scheduled?.dueAt || null, taskType: scheduled?.taskType || 'consulted_followup', substatus: 'consulted' },
+      createdAt: nowIso()
+    });
+  });
+  tx();
+  return { request, history };
+}
+
 function updateRequestAssignment({ requestId, assignedTo, assignedBy = null, actorId = null, actorRole = null, actorType = null, metaJson = {} }) {
   initializeStore();
   const row = getDb().prepare('SELECT * FROM requests WHERE id = ? LIMIT 1').get(requestId);
@@ -1885,6 +1987,14 @@ function updateRequestAssignment({ requestId, assignedTo, assignedBy = null, act
   const assignmentValidation = validateAssignment(assignedTo);
   if (!assignmentValidation.ok) return { error: assignmentValidation.error };
   const normalizedAssignedTo = assignmentValidation.value;
+  if (
+    normalizedAssignedTo &&
+    request.assignedTo &&
+    request.assignedTo !== normalizedAssignedTo &&
+    actorRole !== 'admin'
+  ) {
+    return { error: 'REQUEST_ALREADY_ASSIGNED', assignedTo: request.assignedTo };
+  }
 
   const oldValue = request.assignedTo || null;
   request.assignedTo = normalizedAssignedTo;
@@ -2546,14 +2656,19 @@ function listRequestEvents({ requestId = null, since = null, until = null, event
     .slice(0, limit);
 }
 
-function listOperationalLogs({ requestId = null, since = null, eventType = null, bot = null, limit = 100 } = {}) {
+function listOperationalLogs({ requestId = null, since = null, eventType = null, bot = null, channel = null, user = null, limit = 100 } = {}) {
   initializeStore();
-  const events = listRequestEvents({ requestId, since, eventType, limit });
+  const events = listRequestEvents({ requestId, since, eventType, limit }).filter((item) => {
+    if (user && String(item.actorId || '').indexOf(user) === -1) return false;
+    if (channel && String(item.metaJson?.channel || '').indexOf(channel) === -1) return false;
+    return true;
+  });
   const communications = listRows('communications', 'created_at DESC').map(communicationRowToEntity)
     .filter((item) => {
       if (requestId && item.requestId !== requestId) return false;
       if (since && Date.parse(item.createdAt || '') < Date.parse(since)) return false;
       if (bot && String(item.source || item.channel || '').indexOf(bot) === -1) return false;
+      if (channel && String(item.channel || item.source || '').indexOf(channel) === -1) return false;
       return true;
     })
     .slice(0, limit);
@@ -2562,6 +2677,7 @@ function listOperationalLogs({ requestId = null, since = null, eventType = null,
       if (requestId && item.requestId !== requestId) return false;
       if (since && Date.parse(item.createdAt || '') < Date.parse(since)) return false;
       if (bot && String(item.channel || item.platform || item.sourceSystem || '').indexOf(bot) === -1) return false;
+      if (channel && String(item.channel || item.platform || '').indexOf(channel) === -1) return false;
       if (eventType && item.eventType !== eventType) return false;
       return item.eventType.includes('webhook') || item.eventType.includes('integration') || item.status === 'error' || item.processingStatus === 'failed';
     })
@@ -2650,7 +2766,8 @@ const api = {
   replaceStore,
   shutdown,
   normalizePhone10,
-  reactivateWaitingDecisionRequest
+  reactivateWaitingDecisionRequest,
+  registerConsultedFollowup
 };
 
 module.exports = api;

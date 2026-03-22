@@ -102,6 +102,107 @@ test('status transitions and lost reason validation work', async () => {
   });
 });
 
+test('master bot inline flow supports assignment archive and protected transitions', async () => {
+  await withServer(async (base) => {
+    const req = await createClientRequest(base, { fullName: 'Архив Тест', phone: '0000000012', wasClientBefore: 'yes', brand: 'BMW', model: 'X1', year: '2023', vin: 'VIN-ARCHIVE', description: 'archive' });
+
+    const take = await fetch(`${base}/telegram/master_bot/webhook`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ callback_query: { id: 'cb-1', from: { id: 5001, first_name: 'Admin' }, message: { chat: { id: 5001 } }, data: `req:${req.id}:in_progress` } })
+    }).then((res) => res.json());
+    assert.equal(take.ok, true);
+    assert.equal(take.request.status, 'in_progress');
+
+    const doneFromNewReq = await createClientRequest(base, { fullName: 'Нельзя завершить', phone: '0000000013', wasClientBefore: 'no', brand: 'Audi', model: 'A4', year: '2024', vin: 'VIN-NEW', description: 'new' });
+    const invalid = await sendMaster(base, `/set_status ${doneFromNewReq.id} completed`);
+    assert.equal(invalid.ok, false);
+    assert.equal(invalid.error, 'INVALID_TRANSITION');
+
+    const rejected = await sendMaster(base, `/set_status ${req.id} processed rejected дорого`);
+    assert.equal(rejected.ok, true);
+    assert.equal(rejected.request.archived, true);
+    assert.equal(rejected.request.rejectionComment, 'дорого');
+
+    const archivedList = await sendMaster(base, 'Архив');
+    assert.equal(archivedList.items.some((item) => item.id === req.id), true);
+
+    const invalidArchivedMove = await sendMaster(base, `/set_status ${req.id} in_service`);
+    assert.equal(invalidArchivedMove.ok, false);
+    assert.equal(invalidArchivedMove.error, 'ARCHIVED_IMMUTABLE');
+  });
+});
+
+test('request data routing prefers source channel and falls back only to confirmed identity', async () => {
+  db.resetStore();
+  const { createMasterService } = require('../../src/core/application/masterService');
+
+  const telegramClient = db.upsertClient({ fullName: 'TG Client', phone: '0000000014', telegramId: '10014', preferredChannel: 'telegram' });
+  const maxClient = db.upsertClient({ fullName: 'MAX Client', phone: '0000000015', maxId: 'mx-15', preferredChannel: 'max' });
+  const mixedClient = db.upsertClient({ fullName: 'Mixed Client', phone: '0000000016', telegramId: '10016', maxId: 'mx-16' });
+  const unknownClient = db.upsertClient({ fullName: 'Unknown Client', phone: '0000000017' });
+
+  const telegramRequest = db.createRequest({ clientId: telegramClient.id, requestType: 'service_request', description: 'tg', sourceChannel: 'telegram_chat' });
+  const maxRequest = db.createRequest({ clientId: maxClient.id, requestType: 'service_request', description: 'max', sourceChannel: 'max_chat' });
+  const mixedRequest = db.createRequest({ clientId: mixedClient.id, requestType: 'service_request', description: 'mixed', sourceChannel: 'webapp' });
+  const unknownRequest = db.createRequest({ clientId: unknownClient.id, requestType: 'service_request', description: 'unknown', sourceChannel: 'webapp' });
+
+  const attempts = [];
+  const service = createMasterService({
+    db,
+    actorChannel: 'telegram',
+    sendClientMessage: async ({ channel, recipientId }) => {
+      attempts.push({ channel, recipientId });
+      if (channel === 'telegram' && recipientId === Number(telegramClient.telegramId)) return true;
+      if (channel === 'max' && recipientId === maxClient.maxId) return true;
+      if (channel === 'max' && recipientId === mixedClient.maxId) return false;
+      if (channel === 'telegram' && recipientId === Number(mixedClient.telegramId)) return true;
+      return false;
+    }
+  });
+
+  const tgResult = await service.requestClientClarification({ requestId: telegramRequest.id, actorId: 'm1', actorRole: 'master', text: 'ping', telegramClientBotToken: 'tg-token', maxClientBotToken: 'max-token' });
+  assert.equal(tgResult.ok, true);
+  assert.equal(tgResult.channel, 'telegram');
+
+  const maxResult = await service.requestClientClarification({ requestId: maxRequest.id, actorId: 'm1', actorRole: 'master', text: 'ping', telegramClientBotToken: 'tg-token', maxClientBotToken: 'max-token' });
+  assert.equal(maxResult.ok, true);
+  assert.equal(maxResult.channel, 'max');
+
+  const mixedResult = await service.requestClientClarification({ requestId: mixedRequest.id, actorId: 'm1', actorRole: 'master', text: 'ping', telegramClientBotToken: 'tg-token', maxClientBotToken: 'max-token' });
+  assert.equal(mixedResult.ok, true);
+  assert.equal(mixedResult.channel, 'telegram');
+  assert.deepEqual(attempts.slice(-2).map((item) => item.channel), ['max', 'telegram']);
+
+  const unknownResult = await service.requestClientClarification({ requestId: unknownRequest.id, actorId: 'm1', actorRole: 'master', text: 'ping', telegramClientBotToken: 'tg-token', maxClientBotToken: 'max-token' });
+  assert.equal(unknownResult.ok, false);
+  assert.equal(unknownResult.error, 'CLIENT_CHANNEL_UNRESOLVED');
+  const erroredRequest = db.findRequestById(unknownRequest.id);
+  assert.equal(erroredRequest.status, 'error');
+  assert.equal(Boolean(erroredRequest.lastOutboundError), true);
+});
+
+test('diagnostics and logs are available only for admin and do not expose raw secrets', async () => {
+  process.env.TELEGRAM_CLIENT_BOT_TOKEN = '123456:ABCDEF_SECRET';
+  process.env.TELEGRAM_MASTER_BOT_TOKEN = '123456:MASTER_SECRET';
+  await withServer(async (base) => {
+    const adminDiag = await sendMaster(base, '/diagnostics');
+    assert.equal(adminDiag.ok, true);
+    assert.match(adminDiag.text, /TELEGRAM_CLIENT_BOT_TOKEN: configured/i);
+    assert.doesNotMatch(adminDiag.text, /ABCDEF_SECRET/);
+
+    const adminLogs = await sendMaster(base, '/logs request:none');
+    assert.equal(adminLogs.ok, true);
+    assert.match(adminLogs.text, /Логи/i);
+
+    const denied = await sendMaster(base, '/logs', 7001);
+    assert.equal(denied.ok, false);
+    assert.match(`${denied.text || denied.error || ''}`, /ACCESS_DENIED|Доступ запрещён|Недостаточно прав/i);
+  });
+  delete process.env.TELEGRAM_CLIENT_BOT_TOKEN;
+  delete process.env.TELEGRAM_MASTER_BOT_TOKEN;
+});
+
 test('persistence stores status history internal comments and assignment', async () => {
   await withServer(async (base) => {
     const req = await createClientRequest(base, { fullName: 'Сохранение', phone: '0000000004', wasClientBefore: 'yes', brand: 'Toyota', model: 'Corolla', year: '2022', vin: 'VINP', description: 'persist' });
