@@ -12,12 +12,19 @@ const REQUEST_TYPES = Object.freeze({
 
 const REQUEST_STATUSES = Object.freeze({
   NEW: 'new',
-  ASSIGNED: 'assigned',
-  AWAITING_CLIENT: 'awaiting_client',
-  SCHEDULED: 'scheduled',
+  IN_PROGRESS: 'in_progress',
+  PROCESSED: 'processed',
   IN_SERVICE: 'in_service',
-  DONE: 'done',
-  CANCELLED: 'cancelled'
+  COMPLETED: 'completed',
+  ERROR: 'error'
+});
+
+const REQUEST_SUBSTATUSES = Object.freeze({
+  RECORDED: 'recorded',
+  CONSULTED: 'consulted',
+  SPAM: 'spam',
+  WAITING_DECISION: 'waiting_decision',
+  REJECTED: 'rejected'
 });
 
 const VISIT_STATUSES = Object.freeze({
@@ -63,6 +70,7 @@ const SOURCE_SYSTEM = Object.freeze({
 module.exports = {
   REQUEST_TYPES,
   REQUEST_STATUSES,
+  REQUEST_SUBSTATUSES,
   VISIT_STATUSES,
   RECOMMENDATION_STATUSES,
   RECOMMENDATION_SEVERITY,

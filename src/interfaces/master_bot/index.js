@@ -4,41 +4,62 @@ const logger = require('../../infrastructure/logging/logger');
 const { sendChannelMessage, answerChannelCallback } = require('../../infrastructure/messaging');
 const { extractIncomingEvent } = require('../shared/channelAdapters');
 const { validateMaxWebhookRequest } = require('../shared/maxSecurity');
-const { REQUEST_STATUSES } = require('../../core/shared/requestValidation');
+const { REQUEST_STATUSES, REQUEST_SUBSTATUSES } = require('../../core/shared/requestValidation');
 
 const sessions = new Map();
+const PROCESSED_SUBSTATUS_LABELS = {
+  recorded: 'записан',
+  consulted: 'проконсультирован',
+  spam: 'спам',
+  waiting_decision: 'ждём решения',
+  rejected: 'отказ'
+};
 
 function canUseReports(actor) {
   return actor?.role === 'manager' || actor?.role === 'admin';
 }
-
 function canManageAccess(actor) {
   return actor?.role === 'manager' || actor?.role === 'admin';
 }
+function isAdmin(actor) {
+  return actor?.role === 'admin';
+}
 
 function formatRequestLine(request) {
-  return `${request.id} | ${request.requestType} | ${request.status} | ${request.description || '-'}`;
+  return `${request.id} | ${request.requestType} | ${request.status}${request.substatus ? `/${request.substatus}` : ''} | ${request.description || '-'}`;
+}
+
+function buildProcessedSubstatusKeyboard(requestId) {
+  return {
+    inline_keyboard: [
+      [{ text: 'записан', callback_data: `req:${requestId}:processed:recorded` }],
+      [{ text: 'проконсультирован', callback_data: `req:${requestId}:processed:consulted` }],
+      [{ text: 'спам', callback_data: `req:${requestId}:processed:spam` }],
+      [{ text: 'ждём решения', callback_data: `req:${requestId}:processed:waiting_decision` }],
+      [{ text: 'отказ', callback_data: `req:${requestId}:processed:rejected` }]
+    ]
+  };
+}
+
+function buildAdminKeyboard(requestId) {
+  return [{ text: 'Подробнее', callback_data: `card:${requestId}` }];
 }
 
 function buildRequestActionsKeyboard(requestId) {
   return {
     inline_keyboard: [
       [
-        { text: 'Назначить', callback_data: `req:${requestId}:assigned` },
-        { text: 'Ждём клиента', callback_data: `req:${requestId}:awaiting_client` }
+        { text: 'Взять в работу', callback_data: `req:${requestId}:in_progress` },
+        { text: 'Запросить данные', callback_data: `req:${requestId}:ask_client` }
       ],
       [
-        { text: 'Запланировать', callback_data: `req:${requestId}:scheduled` },
+        { text: 'Обработана', callback_data: `req:${requestId}:processed_menu` },
         { text: 'В сервисе', callback_data: `req:${requestId}:in_service` }
       ],
       [
-        { text: 'Завершить', callback_data: `req:${requestId}:done` },
-        { text: 'Отменить', callback_data: `req:${requestId}:cancelled` }
-      ],
-      [
-        { text: 'Комментарий', callback_data: `req:${requestId}:comment` }
-      ],
-      [{ text: 'Подробнее', callback_data: `card:${requestId}` }]
+        { text: 'Завершить', callback_data: `req:${requestId}:completed` },
+        { text: 'Подробнее', callback_data: `card:${requestId}` }
+      ]
     ]
   };
 }
@@ -47,6 +68,7 @@ function buildRequestCardText(card) {
   const r = card.request;
   const client = card.client || {};
   const vehicle = card.vehicle || {};
+  const executor = card.assignedMaster?.fullName || r.assignedTo || r.assignedMasterId || '-';
   const history = (card.requestEvents || [])
     .slice(-10)
     .map((event) => `${event.createdAt}: ${event.canonicalEventType || event.eventType} ${event.oldValue || event.oldStatus || '-'} -> ${event.newValue || event.newStatus || '-'}${event.comment ? ` (${event.comment})` : ''}`)
@@ -55,23 +77,21 @@ function buildRequestCardText(card) {
     `ID: ${r.id}`,
     `Тип: ${r.requestType}`,
     `Статус: ${r.status}`,
+    `Подстатус: ${r.substatus ? PROCESSED_SUBSTATUS_LABELS[r.substatus] || r.substatus : '-'}`,
+    `Архив: ${r.archived ? 'да' : 'нет'}`,
     `ФИО: ${client.fullName || '-'}`,
     `Телефон: ${client.phone || '-'}`,
     `Telegram ID: ${client.telegramId || '-'}`,
     `MAX ID: ${client.maxId || '-'}`,
-    `Был ранее: ${r.payload?.wasClientBefore || '-'}`,
     `VIN: ${vehicle.vin || '-'}`,
-    `Автомобиль: ${r.payload?.car || '-'}`,
     `Марка/модель: ${vehicle.brand || '-'} / ${vehicle.model || '-'}`,
-    `Год: ${vehicle.year || '-'}`,
     `Описание: ${r.description || '-'}`,
     `Источник: ${r.sourceChannel || '-'}`,
-    `Назначено: ${r.assignedTo || r.assignedMasterId || '-'}`,
+    `Исполнитель: ${executor}`,
     `Назначил: ${r.assignedBy || '-'}`,
     `Когда назначено: ${r.assignedAt || '-'}`,
+    `Последнее повторное касание: ${r.lastFollowupAt || '-'}`,
     `Создано: ${r.createdAt || '-'}`,
-    `Клиент ID: ${r.clientId || '-'}`,
-    `Авто ID: ${r.vehicleId || '-'}`,
     `История:\n${history}`
   ].join('\n');
 }
@@ -86,27 +106,50 @@ function staffIdentity(user) {
 
 function helpText(channel) {
   return [
+    'Инструкция по заявкам:',
+    '- new: новая заявка, ещё не взята мастером.',
+    '- in_progress: мастер взял заявку в работу.',
+    '- processed/recorded: клиент записан, заявка активна.',
+    '- processed/consulted: клиент проконсультирован, заявка активна и под наблюдением.',
+    '- processed/spam: архив, повторные касания выключены.',
+    '- processed/waiting_decision: через 7 дней scheduler вернёт заявку в in_progress и уведомит мастера.',
+    '- processed/rejected: архив, обязателен комментарий.',
+    '- in_service: машина в сервисе.',
+    '- completed: финально закрыта и архивирована.',
+    '- error: сообщение клиенту не доставлено, проверьте контакты и повторите отправку.',
+    '',
+    'Как работать:',
+    '1) Нажмите «Взять в работу».',
+    '2) Если данных мало — «Запросить данные».',
+    '3) После общения — «Обработана» и выберите подстатус.',
+    '4) Когда клиент приехал — «В сервисе».',
+    '5) После завершения — «Завершить».',
+    '',
+    'Архив: spam, rejected и completed.',
+    'Ошибка отправки: статус error, смотрите Логи и повторите запрос.',
+    '',
+    'Команды:',
     '/start',
     '/help',
     '/whoami',
     '/search <query>',
     '/request <id>',
-    `/set_status <requestId> <${REQUEST_STATUSES.join('|')}> [reason]`,
+    `/set_status <requestId> <${REQUEST_STATUSES.join('|')}> [substatus] [comment]`,
     '/comment <requestId> <text>',
     '/ask_client <requestId> <text>',
     `/access_grant <${channel === 'max' ? 'maxId' : 'telegramId'}> <master|manager> [ФИО]`,
-    `/access_revoke <${channel === 'max' ? 'maxId' : 'telegramId'}>`
+    `/access_revoke <${channel === 'max' ? 'maxId' : 'telegramId'}>`,
+    '/diagnostics',
+    '/logs [request:<id>] [type:<type>] [bot:<bot>] [since:YYYY-MM-DD]'
   ].join('\n');
 }
 
 function masterToken(config, channel) {
   return channel === 'max' ? config.maxMasterBotToken : config.telegramMasterBotToken;
 }
-
 function adminIds(config, channel) {
   return channel === 'max' ? config.maxMasterBotAdminIds : config.masterBotAdminIds;
 }
-
 function buildSenderSnapshot({ body, event }) {
   return event.callback
     ? {
@@ -115,55 +158,73 @@ function buildSenderSnapshot({ body, event }) {
       }
     : event.message?.from || event.message?.sender || body?.sender || body?.user || null;
 }
-
 function resolveRecipientId(channel, primaryId, fallbackId) {
   if (channel === 'max') return primaryId || fallbackId || null;
   return fallbackId || primaryId || null;
 }
-
 function registerMasterBotRoutes(router) {
   router.push({ method: 'POST', path: '/telegram/master_bot/webhook', handler: (ctx) => handleMasterWebhook({ ...ctx, channel: 'telegram' }) });
   router.push({ method: 'POST', path: '/max/master_bot/webhook', handler: (ctx) => handleMasterWebhook({ ...ctx, channel: 'max' }) });
 }
-
 async function respondWithMessage({ channel, token, recipientId, text, payload = {}, extra = {} }) {
   if (text) {
     const delivered = await sendChannelMessage({ channel, token, recipientId, text, extra });
-    if (!delivered) {
-      logger.error('master_bot outbound sendMessage failed', { channel, recipientId, textPreview: String(text || '').slice(0, 200) });
-    }
+    if (!delivered) logger.error('master_bot outbound sendMessage failed', { channel, recipientId, textPreview: String(text || '').slice(0, 200) });
   }
   return text ? { ...payload, text } : payload;
 }
 
+function parseLogsFilter(text = '') {
+  return String(text || '').split(/\s+/).reduce((acc, part) => {
+    const [key, ...rest] = part.split(':');
+    if (!rest.length) return acc;
+    acc[key] = rest.join(':');
+    return acc;
+  }, {});
+}
+
+function buildDiagnosticsText({ config, actor, channel }) {
+  const runtime = db.getDbRuntimeInfo();
+  const schedulerTasks = db.listTasks(['scheduled', 'processing', 'failed']).filter((item) => item.taskType === 'waiting_decision_followup');
+  return [
+    'Диагностика:',
+    `DB: ok (${runtime.type})`,
+    `SQLite path: ${runtime.path}`,
+    `WEBAPP_URL: ${config.webAppUrl ? 'configured' : 'missing'}`,
+    `TELEGRAM tokens: ${config.telegramClientBotToken && config.telegramMasterBotToken ? 'configured' : 'partial/missing'}`,
+    `MAX tokens: ${config.maxClientBotToken && config.maxMasterBotToken ? 'configured' : 'partial/missing'}`,
+    `Health endpoints: /health, /health/db, /health/max`,
+    `Scheduler waiting_decision tasks: ${schedulerTasks.length}`,
+    `Webhook routes: /${channel}/master_bot/webhook, /telegram/client_bot/webhook, /max/client_bot/webhook, /telegram/integration_bot/webhook`,
+    `Bots availability: master=${Boolean(masterToken(config, channel))}, client=${Boolean(config.telegramClientBotToken || config.maxClientBotToken)}, integration=${Boolean(config.telegramIntegrationBotToken)}`,
+    `Actor: ${actor.id} (${actor.role})`
+  ].join('\n');
+}
+
+function buildLogsText(filters = {}) {
+  const logs = db.listOperationalLogs({
+    requestId: filters.request,
+    since: filters.since,
+    eventType: filters.type,
+    bot: filters.bot,
+    limit: 20
+  });
+  const sections = [];
+  sections.push('Errors / events:');
+  sections.push((logs.events || []).slice(0, 10).map((item) => `${item.createdAt} | ${item.canonicalEventType || item.eventType} | ${item.requestId || '-'} | ${item.comment || '-'}`).join('\n') || 'Нет request_events');
+  sections.push('Communications:');
+  sections.push((logs.communications || []).slice(0, 10).map((item) => `${item.createdAt} | ${item.source || item.channel} | ${item.requestId || '-'} | ${item.direction || '-'}`).join('\n') || 'Нет communications');
+  sections.push('Integration/webhook:');
+  sections.push((logs.integration || []).slice(0, 10).map((item) => `${item.createdAt} | ${item.eventType} | ${item.status || item.processingStatus || '-'} | ${item.requestId || '-'}`).join('\n') || 'Нет analytics/integration ошибок');
+  return sections.join('\n\n');
+}
+
 async function handleMasterWebhook({ body, config, headers = {}, rawHeaders = [], pathname = '', method = 'POST', channel = 'telegram' }) {
   if (channel === 'max') {
-    db.createAnalyticsEvent({
-      eventType: 'max_webhook_received',
-      channel: 'max',
-      platform: 'max',
-      status: 'received',
-      metaJson: { route: 'master_bot', pathname, method }
-    });
-    const validation = validateMaxWebhookRequest({
-      config,
-      headers,
-      rawHeaders,
-      pathname,
-      method,
-      logger,
-      routeLabel: 'master_bot',
-      token: masterToken(config, channel),
-      body
-    });
+    db.createAnalyticsEvent({ eventType: 'max_webhook_received', channel: 'max', platform: 'max', status: 'received', metaJson: { route: 'master_bot', pathname, method } });
+    const validation = validateMaxWebhookRequest({ config, headers, rawHeaders, pathname, method, logger, routeLabel: 'master_bot', token: masterToken(config, channel), body });
     if (!validation.ok) {
-      db.createAnalyticsEvent({
-        eventType: 'max_webhook_rejected',
-        channel: 'max',
-        platform: 'max',
-        status: validation.error,
-        metaJson: { route: 'master_bot', pathname, method, statusCode: validation.statusCode }
-      });
+      db.createAnalyticsEvent({ eventType: 'max_webhook_rejected', channel: 'max', platform: 'max', status: validation.error, metaJson: { route: 'master_bot', pathname, method, statusCode: validation.statusCode } });
       return { ok: false, error: validation.error, statusCode: validation.statusCode };
     }
   }
@@ -172,27 +233,8 @@ async function handleMasterWebhook({ body, config, headers = {}, rawHeaders = []
     const event = extractIncomingEvent({ body, channel });
     const updateType = event.callback ? 'callback' : (event.message ? 'message' : 'unknown');
     const senderBlock = buildSenderSnapshot({ body, event });
-    logger.info('master_bot webhook parsed update', {
-      channel,
-      pathname,
-      method,
-      updateType,
-      hasMessage: Boolean(event.message),
-      hasSender: Boolean(event.message?.from || body?.sender || body?.user || event.callback),
-      senderBlock,
-      userId: event.callback?.userId || event.userId || null,
-      text: String(event.callback ? event.callback.data || '' : event.text || '').slice(0, 500)
-    });
-    if (!event.message && !event.callback) {
-      logger.warn('master_bot unknown update without message/callback', {
-        channel,
-        pathname,
-        method,
-        reason: 'NO_MESSAGE_AND_NO_CALLBACK',
-        body
-      });
-      return { ok: true, action: 'ignored_unknown_update', updateType };
-    }
+    logger.info('master_bot webhook parsed update', { channel, pathname, method, updateType, senderBlock, text: String(event.callback ? event.callback.data || '' : event.text || '').slice(0, 500) });
+    if (!event.message && !event.callback) return { ok: true, action: 'ignored_unknown_update', updateType };
 
     const token = masterToken(config, channel);
     const masterService = createMasterService({ db, sendClientMessage: sendChannelMessage, adminIds: adminIds(config, channel), actorChannel: channel });
@@ -205,46 +247,20 @@ async function handleMasterWebhook({ body, config, headers = {}, rawHeaders = []
     const text = String(event.text || '').trim();
 
     if (text === '/whoami') {
-      logger.info('master_bot handler branch selected', { channel, pathname, branch: '/whoami', channelUserId, recipientId });
-      return respondWithMessage({
-        channel,
-        token,
-        recipientId,
-        text: [
-          `Identity: ${actor?.id || channelUserId || '-'}`,
-          `Role: ${actor?.role || 'unknown'}`,
-          `Channel: ${channel}`,
-          `Channel user id: ${channelUserId || '-'}`,
-          `Name: ${actor?.fullName || fullName || '-'}`
-        ].join('\n'),
-        payload: { ok: true, action: 'whoami', channelUserId, channel, actor }
-      });
+      return respondWithMessage({ channel, token, recipientId, text: [`Identity: ${actor?.id || channelUserId || '-'}`, `Role: ${actor?.role || 'unknown'}`, `Channel: ${channel}`, `Channel user id: ${channelUserId || '-'}`, `Name: ${actor?.fullName || fullName || '-'}`].join('\n'), payload: { ok: true, action: 'whoami', channelUserId, channel, actor } });
+    }
+
+    if (text === '/help' || text === 'Инструкция') {
+      return respondWithMessage({ channel, token, recipientId, text: helpText(channel), payload: { ok: true, action: 'help' } });
     }
 
     if (!actor) {
-      logger.warn('master_bot access denied', {
-        channel,
-        pathname,
-        reason: 'ACTOR_NOT_FOUND_OR_NOT_ALLOWED',
-        channelUserId,
-        recipientId,
-        configuredAdminIds: adminIds(config, channel)
-      });
-      if (recipientId) {
-        await respondWithMessage({
-          channel,
-          token,
-          recipientId,
-          text: `Доступ запрещён: user_id ${channelUserId || '-'} не найден в staff/admin. Используйте /whoami и добавьте ID в MAX_MASTER_BOT_ADMIN_IDS или выдайте доступ через /access_grant.`,
-          payload: { ok: false, error: 'ACCESS_DENIED', channelUserId, reason: 'ACTOR_NOT_FOUND_OR_NOT_ALLOWED' }
-        });
-      }
-      return { ok: false, error: 'ACCESS_DENIED', channelUserId, reason: 'ACTOR_NOT_FOUND_OR_NOT_ALLOWED' };
+      if (recipientId) await respondWithMessage({ channel, token, recipientId, text: `Доступ запрещён: user_id ${channelUserId || '-'} не найден в staff/admin. Используйте /whoami.`, payload: { ok: false, error: 'ACCESS_DENIED', reason: 'ACTOR_NOT_FOUND_OR_NOT_ALLOWED', channelUserId } });
+      return { ok: false, error: 'ACCESS_DENIED', reason: 'ACTOR_NOT_FOUND_OR_NOT_ALLOWED', channelUserId };
     }
 
     if (event.callback?.id) {
       const data = String(event.callback.data || '');
-      logger.info('master_bot callback received', { channel, pathname, channelUserId, recipientId, data });
       if (data.startsWith('card:')) {
         const requestId = data.split(':')[1];
         const card = masterService.getRequestCard(requestId);
@@ -252,98 +268,89 @@ async function handleMasterWebhook({ body, config, headers = {}, rawHeaders = []
         if (!card) return { ok: false, error: 'REQUEST_NOT_FOUND' };
         return respondWithMessage({ channel, token, recipientId, text: buildRequestCardText(card), payload: { ok: true, card }, extra: { reply_markup: buildRequestActionsKeyboard(requestId) } });
       }
+      if (data === 'admin:diagnostics') {
+        await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: 'Готово' });
+        return respondWithMessage({ channel, token, recipientId, text: buildDiagnosticsText({ config, actor, channel }), payload: { ok: true } });
+      }
+      if (data === 'admin:logs') {
+        sessions.set(sessionKey, { step: 'logs_filter' });
+        await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: 'Введите фильтр' });
+        return respondWithMessage({ channel, token, recipientId, text: 'Введите фильтр логов в формате request:<id> type:<type> bot:<bot> since:YYYY-MM-DD' });
+      }
       if (data.startsWith('req:')) {
-        const [, requestId, toStatus] = data.split(':');
-        if (toStatus === 'comment') {
-          sessions.set(sessionKey, { step: 'request_comment', requestId });
-          const answered = await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: 'Введите комментарий' });
-          if (!answered) logger.error('master_bot callback answer failed', { channel, callbackId: event.callback.id, recipientId });
-          return respondWithMessage({ channel, token, recipientId, text: `Введите внутренний комментарий по заявке ${requestId}` });
+        const [, requestId, action, maybeSubstatus] = data.split(':');
+        if (action === 'ask_client') {
+          sessions.set(sessionKey, { step: 'ask_client', requestId });
+          await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: 'Введите сообщение' });
+          return respondWithMessage({ channel, token, recipientId, text: `Введите сообщение клиенту по заявке ${requestId}` });
         }
-        if (toStatus === 'cancelled') {
-          sessions.set(sessionKey, { step: 'cancel_comment', requestId });
-          const answered = await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: 'Укажите комментарий' });
-          if (!answered) logger.error('master_bot callback answer failed', { channel, callbackId: event.callback.id, recipientId });
-          return respondWithMessage({ channel, token, recipientId, text: `Укажите комментарий для отмены заявки ${requestId}` });
+        if (action === 'processed_menu') {
+          await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: 'Выберите подстатус' });
+          return respondWithMessage({ channel, token, recipientId, text: 'Выберите подстатус обработки', payload: { ok: true }, extra: { reply_markup: buildProcessedSubstatusKeyboard(requestId) } });
         }
-        if (toStatus === 'assigned') {
-          masterService.assignRequest({
-            requestId,
-            assignedTo: actor.id,
-            assignedBy: actor.id,
-            actorId: actor.id,
-            actorRole: actor.role,
-            actorType: actor.role,
-            metaJson: { channel }
-          });
+        if (action === 'processed') {
+          if (maybeSubstatus === 'rejected') {
+            sessions.set(sessionKey, { step: 'rejected_comment', requestId, substatus: maybeSubstatus });
+            await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: 'Нужен комментарий' });
+            return respondWithMessage({ channel, token, recipientId, text: `Укажите комментарий для отказа по заявке ${requestId}` });
+          }
+          const result = masterService.changeRequestStatus({ requestId, toStatus: 'processed', substatus: maybeSubstatus, actorId: actor.id, actorRole: actor.role });
+          await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: result?.error ? 'Ошибка' : 'Готово' });
+          return respondWithMessage({ channel, token, recipientId, text: result?.error ? `Ошибка: ${result.error}` : `Заявка ${requestId} → processed/${maybeSubstatus}`, payload: { ok: !result?.error, ...result } });
         }
-        const result = masterService.changeRequestStatus({ requestId, toStatus, actorId: actor.id, actorRole: actor.role });
-        if (!result?.error && toStatus === 'awaiting_client') {
-          await masterService.requestClientClarification({
-            requestId,
-            actorId: actor.id,
-            actorRole: actor.role,
-            text: 'Пожалуйста, уточните недостающие данные по вашему обращению.',
-            telegramClientBotToken: config.telegramClientBotToken,
-            maxClientBotToken: config.maxClientBotToken
-          });
+        if (action === 'in_progress') {
+          masterService.assignRequest({ requestId, assignedTo: actor.id, assignedBy: actor.id, actorId: actor.id, actorRole: actor.role, actorType: actor.role, metaJson: { channel, source: 'take_in_progress' } });
         }
-        const answered = await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: result?.error ? 'Ошибка' : 'Готово' });
-        if (!answered) logger.error('master_bot callback answer failed', { channel, callbackId: event.callback.id, recipientId });
-        return respondWithMessage({ channel, token, recipientId, text: result?.error ? `Ошибка: ${result.error}` : `Статус заявки ${requestId}: ${toStatus}`, payload: { ok: !result?.error, ...result } });
+        const result = masterService.changeRequestStatus({ requestId, toStatus: action, actorId: actor.id, actorRole: actor.role });
+        await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: result?.error ? 'Ошибка' : 'Готово' });
+        return respondWithMessage({ channel, token, recipientId, text: result?.error ? `Ошибка: ${result.error}` : `Статус заявки ${requestId}: ${action}`, payload: { ok: !result?.error, ...result } });
       }
     }
 
-    logger.info('master_bot incoming text', { channel, channelUserId, recipientId, text });
     if (text === '/start') {
-      logger.info('master_bot handler branch selected', { channel, pathname, branch: '/start', channelUserId, recipientId, actorRole: actor.role });
-      const baseKeyboard = [['Новые заявки', 'В работе'], ['Поиск', 'Quality Cases'], ['/help']];
+      const baseKeyboard = [['Новые заявки', 'В работе'], ['Поиск', 'Quality Cases'], ['Инструкция']];
+      if (isAdmin(actor)) baseKeyboard.push(['Диагностика', 'Логи']);
       if (canManageAccess(actor)) baseKeyboard.push(['Доступы']);
       await sendChannelMessage({ channel, token, recipientId, text: `Master Bot запущен. Роль: ${actor.role}.`, extra: { reply_markup: { keyboard: baseKeyboard, resize_keyboard: true } } });
       db.recordMasterAction({ actorId: actor.id, role: actor.role, action: 'master_start', payload: { channel } });
       return { ok: true, action: 'start' };
     }
 
-    if (text === '/help') {
-      logger.info('master_bot handler branch selected', { channel, pathname, branch: '/help', channelUserId, recipientId, actorRole: actor.role });
-      return respondWithMessage({ channel, token, recipientId, text: helpText(channel), payload: { ok: true, action: 'help' } });
-    }
-
     if (text === 'Новые заявки' || text === 'В работе') {
-      logger.info('master_bot handler branch selected', { channel, pathname, branch: text, channelUserId, recipientId, actorRole: actor.role });
-      const items = text === 'Новые заявки'
-        ? masterService.listRequestsByStatus('new')
-        : db.listRequests({ statuses: ['assigned', 'awaiting_client', 'scheduled', 'in_service'] });
-      const lines = items.map(formatRequestLine);
-      await respondWithMessage({ channel, token, recipientId, text: lines.join('\n') || (text === 'Новые заявки' ? 'Нет новых заявок' : 'Нет заявок в работе') });
-      for (const item of items.slice(0, 10)) {
-        await sendChannelMessage({ channel, token, recipientId, text: `Заявка ${item.id}`, extra: { reply_markup: buildRequestActionsKeyboard(item.id) } });
-      }
+      const items = text === 'Новые заявки' ? masterService.listRequestsByStatus('new') : masterService.listActiveRequests();
+      await respondWithMessage({ channel, token, recipientId, text: items.map(formatRequestLine).join('\n') || (text === 'Новые заявки' ? 'Нет новых заявок' : 'Нет заявок в работе') });
+      for (const item of items.slice(0, 10)) await sendChannelMessage({ channel, token, recipientId, text: `Заявка ${item.id}`, extra: { reply_markup: buildRequestActionsKeyboard(item.id) } });
       return { ok: true, items };
     }
 
     if (text === 'Поиск') {
-      logger.info('master_bot handler branch selected', { channel, pathname, branch: 'Поиск', channelUserId, recipientId, actorRole: actor.role });
       sessions.set(sessionKey, { step: 'search_query' });
       return respondWithMessage({ channel, token, recipientId, text: 'Введите строку для поиска (ФИО, телефон, VIN или номер).' });
     }
-
-    if (text === 'Доступы') {
-      logger.info('master_bot handler branch selected', { channel, pathname, branch: 'Доступы', channelUserId, recipientId, actorRole: actor.role });
-      if (!canManageAccess(actor)) return respondWithMessage({ channel, token, recipientId, text: 'Недостаточно прав.' });
-      sessions.set(sessionKey, { step: 'access_menu' });
-      return respondWithMessage({ channel, token, recipientId, text: `Раздел доступов:\n/access_list\n/access_grant <${channel === 'max' ? 'maxId' : 'telegramId'}> <master|manager> [ФИО]\n/access_revoke <${channel === 'max' ? 'maxId' : 'telegramId'}>\n/access_role <${channel === 'max' ? 'maxId' : 'telegramId'}> <master|manager>` });
+    if (text === 'Диагностика' || text === '/diagnostics') {
+      if (!isAdmin(actor)) return respondWithMessage({ channel, token, recipientId, text: 'Недостаточно прав.' });
+      return respondWithMessage({ channel, token, recipientId, text: buildDiagnosticsText({ config, actor, channel }), payload: { ok: true }, extra: { reply_markup: { inline_keyboard: [[{ text: 'обновить', callback_data: 'admin:diagnostics' }, { text: 'прогнать проверку', callback_data: 'admin:diagnostics' }]] } } });
     }
-
+    if (text === 'Логи' || text.startsWith('/logs')) {
+      if (!isAdmin(actor)) return respondWithMessage({ channel, token, recipientId, text: 'Недостаточно прав.' });
+      const filters = parseLogsFilter(text.replace('/logs', '').trim());
+      if (!Object.keys(filters).length && text === 'Логи') {
+        sessions.set(sessionKey, { step: 'logs_filter' });
+        return respondWithMessage({ channel, token, recipientId, text: 'Введите фильтр логов в формате request:<id> type:<type> bot:<bot> since:YYYY-MM-DD' });
+      }
+      return respondWithMessage({ channel, token, recipientId, text: buildLogsText(filters), payload: { ok: true, filters } });
+    }
+    if (text === 'Доступы') {
+      if (!canManageAccess(actor)) return respondWithMessage({ channel, token, recipientId, text: 'Недостаточно прав.' });
+      return respondWithMessage({ channel, token, recipientId, text: `Раздел доступов:\n/access_list\n/access_grant <${channel === 'max' ? 'maxId' : 'telegramId'}> <master|manager> [ФИО]\n/access_revoke <${channel === 'max' ? 'maxId' : 'telegramId'}>` });
+    }
     if (text === 'Quality Cases' || text === '/quality_cases') {
-      logger.info('master_bot handler branch selected', { channel, pathname, branch: 'quality_cases', channelUserId, recipientId, actorRole: actor.role });
       const items = masterService.listQualityCases();
       return respondWithMessage({ channel, token, recipientId, text: qualityCasesText(items), payload: { ok: true, items } });
     }
 
     const session = sessions.get(sessionKey);
     if (session?.step === 'search_query') {
-      logger.info('master_bot handler branch selected', { channel, pathname, branch: 'search_query', channelUserId, recipientId, actorRole: actor.role });
       sessions.delete(sessionKey);
       const results = masterService.search(text);
       if (results.requests[0]) {
@@ -352,46 +359,39 @@ async function handleMasterWebhook({ body, config, headers = {}, rawHeaders = []
       }
       return respondWithMessage({ channel, token, recipientId, text: 'Ничего не найдено', payload: { ok: true, action: 'search_results', ...results } });
     }
-
-    if (session?.step === 'cancel_comment') {
-      logger.info('master_bot handler branch selected', { channel, pathname, branch: 'cancel_comment', channelUserId, recipientId, actorRole: actor.role });
+    if (session?.step === 'ask_client') {
       sessions.delete(sessionKey);
-      const result = masterService.changeRequestStatus({ requestId: session.requestId, toStatus: 'cancelled', actorId: actor.id, actorRole: actor.role, comment: text });
-      return respondWithMessage({ channel, token, recipientId, text: result?.error ? `Ошибка: ${result.error}` : `Заявка ${session.requestId} отменена`, payload: { ok: !result?.error, ...result } });
+      const result = await masterService.requestClientClarification({ requestId: session.requestId, actorId: actor.id, actorRole: actor.role, text, telegramClientBotToken: config.telegramClientBotToken, maxClientBotToken: config.maxClientBotToken });
+      return respondWithMessage({ channel, token, recipientId, text: result.error ? `Ошибка: ${result.error}` : `Сообщение клиенту ${result.ok ? 'отправлено' : 'не отправлено'}`, payload: result });
     }
-
-    if (session?.step === 'request_comment') {
-      logger.info('master_bot handler branch selected', { channel, pathname, branch: 'request_comment', channelUserId, recipientId, actorRole: actor.role });
+    if (session?.step === 'rejected_comment') {
       sessions.delete(sessionKey);
-      const comment = masterService.addInternalComment({ requestId: session.requestId, actorId: actor.id, actorRole: actor.role, text });
-      return comment ? respondWithMessage({ channel, token, recipientId, text: 'Комментарий добавлен', payload: { ok: true, comment } }) : respondWithMessage({ channel, token, recipientId, text: 'Заявка не найдена', payload: { ok: false } });
+      const result = masterService.changeRequestStatus({ requestId: session.requestId, toStatus: 'processed', substatus: 'rejected', actorId: actor.id, actorRole: actor.role, comment: text, lostReason: text });
+      return respondWithMessage({ channel, token, recipientId, text: result.error ? `Ошибка: ${result.error}` : `Заявка ${session.requestId} переведена в отказ`, payload: { ok: !result.error, ...result } });
+    }
+    if (session?.step === 'logs_filter') {
+      sessions.delete(sessionKey);
+      return respondWithMessage({ channel, token, recipientId, text: buildLogsText(parseLogsFilter(text)), payload: { ok: true } });
     }
 
     if (text.startsWith('/access_list')) {
-      logger.info('master_bot handler branch selected', { channel, pathname, branch: '/access_list', channelUserId, recipientId, actorRole: actor.role });
       if (!canManageAccess(actor)) return respondWithMessage({ channel, token, recipientId, text: 'Недостаточно прав.' });
       const items = masterService.listStaffUsers();
       return respondWithMessage({ channel, token, recipientId, text: items.map((u) => `${staffIdentity(u)} | ${u.role} | ${u.fullName || '-'}`).join('\n') || 'Список пуст', payload: { ok: true, items } });
     }
-
     if (text.startsWith('/access_grant ') || text.startsWith('/access_role ')) {
-      logger.info('master_bot handler branch selected', { channel, pathname, branch: text.startsWith('/access_grant ') ? '/access_grant' : '/access_role', channelUserId, recipientId, actorRole: actor.role });
       if (!canManageAccess(actor)) return respondWithMessage({ channel, token, recipientId, text: 'Недостаточно прав.' });
       const [, externalId, role, ...nameParts] = text.split(' ');
       const result = masterService.grantStaffAccess({ channelUserId: externalId, telegramId: channel === 'telegram' ? externalId : null, maxId: channel === 'max' ? externalId : null, fullName: nameParts.join(' ').trim(), role, actorId: actor.id, actorRole: actor.role });
       return respondWithMessage({ channel, token, recipientId, text: result.error ? `Ошибка: ${result.error}` : `Доступ обновлён: ${externalId} -> ${role}`, payload: { ok: !result.error, ...result } });
     }
-
     if (text.startsWith('/access_revoke ')) {
-      logger.info('master_bot handler branch selected', { channel, pathname, branch: '/access_revoke', channelUserId, recipientId, actorRole: actor.role });
       if (!canManageAccess(actor)) return respondWithMessage({ channel, token, recipientId, text: 'Недостаточно прав.' });
       const [, externalId] = text.split(' ');
       const result = masterService.revokeStaffAccess({ channelUserId: externalId, telegramId: channel === 'telegram' ? externalId : null, maxId: channel === 'max' ? externalId : null, actorId: actor.id, actorRole: actor.role });
       return respondWithMessage({ channel, token, recipientId, text: result.error ? `Ошибка: ${result.error}` : `Доступ отозван: ${externalId}`, payload: { ok: !result.error, ...result } });
     }
-
     if (text.startsWith('/search ')) {
-      logger.info('master_bot handler branch selected', { channel, pathname, branch: '/search', channelUserId, recipientId, actorRole: actor.role });
       const results = masterService.search(text.slice(8));
       if (results.requests[0]) {
         const card = masterService.getRequestCard(results.requests[0].id);
@@ -399,89 +399,60 @@ async function handleMasterWebhook({ body, config, headers = {}, rawHeaders = []
       }
       return respondWithMessage({ channel, token, recipientId, text: 'Ничего не найдено', payload: { ok: true, ...results } });
     }
-
     if (text.startsWith('/client ')) {
-      logger.info('master_bot handler branch selected', { channel, pathname, branch: '/client', channelUserId, recipientId, actorRole: actor.role });
       const card = masterService.getClientCard(text.split(' ')[1]);
       return card ? { ok: true, card } : { ok: false, error: 'CLIENT_NOT_FOUND' };
     }
 
     if (text.startsWith('/request ')) {
-      logger.info('master_bot handler branch selected', { channel, pathname, branch: '/request', channelUserId, recipientId, actorRole: actor.role });
       const card = masterService.getRequestCard(text.split(' ')[1]);
       return card ? respondWithMessage({ channel, token, recipientId, text: buildRequestCardText(card), payload: { ok: true, card }, extra: { reply_markup: buildRequestActionsKeyboard(card.request.id) } }) : { ok: false, error: 'REQUEST_NOT_FOUND' };
     }
-
     if (text.startsWith('/set_status ')) {
-      logger.info('master_bot handler branch selected', { channel, pathname, branch: '/set_status', channelUserId, recipientId, actorRole: actor.role });
-      const [, requestId, toStatus, ...reasonParts] = text.split(' ');
-      const comment = reasonParts.join(' ');
-      const result = masterService.changeRequestStatus({ requestId, toStatus, actorId: actor.id, actorRole: actor.role, comment, lostReason: comment });
-      return respondWithMessage({ channel, token, recipientId, text: result?.error ? `Ошибка: ${result.error}` : `Статус обновлён: ${toStatus}`, payload: { ok: !result?.error, ...result } });
+      const [, requestId, toStatus, maybeSubstatus, ...rest] = text.split(' ');
+      const substatus = REQUEST_SUBSTATUSES.includes(maybeSubstatus) ? maybeSubstatus : null;
+      const comment = substatus ? rest.join(' ') : [maybeSubstatus, ...rest].filter(Boolean).join(' ');
+      const result = masterService.changeRequestStatus({ requestId, toStatus, substatus, actorId: actor.id, actorRole: actor.role, comment, lostReason: comment });
+      return respondWithMessage({ channel, token, recipientId, text: result?.error ? `Ошибка: ${result.error}` : `Статус обновлён: ${toStatus}${substatus ? '/' + substatus : ''}`, payload: { ok: !result?.error, ...result } });
     }
-
     if (text.startsWith('/comment ')) {
-      logger.info('master_bot handler branch selected', { channel, pathname, branch: '/comment', channelUserId, recipientId, actorRole: actor.role });
       const [, requestId, ...commentParts] = text.split(' ');
       const comment = masterService.addInternalComment({ requestId, actorId: actor.id, actorRole: actor.role, text: commentParts.join(' ') });
       return comment ? respondWithMessage({ channel, token, recipientId, text: 'Комментарий добавлен', payload: { ok: true, comment } }) : { ok: false, error: 'REQUEST_NOT_FOUND' };
     }
-
     if (text.startsWith('/ask_client ')) {
-      logger.info('master_bot handler branch selected', { channel, pathname, branch: '/ask_client', channelUserId, recipientId, actorRole: actor.role });
       const [, requestId, ...textParts] = text.split(' ');
       const result = await masterService.requestClientClarification({ requestId, actorId: actor.id, actorRole: actor.role, text: textParts.join(' '), telegramClientBotToken: config.telegramClientBotToken, maxClientBotToken: config.maxClientBotToken });
       return respondWithMessage({ channel, token, recipientId, text: result.error ? `Ошибка: ${result.error}` : 'Запрос клиенту отправлен/зафиксирован', payload: result });
     }
-
     if (text === '/report_week' || text === '/report_month' || text === '/report_quarter' || text === '/report_stats') {
-      logger.info('master_bot handler branch selected', { channel, pathname, branch: text, channelUserId, recipientId, actorRole: actor.role });
-      if (!canUseReports(actor)) {
-        return respondWithMessage({ channel, token, recipientId, text: 'Недостаточно прав для отчётов.', payload: { ok: false, error: 'REPORT_ACCESS_DENIED', allowedRoles: ['manager', 'admin'] } });
-      }
+      if (!canUseReports(actor)) return respondWithMessage({ channel, token, recipientId, text: 'Недостаточно прав для отчётов.', payload: { ok: false, error: 'REPORT_ACCESS_DENIED', allowedRoles: ['manager', 'admin'] } });
       const periodMap = { '/report_week': 'weekly', '/report_month': 'monthly', '/report_quarter': 'quarterly', '/report_stats': 'weekly' };
       const report = reportingService.buildManagementSummary({ period: periodMap[text] });
       return respondWithMessage({ channel, token, recipientId, text: report.summaryText, payload: { ok: true, report } });
     }
-
     if (text.startsWith('/quality_case ')) {
-      logger.info('master_bot handler branch selected', { channel, pathname, branch: '/quality_case', channelUserId, recipientId, actorRole: actor.role });
       const card = masterService.getQualityCaseCard(text.split(' ')[1]);
       return card ? { ok: true, card } : { ok: false, error: 'QUALITY_CASE_NOT_FOUND' };
     }
-
     if (text.startsWith('/quality_status ')) {
-      logger.info('master_bot handler branch selected', { channel, pathname, branch: '/quality_status', channelUserId, recipientId, actorRole: actor.role });
       const [, qualityCaseId, status] = text.split(' ');
       const qualityCase = masterService.changeQualityCaseStatus({ qualityCaseId, status, actorId: actor.id, actorRole: actor.role });
       return qualityCase ? { ok: true, qualityCase } : { ok: false, error: 'QUALITY_CASE_NOT_FOUND' };
     }
-
     if (text.startsWith('/quality_comment ')) {
-      logger.info('master_bot handler branch selected', { channel, pathname, branch: '/quality_comment', channelUserId, recipientId, actorRole: actor.role });
       const [, qualityCaseId, ...parts] = text.split(' ');
       const comment = masterService.addQualityCaseComment({ qualityCaseId, actorId: actor.id, actorRole: actor.role, text: parts.join(' ') });
       return comment ? { ok: true, comment } : { ok: false, error: 'QUALITY_CASE_NOT_FOUND' };
     }
 
-    logger.info('master_bot handler branch selected', { channel, pathname, branch: 'fallback', channelUserId, recipientId, actorRole: actor.role });
     return respondWithMessage({ channel, token, recipientId, text: 'Используйте /help для списка команд.', payload: { ok: true, action: 'fallback' } });
   } catch (error) {
     logger.error('master_bot handler error', { channel, pathname, method, error: String(error?.message || error), body });
-    const fallbackUserId = String(
-      body?.message?.from?.user_id || body?.message?.from?.id || body?.callback?.from?.user_id || body?.callback?.from?.id || body?.user?.user_id || body?.user?.id || ''
-    );
+    const fallbackUserId = String(body?.message?.from?.user_id || body?.message?.from?.id || body?.callback?.from?.user_id || body?.callback?.from?.id || body?.user?.user_id || body?.user?.id || '');
     const fallbackChatId = body?.message?.chat_id || body?.message?.chat?.id || body?.callback?.message?.chat_id || body?.callback?.message?.chat?.id || null;
     const recipientId = resolveRecipientId(channel, fallbackUserId, fallbackChatId);
-    if (recipientId) {
-      await respondWithMessage({
-        channel,
-        token: masterToken(config, channel),
-        recipientId,
-        text: 'Внутренняя ошибка master bot.',
-        payload: { ok: false, error: 'MASTER_BOT_ERROR' }
-      });
-    }
+    if (recipientId) await respondWithMessage({ channel, token: masterToken(config, channel), recipientId, text: 'Внутренняя ошибка master bot.', payload: { ok: false, error: 'MASTER_BOT_ERROR' } });
     return { ok: false, error: 'MASTER_BOT_ERROR', statusCode: 500 };
   }
 }

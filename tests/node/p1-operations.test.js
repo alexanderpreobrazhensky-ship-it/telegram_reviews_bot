@@ -53,13 +53,13 @@ test('p1 flow: create request, assign, change status, and persist request/analyt
     actorId: 'manager-1',
     actorRole: 'manager'
   });
-  assert.equal(status.request.status, 'assigned');
+  assert.equal(status.request.status, 'in_progress');
 
   const store = db.readStore();
   const requestEvents = store.requestEvents.filter((event) => event.requestId === request.id);
   assert.ok(requestEvents.some((event) => event.canonicalEventType === 'created'));
   assert.ok(requestEvents.some((event) => event.canonicalEventType === 'assigned'));
-  assert.ok(requestEvents.some((event) => event.canonicalEventType === 'status_changed' && event.newStatus === 'assigned'));
+  assert.ok(requestEvents.some((event) => event.canonicalEventType === 'status_changed' && event.newStatus === 'in_progress'));
   assert.ok(store.analyticsEvents.some((event) => event.eventType === 'request_created' && event.requestId === request.id));
   assert.ok(store.analyticsEvents.some((event) => event.eventType === 'assignment_changed' && event.requestId === request.id));
   assert.ok(store.analyticsEvents.some((event) => event.eventType === 'status_changed' && event.requestId === request.id));
