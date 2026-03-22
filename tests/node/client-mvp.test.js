@@ -28,11 +28,11 @@ test('health and webapp pages are available', async () => {
 });
 
 const requestCases = [
-  ['/api/client/requests/service', 'service_request', { fullName: 'Иван Иванов', phone: '+79990000001', wasClientBefore: 'yes', brand: 'Lada', model: 'Vesta', year: '2020', vin: 'VIN001', plateNumber: 'A111AA', description: 'Стучит подвеска' }],
-  ['/api/client/requests/parts', 'parts_request', { fullName: 'Иван Иванов', phone: '+79990000002', wasClientBefore: 'no', brand: 'Kia', model: 'Rio', year: '2018', vin: 'VIN002', plateNumber: 'B222BB', description: 'Нужен фильтр' }],
-  ['/api/client/requests/consultation', 'consultation_request', { fullName: 'Иван Иванов', phone: '+79990000003', wasClientBefore: 'yes', car: 'Toyota Camry', vin: 'VIN003', question: 'Когда менять масло?' }],
-  ['/api/client/requests/warranty', 'warranty_request', { fullName: 'Иван Иванов', phone: '+79990000004', visitDate: '2024-09-01', description: 'Повторилась неисправность' }],
-  ['/api/client/requests/data-change', 'data_change_request', { fullName: 'Иван Иванов', phone: '+79990000005', changeDetails: 'Сменил номер телефона' }]
+  ['/api/client/requests/service', 'service_request', { fullName: 'Иван Иванов', phone: '9990000001', wasClientBefore: 'yes', brand: 'Lada', model: 'Vesta', year: '2020', vin: 'VIN001', plateNumber: 'A111AA', description: 'Стучит подвеска' }],
+  ['/api/client/requests/parts', 'parts_request', { fullName: 'Иван Иванов', phone: '9990000002', wasClientBefore: 'no', brand: 'Kia', model: 'Rio', year: '2018', vin: 'VIN002', plateNumber: 'B222BB', description: 'Нужен фильтр' }],
+  ['/api/client/requests/consultation', 'consultation_request', { fullName: 'Иван Иванов', phone: '9990000003', wasClientBefore: 'yes', car: 'Toyota Camry', vin: 'VIN003', question: 'Когда менять масло?' }],
+  ['/api/client/requests/warranty', 'warranty_request', { fullName: 'Иван Иванов', phone: '9990000004', visitDate: '2024-09-01', description: 'Повторилась неисправность' }],
+  ['/api/client/requests/data-change', 'data_change_request', { fullName: 'Иван Иванов', phone: '9990000005', changeDetails: 'Сменил номер телефона' }]
 ];
 
 test('api creates all mandatory request types', async () => {
@@ -82,7 +82,7 @@ test('client bot does not create request until phone is normalized to 10 digits'
 
 test('persistence stores client vehicle request and communication events', async () => {
   await withServer(async (base) => {
-    await fetch(`${base}/api/client/requests/service`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ fullName: 'Сидоров Сидор', phone: '+79990000007', wasClientBefore: 'no', year: '2019', vin: 'VIN007', brand: 'Renault', model: 'Logan', plateNumber: 'T777TT', description: 'Проверка' }) });
+    await fetch(`${base}/api/client/requests/service`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ fullName: 'Сидоров Сидор', phone: '9990000007', wasClientBefore: 'no', year: '2019', vin: 'VIN007', brand: 'Renault', model: 'Logan', plateNumber: 'T777TT', description: 'Проверка' }) });
     const state = db.readStore();
     assert.equal(state.clients.length, 1);
     assert.equal(state.vehicles.length, 1);

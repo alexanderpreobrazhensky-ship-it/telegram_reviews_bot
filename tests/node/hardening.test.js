@@ -41,7 +41,7 @@ test('client request route rejects invalid json and required fields', async () =
     const ok = await fetch(`${base}/api/client/requests/service`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ fullName: 'Иван', phone: '+79990000000', wasClientBefore: 'yes', brand: 'Lada', model: 'Granta', year: '2019', vin: 'VIN-H', description: 'ok' })
+      body: JSON.stringify({ fullName: 'Иван', phone: '9990000000', wasClientBefore: 'yes', brand: 'Lada', model: 'Granta', year: '2019', vin: 'VIN-H', description: 'ok' })
     });
     assert.equal(ok.status, 201);
 
@@ -111,7 +111,7 @@ test('normalizePhone10 and server validation keep only 10-digit phones', () => {
   assert.equal(normalizePhone10('123456789012345'), '123456789012345');
   assert.equal(normalizePhone10('мусор +7 (999) 111-22-33'), '9991112233');
   assert.deepEqual(validateClientRequestPayload({ fullName: 'Иван', phone: '9991112233' }, 'data_change_request'), ['changeDetails is required']);
-  assert.ok(validateClientRequestPayload({ phone: '12345' }, 'service_request').includes('phone must normalize to exactly 10 digits without +7/8'));
+  assert.ok(validateClientRequestPayload({ phone: '12345' }, 'service_request').includes('phone must contain exactly 10 digits'));
 });
 
 test('db path follows env and initializes missing sqlite store explicitly', () => {

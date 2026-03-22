@@ -121,14 +121,6 @@ function paste(input, text) {
   input.dispatchEvent(event);
 }
 
-function cut(input) {
-  const event = new input.ownerDocument.defaultView.Event('cut', {
-    bubbles: true,
-    cancelable: true
-  });
-  input.dispatchEvent(event);
-}
-
 function submit(form) {
   const event = new form.ownerDocument.defaultView.Event('submit', {
     bubbles: true,
@@ -141,46 +133,46 @@ function flush() {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
-test('phone helpers normalize prefixes, formatting and length consistently', () => {
+test('phone helpers keep only digits and cut to 10 symbols', () => {
   const dom = createDom({ route: '/' });
-  const { PHONE_HINT, onlyPhoneDigits, normalizePhone10, formatPhoneMask, applyPhoneEdit } = dom.window.__WEBAPP_TEST_API__;
+  const { PHONE_HINT, normalizePhone, onlyPhoneDigits, normalizePhone10, formatPhoneMask } = dom.window.__WEBAPP_TEST_API__;
 
-  assert.equal(PHONE_HINT, 'Введите 10 цифр');
-  assert.equal(onlyPhoneDigits('+7 (999) 111-22-33'), '9991112233');
-  assert.equal(onlyPhoneDigits('8 999 111 22 33'), '9991112233');
-  assert.equal(onlyPhoneDigits('7 999 111 22 33'), '9991112233');
-  assert.equal(onlyPhoneDigits('9991234567890'), '9991234567');
-  assert.equal(onlyPhoneDigits('тел: +7 (999) 111-22-33 доб. 55'), '9991112233');
-  assert.equal(normalizePhone10('+7 999 111-22-33'), '9991112233');
-  assert.equal(normalizePhone10('8 999 111 22 33'), '9991112233');
-  assert.equal(normalizePhone10('7 999 111 22 33'), '9991112233');
-  assert.equal(normalizePhone10('9991112233'), '9991112233');
-  assert.equal(normalizePhone10('12345'), '12345');
-  assert.equal(formatPhoneMask('+7 (999) 111-22-33').masked, '9991112233');
-  const edited = applyPhoneEdit('9991112233', { start: 3, end: 6 }, 'insertText', '555');
-  assert.equal(edited.digits, '9995552233');
-  assert.equal(edited.caret, 6);
+  assert.equal(PHONE_HINT, 'Введите корректный номер (10 цифр)');
+  assert.equal(normalizePhone('+7 (999) 111-22-33'), '7999111223');
+  assert.equal(onlyPhoneDigits('8 999 111 22 33'), '8999111223');
+  assert.equal(normalizePhone10('(999) 111-22-33'), '9991112233');
+  assert.equal(normalizePhone10('9991234567890'), '9991234567');
+  assert.equal(normalizePhone10('тел: +7 (999) 111-22-33 доб. 55'), '7999111223');
+  assert.equal(formatPhoneMask('+7 (999) 111-22-33').masked, '7999111223');
 });
 
-test('request form shows and clears client-side validation error for phone field', async () => {
-  const dom = createDom({ route: '/forms/service-request' });
+test('request form blocks submit for invalid phone and clears error after valid paste', async () => {
+  const requests = [];
+  const dom = createDom({
+    route: '/forms/service-request',
+    fetchImpl: async (url, options = {}) => {
+      requests.push({ url: String(url), options });
+      return { ok: true, status: 201, json: async () => ({ id: 'REQ-1' }) };
+    }
+  });
   const form = dom.window.document.getElementById('request-form');
   const phone = form.querySelector('input[name="phone"]');
 
   editInput(phone, 'insertText', '9');
   submit(form);
   await flush();
-  assert.equal(form.querySelector('[data-field="phone"] .field-error').textContent, 'Введите 10 цифр');
+  assert.equal(form.querySelector('[data-field="phone"] .field-error').textContent, 'Введите корректный номер (10 цифр)');
+  assert.equal(requests.length, 0);
 
   phone.setSelectionRange(0, phone.value.length);
-  paste(phone, '+7 (999) 123-45-67');
+  paste(phone, '(999) 123-45-67');
   await flush();
   assert.equal(phone.value, '9991234567');
   assert.equal(form.querySelector('[data-field="phone"] .field-error').textContent, '');
 });
 
 for (const channel of ['telegram', 'max']) {
-  test(`forms submit normalized 10-digit phone for every request type in simulated ${channel} webview`, async () => {
+  test(`forms submit raw 10-digit phone for every request type in simulated ${channel} webview`, async () => {
     for (const formCase of formCases) {
       const requests = [];
       const dom = createDom({
@@ -196,46 +188,38 @@ for (const channel of ['telegram', 'max']) {
         }
       });
 
-      const api = dom.window.__WEBAPP_TEST_API__;
       const document = dom.window.document;
       const form = document.getElementById('request-form');
       const phone = form.querySelector('input[name="phone"]');
 
       assert.equal(phone.value, '');
 
-      for (const digit of '9123456789') editInput(phone, 'insertText', digit);
+      for (const digit of '91234567890123') editInput(phone, 'insertText', digit);
       assert.equal(phone.value, '9123456789');
-      assert.equal(phone.selectionStart, 10);
-
-      phone.setSelectionRange(api.phoneCaretFromDigitIndex(3), api.phoneCaretFromDigitIndex(6));
-      editInput(phone, 'insertText', '555');
-      assert.equal(phone.value, '9125556789');
-      assert.equal(phone.selectionStart, 6);
-
-      phone.setSelectionRange(api.phoneCaretFromDigitIndex(6), api.phoneCaretFromDigitIndex(6));
-      editInput(phone, 'deleteContentBackward');
-      assert.equal(phone.value, '912556789');
-      assert.equal(phone.selectionStart, 5);
-
-      phone.setSelectionRange(api.phoneCaretFromDigitIndex(3), api.phoneCaretFromDigitIndex(3));
-      editInput(phone, 'deleteContentForward');
-      assert.equal(phone.value, '91256789');
-      assert.equal(phone.selectionStart, 3);
-
-      phone.setSelectionRange(0, phone.value.length);
-      paste(phone, '8 (999) 111-22-33');
-      assert.equal(phone.value, '9991112233');
-      assert.equal(phone.selectionStart, 10);
-
-      phone.setSelectionRange(3, 6);
-      cut(phone);
-      assert.equal(phone.value, '9992233');
-      assert.equal(phone.selectionStart, 3);
 
       phone.setSelectionRange(3, 3);
-      paste(phone, '111');
+      editInput(phone, 'insertText', '0');
+      assert.equal(phone.value, '9120345678');
+
+      phone.setSelectionRange(5, 5);
+      editInput(phone, 'deleteContentBackward');
+      assert.equal(phone.value, '912045678');
+
+      phone.setSelectionRange(3, 3);
+      editInput(phone, 'deleteContentForward');
+      assert.equal(phone.value, '91245678');
+
+      phone.setSelectionRange(0, phone.value.length);
+      paste(phone, '+7 (999) 111-22-33');
+      assert.equal(phone.value, '7999111223');
+
+      phone.setSelectionRange(1, 1);
+      editInput(phone, 'insertText', '5');
+      assert.equal(phone.value, '7599911122');
+
+      phone.setSelectionRange(0, phone.value.length);
+      paste(phone, '(999) 111-22-33');
       assert.equal(phone.value, '9991112233');
-      assert.equal(phone.selectionStart, 6);
 
       formCase.fill(form);
       submit(form);
@@ -278,11 +262,11 @@ test('requests page sends a 10-digit phone and blocks invalid value', async () =
   editInput(phone, 'insertText', '9');
   button.click();
   await flush();
-  assert.equal(document.querySelector('[data-field="phone"] .field-error').textContent, 'Введите 10 цифр');
+  assert.equal(document.querySelector('[data-field="phone"] .field-error').textContent, 'Введите корректный номер (10 цифр)');
   assert.equal(requests.length, 0);
 
   phone.setSelectionRange(0, phone.value.length);
-  paste(phone, '+7 (999) 222-33-44');
+  paste(phone, '(999) 222-33-44');
   button.click();
   await flush();
 

@@ -80,7 +80,7 @@ test('p1 server: internal UI, health endpoints, analytics endpoint, and assignme
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         fullName: 'Internal UI Client',
-        phone: '+7 (999) 000-00-11',
+        phone: '9990000011',
         wasClientBefore: 'yes',
         brand: 'Skoda',
         model: 'Octavia',
