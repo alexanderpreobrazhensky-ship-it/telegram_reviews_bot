@@ -69,11 +69,17 @@
       font-weight:800;
       border:1px solid rgba(255,255,255,.10);
       box-shadow:0 10px 22px rgba(0,0,0,.25);
-      color:#111;
+      transition:transform .15s ease, opacity .15s ease;
     }
-    .yandex{background:#ffd400}
+    a.btn:hover{
+      transform:translateY(-1px);
+      opacity:.96;
+    }
+    .yandex{background:#ffd400;color:#111}
     .gis{background:#28c76f;color:#fff}
     .tg{background:#2AABEE;color:#fff}
+    .max{background:#2563eb;color:#fff}
+    .webapp{background:#ffffff;color:#0b1b3a}
     .note{
       margin-top:18px;
       color:rgba(255,255,255,.56);
@@ -105,6 +111,18 @@
          href="https://t.me/LIRA_NN"
          target="_blank" rel="noopener">
          Наш Telegram
+      </a>
+
+      <a class="btn max"
+         href="https://max.ru/id525601028045_biz"
+         target="_blank" rel="noopener">
+         Подписаться в MAX
+      </a>
+
+      <a class="btn webapp"
+         href="https://lirabotv3.bothost.ru"
+         target="_blank" rel="noopener">
+         Открыть приложение Лира
       </a>
     </div>
 
