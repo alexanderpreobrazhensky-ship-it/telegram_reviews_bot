@@ -33,6 +33,8 @@ Do not recreate split audit files.
 ## Telegram
 - Telegram client, master, and integration bots remain supported.
 - Integration bot is still Telegram-only.
+- Integration bot now uses a button-first operator UX with reply keyboard sections and inline event actions while preserving slash-command fallback.
+- Integration bot selfcheck covers token presence, SQLite/file DB access, event-store readability, scheduler persistence visibility, retry-path availability, and config audit warnings.
 - Telegram source requests route clarification back to Telegram first.
 
 ## MAX
