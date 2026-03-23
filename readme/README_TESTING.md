@@ -5,15 +5,11 @@
 npm test
 ```
 
-## What it covers
-- config
-- structure and production-path checks
-- SQLite persistence and migration
-- WebApp phone behavior
-- request flows
-- Telegram flows
-- MAX validation and flows
-- reports, analytics, exports, scheduler, dedupe, status transitions
-
-## Legacy Python tests
-Python tests are present but skipped; they are historical, not canonical runtime validation.
+## Coverage focus
+- master-bot menu routing and callback handling
+- request card actions and state transitions
+- legacy callback compatibility
+- SQLite persistence and follow-up tasks
+- Telegram and MAX webhook behavior
+- diagnostics/log masking
+- AI-ready config loading without runtime enablement

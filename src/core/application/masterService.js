@@ -71,11 +71,11 @@ function createMasterService({ db, sendClientMessage, adminIds = [], actorChanne
     },
 
     listActiveRequests() {
-      return db.listRequests({ statuses: ['in_progress', 'processed', 'in_service', 'waiting_decision', 'error'] }).filter((item) => !item.archived);
+      return db.listRequests({ statuses: ['in_progress', 'processed', 'in_service', 'error'] }).filter((item) => !item.archived);
     },
 
     listArchiveRequests() {
-      return db.listRequests({ statuses: ['processed', 'completed', 'archived'] }).filter((item) => item.archived || item.status === 'archived');
+      return db.listRequests({ statuses: ['processed', 'completed', 'error', 'in_progress', 'new', 'in_service'] }).filter((item) => item.archived);
     },
 
     search(query) {
@@ -210,6 +210,21 @@ function createMasterService({ db, sendClientMessage, adminIds = [], actorChanne
             reason: delivery.error,
             attempts: delivery.attempts || [],
             timestamp: new Date().toISOString()
+          }
+        });
+        db.createAnalyticsEvent({
+          eventType: 'outbound_message_failed',
+          channel: actorChannel,
+          platform: actorChannel,
+          requestType: requestCard.request.requestType,
+          requestId,
+          clientId: requestCard.request.clientId,
+          status: 'error',
+          metaJson: {
+            requestedText: text,
+            reason: delivery.error,
+            attempts: delivery.attempts || [],
+            sourceChannel: requestCard.request.sourceChannel || null
           }
         });
         return delivery;

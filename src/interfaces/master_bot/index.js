@@ -12,13 +12,11 @@ const STATUS_LABELS = {
   in_progress: 'В работе',
   processed: 'Обработана',
   in_service: 'В сервисе',
-  waiting_decision: 'Ждёт решения',
   completed: 'Завершена',
-  archived: 'Архив',
   error: 'Ошибка отправки'
 };
 const PROCESSED_SUBSTATUS_LABELS = {
-  booked: 'записан',
+  recorded: 'записан',
   consulted: 'проконсультирован',
   spam: 'спам',
   waiting_decision: 'ждёт решения',
@@ -50,10 +48,10 @@ function formatRequestLine(request) {
 function buildProcessedSubstatusKeyboard(requestId) {
   return {
     inline_keyboard: [
-      [{ text: 'Записан', callback_data: `req:${requestId}:processed:booked` }],
+      [{ text: 'Записан', callback_data: `req:${requestId}:processed:recorded` }],
       [{ text: 'Проконсультирован', callback_data: `req:${requestId}:processed:consulted` }],
       [{ text: 'Спам', callback_data: `req:${requestId}:processed:spam` }],
-      [{ text: 'Ждёт решения', callback_data: `req:${requestId}:waiting_decision` }],
+      [{ text: 'Ждёт решения', callback_data: `req:${requestId}:processed:waiting_decision` }],
       [{ text: 'Отказ', callback_data: `req:${requestId}:processed:rejected` }]
     ]
   };
@@ -69,7 +67,7 @@ function buildHistoryLines(card) {
 function buildRequestActionsKeyboard(requestId, card = null, actor = null) {
   const request = card?.request || {};
   const archived = Boolean(request.archived);
-  const completed = request.status === 'completed' || request.status === 'archived';
+  const completed = request.status === 'completed';
   if (archived || completed) {
     const archivedRows = [[{ text: 'Подробнее', callback_data: `card:${requestId}` }, { text: 'История', callback_data: `history:${requestId}` }]];
     if (isAdmin(actor)) archivedRows.push([{ text: 'Логи', callback_data: `logs:${requestId}` }]);
@@ -132,6 +130,38 @@ function qualityCasesText(items) {
   return items.map((item) => `${item.id} | ${item.status} | ${item.summary || '-'}`).join('\n') || 'Нет quality cases';
 }
 
+const MENU_TEXT_TO_ACTION = Object.freeze({
+  'Новые заявки': 'menu:new_requests',
+  'В работе': 'menu:in_progress',
+  'Архив': 'menu:archive',
+  'Поиск': 'menu:search',
+  'Quality Cases': 'menu:quality_cases',
+  'Инструкция': 'menu:instruction',
+  'Диагностика': 'menu:diagnostics',
+  'Логи': 'menu:logs',
+  'Доступы': 'menu:access'
+});
+
+function buildMainMenuKeyboard(actor) {
+  const rows = [
+    [
+      { text: 'Новые заявки', callback_data: 'menu:new_requests' },
+      { text: 'В работе', callback_data: 'menu:in_progress' }
+    ],
+    [
+      { text: 'Архив', callback_data: 'menu:archive' },
+      { text: 'Поиск', callback_data: 'menu:search' }
+    ],
+    [
+      { text: 'Quality Cases', callback_data: 'menu:quality_cases' },
+      { text: 'Инструкция', callback_data: 'menu:instruction' }
+    ]
+  ];
+  if (isAdmin(actor)) rows.push([{ text: 'Диагностика', callback_data: 'menu:diagnostics' }, { text: 'Логи', callback_data: 'menu:logs' }]);
+  if (canManageAccess(actor)) rows.push([{ text: 'Доступы', callback_data: 'menu:access' }]);
+  return { inline_keyboard: rows };
+}
+
 function staffIdentity(user) {
   return user.maxId ? `max:${user.maxId}` : `telegram:${user.telegramId}`;
 }
@@ -141,57 +171,45 @@ function helpText(channel) {
     'Инструкция по заявкам:',
     'Статусы:',
     '- Новая (new): заявка только пришла, ещё никем не взята.',
-    '- В работе (in_progress): мастер взял заявку в обработку и отвечает за следующий шаг.',
-    '- Обработана (processed): заявка обработана, но обязательно с подстатусом.',
-    '- В сервисе (in_service): клиент уже приехал/машина в работе сервиса.',
-    '- Ждёт решения (waiting_decision): отдельный статус повторного касания, через 7 дней scheduler вернёт заявку в «В работе».',
-    '- Завершена (completed): финальное закрытие, заявка уходит в архив.',
-    '- Архив (archived): ручное/системное архивное состояние без рабочих кнопок.',
-    '- Ошибка отправки (error): не удалось отправить сообщение клиенту в исходный канал.',
+    '- В работе (in_progress): мастер взял заявку и отвечает за дальнейшее движение.',
+    '- Обработана (processed): обязательный основной статус после общения, всегда идёт с подстатусом.',
+    '- В сервисе (in_service): клиент записан/приехал, заявка передана в сервисный контур.',
+    '- Завершена (completed): окончательно закрыта и архивирована.',
+    '- Ошибка отправки (error): не удалось отправить сообщение клиенту в подтверждённый канал.',
     '',
     'Подстатусы processed:',
-    '- записан: клиент записан, можно двигать дальше в «В сервисе» или «Завершить».',
-    '- проконсультирован: заявку не архивируем, через scheduler придёт напоминание о повторном контакте.',
-    '- спам: заявка архивируется и больше не участвует в работе.',
-    '- ждёт решения: выбирается из меню «Обработана», но сама заявка переходит в основной статус waiting_decision.',
-    '- отказ: заявка архивируется, комментарий обязателен и хранится как причина отказа.',
+    '- recorded: записан, заявка остаётся активной.',
+    '- consulted: проконсультирован, заявка не архивируется, scheduler напоминает о повторном контакте.',
+    '- spam: архивируется сразу и исключается из follow-up.',
+    '- waiting_decision: ждёт решения, каждые 7 дней scheduler возвращает заявку в «В работе».',
+    '- rejected: отказ, архивируется сразу, комментарий обязателен.',
     '',
-    'Кнопки:',
-    '- «Взять в работу»: назначает мастера и переводит заявку в «В работе». Свободную заявку может взять мастер, переназначение — только админ.',
-    '- «Запросить данные»: открывает режим ввода текста и отправляет сообщение клиенту в исходный подтверждённый канал.',
-    '- «Обработана»: показывает выбор подстатуса.',
-    '- «В сервисе»: переводит заявку в этап выполнения работ.',
-    '- «Завершить»: финально закрывает заявку и архивирует её.',
-    '- «Комментарий»: добавляет внутренний комментарий в карточку заявки.',
-    '- «Подробнее»: полная карточка заявки с историей.',
+    'Кнопки карточки:',
+    '- «Взять в работу»: безопасное назначение на мастера.',
+    '- «Запросить данные»: свободный текст клиенту в исходный подтверждённый канал.',
+    '- «Обработана»: выбор подстатуса второго уровня.',
+    '- «В сервисе»: отдельный статус до завершения.',
+    '- «Завершить»: финальное закрытие заявки.',
+    '- «Комментарий»: внутренний комментарий.',
+    '- «Подробнее»: карточка, история, служебные поля.',
     '',
-    'Как обрабатывать заявку:',
-    '1) Нажмите «Взять в работу».',
-    '2) Если данных мало — «Запросить данные».',
-    '3) После общения — «Обработана» и выберите подстатус.',
-    '4) Когда клиент приехал — «В сервисе».',
-    '5) После завершения — «Завершить».',
-    '',
-    'Запрос данных:',
-    '- Telegram-заявки получают ответ в Telegram.',
-    '- MAX-заявки получают ответ в MAX.',
-    '- Для остальных источников сначала пробуем MAX, затем Telegram, но только при наличии подтверждённых maxId/telegramId.',
-    '- Email как канал ответа не используем.',
-    '- При ошибке отправки заявка получает статус error, подробности смотрите в логах.',
+    'Архив:',
+    '- В архив автоматически попадают spam, rejected и completed.',
+    '- Для архивных заявок доступны только Подробнее/История/Логи (админ).',
     '',
     'Повторные касания:',
-    '- «Ждём решения»: каждые 7 дней возврат в «В работе» + уведомление мастеру.',
-    '- «Проконсультирован»: каждые 7 дней напоминание мастеру о повторном контакте без автоархивации.',
+    '- waiting_decision: авто-возврат в in_progress через 7 дней + событие и уведомление.',
+    '- consulted: напоминание мастеру каждые 7 дней без смены статуса.',
     '',
-    'Архив и аналитика:',
-    '- В архив автоматически попадают spam, rejected и completed.',
-    '- Отказ и спам считаются отдельно для аналитики.',
-    '- Причина отказа хранится в карточке и логах.',
+    'Каналы отправки:',
+    '- Telegram -> Telegram.',
+    '- MAX -> MAX.',
+    '- Иной источник -> сначала MAX при наличии maxId, затем Telegram при наличии telegramId.',
+    '- Email не используется как outbound-канал.',
     '',
     'Права:',
-    '- Админ: всё, включая диагностику, логи и переназначение.',
-    '- Мастер/менеджер: работа с заявками в рамках access flow.',
-    '- Инструкция доступна всем пользователям master-бота.',
+    '- Админ: диагностика, логи, переназначение, доступы.',
+    '- Master/manager: работа с заявками и поиском.',
     '',
     'Команды:',
     '/start',
@@ -323,6 +341,77 @@ function buildLogsText(filters = {}, detailed = false) {
   return sections.join('\n\n');
 }
 
+async function handleMenuAction({ action, actor, channel, token, recipientId, masterService, config, sessionKey, callbackId = null }) {
+  const callbackText = {
+    'menu:new_requests': 'Новые заявки',
+    'menu:in_progress': 'В работе',
+    'menu:archive': 'Архив',
+    'menu:search': 'Поиск',
+    'menu:quality_cases': 'Quality Cases',
+    'menu:instruction': 'Инструкция',
+    'menu:diagnostics': 'Диагностика',
+    'menu:logs': 'Логи',
+    'menu:access': 'Доступы'
+  }[action] || 'Готово';
+  if (callbackId) await answerChannelCallback({ channel, token, callbackId, text: callbackText });
+
+  if (action === 'menu:new_requests') {
+    const items = masterService.listRequestsByStatus('new');
+    await respondWithMessage({ channel, token, recipientId, text: items.map(formatRequestLine).join('\n') || 'Нет новых заявок', extra: { reply_markup: buildMainMenuKeyboard(actor) } });
+    for (const item of items.slice(0, 10)) {
+      const card = masterService.getRequestCard(item.id) || { request: item };
+      await sendChannelMessage({ channel, token, recipientId, text: buildRequestCardText(card), extra: { reply_markup: buildRequestActionsKeyboard(item.id, card, actor) } });
+    }
+    return { ok: true, items, action };
+  }
+  if (action === 'menu:in_progress') {
+    const items = masterService.listActiveRequests();
+    await respondWithMessage({ channel, token, recipientId, text: items.map(formatRequestLine).join('\n') || 'Нет заявок в работе', extra: { reply_markup: buildMainMenuKeyboard(actor) } });
+    for (const item of items.slice(0, 10)) {
+      const card = masterService.getRequestCard(item.id) || { request: item };
+      await sendChannelMessage({ channel, token, recipientId, text: buildRequestCardText(card), extra: { reply_markup: buildRequestActionsKeyboard(item.id, card, actor) } });
+    }
+    return { ok: true, items, action };
+  }
+  if (action === 'menu:archive') {
+    const items = masterService.listArchiveRequests();
+    await respondWithMessage({ channel, token, recipientId, text: items.map(formatRequestLine).join('\n') || 'Архив пуст', extra: { reply_markup: buildMainMenuKeyboard(actor) } });
+    for (const item of items.slice(0, 10)) {
+      const card = masterService.getRequestCard(item.id) || { request: item };
+      await sendChannelMessage({ channel, token, recipientId, text: buildRequestCardText(card), extra: { reply_markup: buildRequestActionsKeyboard(item.id, card, actor) } });
+    }
+    return { ok: true, items, action };
+  }
+  if (action === 'menu:search') {
+    sessions.set(sessionKey, { step: 'search_query' });
+    return respondWithMessage({ channel, token, recipientId, text: 'Введите строку для поиска (ФИО, телефон, VIN или номер).', payload: { ok: true, action } });
+  }
+  if (action === 'menu:quality_cases') {
+    const items = masterService.listQualityCases();
+    return respondWithMessage({ channel, token, recipientId, text: qualityCasesText(items), payload: { ok: true, items, action }, extra: { reply_markup: buildMainMenuKeyboard(actor) } });
+  }
+  if (action === 'menu:instruction') {
+    return respondWithMessage({ channel, token, recipientId, text: helpText(channel), payload: { ok: true, action }, extra: { reply_markup: buildMainMenuKeyboard(actor) } });
+  }
+  if (action === 'menu:diagnostics') {
+    if (!isAdmin(actor)) return respondWithMessage({ channel, token, recipientId, text: 'Недостаточно прав.', payload: { ok: false, error: 'ACCESS_DENIED', action } });
+    return respondWithMessage({ channel, token, recipientId, text: buildDiagnosticsText({ config, actor, channel, detailed: false }), payload: { ok: true, action }, extra: { reply_markup: { inline_keyboard: [[{ text: 'обновить', callback_data: 'admin:diagnostics' }, { text: 'прогнать проверку', callback_data: 'admin:diagnostics' }], [{ text: 'краткий статус', callback_data: 'admin:diagnostics_short' }, { text: 'подробный статус', callback_data: 'admin:diagnostics_detailed' }]] } } });
+  }
+  if (action === 'menu:logs') {
+    if (!isAdmin(actor)) return respondWithMessage({ channel, token, recipientId, text: 'Недостаточно прав.', payload: { ok: false, error: 'ACCESS_DENIED', action } });
+    sessions.set(sessionKey, { step: 'logs_filter' });
+    return respondWithMessage({ channel, token, recipientId, text: 'Введите фильтр логов в формате request:<id> type:<type> bot:<bot> since:YYYY-MM-DD', payload: { ok: true, action } });
+  }
+  if (action === 'menu:access') {
+    if (!canManageAccess(actor)) return respondWithMessage({ channel, token, recipientId, text: 'Недостаточно прав.', payload: { ok: false, error: 'ACCESS_DENIED', action } });
+    return respondWithMessage({ channel, token, recipientId, text: `Раздел доступов:
+/access_list
+/access_grant <${channel === 'max' ? 'maxId' : 'telegramId'}> <master|manager> [ФИО]
+/access_revoke <${channel === 'max' ? 'maxId' : 'telegramId'}>`, payload: { ok: true, action }, extra: { reply_markup: buildMainMenuKeyboard(actor) } });
+  }
+  return { ok: false, error: 'UNKNOWN_MENU_ACTION', action };
+}
+
 function recordLegacyCallback({ requestId, actor, channel, legacyAction, mappedAction }) {
   db.recordRequestEvent({
     requestId,
@@ -377,7 +466,8 @@ async function handleMasterWebhook({ body, config, headers = {}, rawHeaders = []
     const actor = masterService.resolveActor({ channelUserId, telegramId: channel === 'telegram' ? channelUserId : null, maxId: channel === 'max' ? channelUserId : null, fullName });
     const recipientId = resolveRecipientId(channel, channelUserId, event.callback?.chatId || event.chatId);
     const sessionKey = `${channel}:${channelUserId}`;
-    const text = String(event.text || '').trim();
+    const rawText = String(event.text || '').trim();
+    const text = MENU_TEXT_TO_ACTION[rawText] || rawText;
 
     if (text === '/whoami') {
       return respondWithMessage({ channel, token, recipientId, text: [`Identity: ${actor?.id || channelUserId || '-'}`, `Role: ${actor?.role || 'unknown'}`, `Channel: ${channel}`, `Channel user id: ${channelUserId || '-'}`, `Name: ${actor?.fullName || fullName || '-'}`].join('\n'), payload: { ok: true, action: 'whoami', channelUserId, channel, actor } });
@@ -394,6 +484,9 @@ async function handleMasterWebhook({ body, config, headers = {}, rawHeaders = []
 
     if (event.callback?.id) {
       const data = String(event.callback.data || '');
+      if (data.startsWith('menu:')) {
+        return handleMenuAction({ action: data, actor, channel, token, recipientId, masterService, config, sessionKey, callbackId: event.callback.id });
+      }
       if (data.startsWith('card:')) {
         const requestId = data.split(':')[1];
         const card = masterService.getRequestCard(requestId);
@@ -468,14 +561,13 @@ async function handleMasterWebhook({ body, config, headers = {}, rawHeaders = []
             await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: 'Нужен комментарий' });
             return respondWithMessage({ channel, token, recipientId, text: `Укажите комментарий для отказа по заявке ${requestId}` });
           }
-          const result = masterService.changeRequestStatus({ requestId, toStatus: maybeSubstatus === 'waiting_decision' ? 'waiting_decision' : 'processed', substatus: maybeSubstatus === 'waiting_decision' ? null : maybeSubstatus, actorId: actor.id, actorRole: actor.role });
+          const result = masterService.changeRequestStatus({ requestId, toStatus: 'processed', substatus: maybeSubstatus, actorId: actor.id, actorRole: actor.role });
           await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: result?.error ? 'Ошибка' : 'Готово' });
-          return respondWithMessage({ channel, token, recipientId, text: result?.error ? `Ошибка: ${result.error}` : `Заявка ${requestId} → ${maybeSubstatus === 'waiting_decision' ? 'waiting_decision' : `processed/${maybeSubstatus}`}`, payload: { ok: !result?.error, ...result } });
-        }
-        if (action === 'waiting_decision') {
-          const result = masterService.changeRequestStatus({ requestId, toStatus: 'waiting_decision', actorId: actor.id, actorRole: actor.role });
-          await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: result?.error ? 'Ошибка' : 'Готово' });
-          return respondWithMessage({ channel, token, recipientId, text: result?.error ? `Ошибка: ${result.error}` : `Заявка ${requestId} → waiting_decision`, payload: { ok: !result?.error, ...result } });
+          if (result?.error && legacyMapping) {
+            const card = masterService.getRequestCard(requestId);
+            return respondWithMessage({ channel, token, recipientId, text: `Старая кнопка больше неактуальна. Карточка обновлена.\n\n${buildRequestCardText(card)}`, payload: { ok: true, legacy: true, requestId }, extra: { reply_markup: buildRequestActionsKeyboard(requestId, card, actor) } });
+          }
+          return respondWithMessage({ channel, token, recipientId, text: result?.error ? `Ошибка: ${result.error}` : `Заявка ${requestId} → processed/${maybeSubstatus}`, payload: { ok: !result?.error, ...result } });
         }
         if (action === 'in_progress') {
           const assignment = masterService.assignRequest({ requestId, assignedTo: actor.id, assignedBy: actor.id, actorId: actor.id, actorRole: actor.role, actorType: actor.role, metaJson: { channel, source: 'take_in_progress' } });
@@ -495,56 +587,21 @@ async function handleMasterWebhook({ body, config, headers = {}, rawHeaders = []
     }
 
     if (text === '/start') {
-      const baseKeyboard = [['Новые заявки', 'В работе'], ['Архив', 'Поиск'], ['Quality Cases', 'Инструкция']];
-      if (isAdmin(actor)) baseKeyboard.push(['Диагностика', 'Логи']);
-      if (canManageAccess(actor)) baseKeyboard.push(['Доступы']);
-      await sendChannelMessage({ channel, token, recipientId, text: `Master Bot запущен. Роль: ${actor.role}.`, extra: { reply_markup: { keyboard: baseKeyboard, resize_keyboard: true } } });
       db.recordMasterAction({ actorId: actor.id, role: actor.role, action: 'master_start', payload: { channel } });
-      return { ok: true, action: 'start' };
+      return respondWithMessage({ channel, token, recipientId, text: `Master Bot запущен. Роль: ${actor.role}.`, payload: { ok: true, action: 'start' }, extra: { reply_markup: buildMainMenuKeyboard(actor) } });
     }
 
-    if (text === 'Новые заявки' || text === 'В работе') {
-      const items = text === 'Новые заявки' ? masterService.listRequestsByStatus('new') : masterService.listActiveRequests();
-      await respondWithMessage({ channel, token, recipientId, text: items.map(formatRequestLine).join('\n') || (text === 'Новые заявки' ? 'Нет новых заявок' : 'Нет заявок в работе') });
-      for (const item of items.slice(0, 10)) await sendChannelMessage({ channel, token, recipientId, text: `Заявка ${item.id}`, extra: { reply_markup: buildRequestActionsKeyboard(item.id, { request: item }, actor) } });
-      return { ok: true, items };
-    }
-    if (text === 'Архив') {
-      const items = masterService.listArchiveRequests();
-      await respondWithMessage({ channel, token, recipientId, text: items.map(formatRequestLine).join('\n') || 'Архив пуст' });
-      for (const item of items.slice(0, 10)) await sendChannelMessage({ channel, token, recipientId, text: `Архивная заявка ${item.id}`, extra: { reply_markup: buildRequestActionsKeyboard(item.id, { request: item }, actor) } });
-      return { ok: true, items };
+    if (String(text).startsWith('menu:')) {
+      return handleMenuAction({ action: text, actor, channel, token, recipientId, masterService, config, sessionKey });
     }
 
-    if (text === 'Поиск') {
-      sessions.set(sessionKey, { step: 'search_query' });
-      return respondWithMessage({ channel, token, recipientId, text: 'Введите строку для поиска (ФИО, телефон, VIN или номер).' });
-    }
-    if (text === 'Диагностика' || text === '/diagnostics') {
-      if (!isAdmin(actor)) return respondWithMessage({ channel, token, recipientId, text: 'Недостаточно прав.' });
-      return respondWithMessage({
-        channel,
-        token,
-        recipientId,
-        text: buildDiagnosticsText({ config, actor, channel, detailed: false }),
-        payload: { ok: true },
-        extra: {
-          reply_markup: {
-            inline_keyboard: [
-              [{ text: 'обновить', callback_data: 'admin:diagnostics' }, { text: 'прогнать проверку', callback_data: 'admin:diagnostics' }],
-              [{ text: 'краткий статус', callback_data: 'admin:diagnostics_short' }, { text: 'подробный статус', callback_data: 'admin:diagnostics_detailed' }]
-            ]
-          }
-        }
-      });
+    if (text === '/diagnostics') {
+      return handleMenuAction({ action: 'menu:diagnostics', actor, channel, token, recipientId, masterService, config, sessionKey });
     }
     if (text === 'Логи' || text.startsWith('/logs')) {
-      if (!isAdmin(actor)) return respondWithMessage({ channel, token, recipientId, text: 'Недостаточно прав.' });
+      if (text === 'Логи') return handleMenuAction({ action: 'menu:logs', actor, channel, token, recipientId, masterService, config, sessionKey });
+      if (!isAdmin(actor)) return respondWithMessage({ channel, token, recipientId, text: 'Недостаточно прав.', payload: { ok: false, error: 'ACCESS_DENIED' } });
       const filters = parseLogsFilter(text.replace('/logs', '').trim());
-      if (!Object.keys(filters).length && text === 'Логи') {
-        sessions.set(sessionKey, { step: 'logs_filter' });
-        return respondWithMessage({ channel, token, recipientId, text: 'Введите фильтр логов в формате request:<id> type:<type> bot:<bot> since:YYYY-MM-DD' });
-      }
       return respondWithMessage({
         channel,
         token,
@@ -554,13 +611,8 @@ async function handleMasterWebhook({ body, config, headers = {}, rawHeaders = []
         extra: { reply_markup: { inline_keyboard: [[{ text: 'кратко', callback_data: 'admin:logs_short' }, { text: 'подробно', callback_data: 'admin:logs_detailed' }]] } }
       });
     }
-    if (text === 'Доступы') {
-      if (!canManageAccess(actor)) return respondWithMessage({ channel, token, recipientId, text: 'Недостаточно прав.' });
-      return respondWithMessage({ channel, token, recipientId, text: `Раздел доступов:\n/access_list\n/access_grant <${channel === 'max' ? 'maxId' : 'telegramId'}> <master|manager> [ФИО]\n/access_revoke <${channel === 'max' ? 'maxId' : 'telegramId'}>` });
-    }
-    if (text === 'Quality Cases' || text === '/quality_cases') {
-      const items = masterService.listQualityCases();
-      return respondWithMessage({ channel, token, recipientId, text: qualityCasesText(items), payload: { ok: true, items } });
+    if (text === '/quality_cases') {
+      return handleMenuAction({ action: 'menu:quality_cases', actor, channel, token, recipientId, masterService, config, sessionKey });
     }
 
     const session = sessions.get(sessionKey);
@@ -633,10 +685,8 @@ async function handleMasterWebhook({ body, config, headers = {}, rawHeaders = []
       const [, requestId, toStatus, maybeSubstatus, ...rest] = text.split(' ');
       const substatus = REQUEST_SUBSTATUSES.includes(maybeSubstatus) ? maybeSubstatus : null;
       const comment = substatus ? rest.join(' ') : [maybeSubstatus, ...rest].filter(Boolean).join(' ');
-      const normalizedToStatus = toStatus === 'processed' && substatus === 'waiting_decision' ? 'waiting_decision' : toStatus;
-      const normalizedSubstatus = normalizedToStatus === 'waiting_decision' ? null : substatus;
-      const result = masterService.changeRequestStatus({ requestId, toStatus: normalizedToStatus, substatus: normalizedSubstatus, actorId: actor.id, actorRole: actor.role, comment, lostReason: comment });
-      return respondWithMessage({ channel, token, recipientId, text: result?.error ? `Ошибка: ${result.error}` : `Статус обновлён: ${normalizedToStatus}${normalizedSubstatus ? '/' + normalizedSubstatus : ''}`, payload: { ok: !result?.error, ...result } });
+      const result = masterService.changeRequestStatus({ requestId, toStatus, substatus, actorId: actor.id, actorRole: actor.role, comment, lostReason: comment });
+      return respondWithMessage({ channel, token, recipientId, text: result?.error ? `Ошибка: ${result.error}` : `Статус обновлён: ${toStatus}${substatus ? '/' + substatus : ''}`, payload: { ok: !result?.error, ...result } });
     }
     if (text.startsWith('/comment ')) {
       const [, requestId, ...commentParts] = text.split(' ');

@@ -2,33 +2,39 @@
 
 ## Core deploy contract
 - Entrypoint: `app.js`
-- BotHost main file: `.bothost/entrypoint.conf`
-- Container command: `node app.js`
-- Runtime image: Node 20 Alpine in `Dockerfile`
+- Runtime: Node.js
+- Canonical HTTP server: `src/server/index.js`
+- Keep MAX inside the same project/runtime.
 
-## Minimum Telegram-oriented env
+## Required baseline env
 ```env
 WEBAPP_URL=https://your-host
 DB_SQLITE_PATH=/persistent/data/db.sqlite
-TELEGRAM_CLIENT_BOT_TOKEN=...
 TELEGRAM_MASTER_BOT_TOKEN=...
 MASTER_BOT_ADMIN_IDS=123456789
 ```
 
-## Additional MAX env
+## Optional production env
 ```env
+TELEGRAM_CLIENT_BOT_TOKEN=...
+TELEGRAM_INTEGRATION_BOT_TOKEN=...
+TELEGRAM_MASTERS_CHAT_ID=...
 MAX_ENABLED=true
 MAX_CLIENT_BOT_TOKEN=...
 MAX_MASTER_BOT_TOKEN=...
 MAX_WEBHOOK_SECRET=...
-MAX_WEBHOOK_BASE_URL=https://your-public-origin.example.com   # optional explicit webhook base, otherwise WEBAPP_URL origin is used
 MAX_MASTER_BOT_ADMIN_IDS=max-admin-id
-MAX_BOT_NAME=your_max_bot
 MAX_WEBAPP_URL=https://your-host
+AI_ENABLED=false
+AI_PROVIDER=
+AI_MODEL=
+AI_API_KEY=
+AI_TIMEOUT_MS=5000
 ```
 
-## Important deploy notes
-- Telegram webhook registration is external to the app.
-- MAX webhook subscriptions are now reconciled by the Node runtime at startup for both `/max/client_bot/webhook` and `/max/master_bot/webhook`; if you need a non-root public origin, set `MAX_WEBHOOK_BASE_URL`.
-- Persistence durability depends on the mounted SQLite path.
-- Do not split MAX into a separate BotHost project.
+## Post-deploy focus
+- verify `/health`, `/health/db`, `/health/max`
+- open master bot `/start` and press every inline menu button
+- create one request and verify request-card actions
+- verify scheduler follow-up tasks are created/persisted
+- verify diagnostics/logs mask secrets
