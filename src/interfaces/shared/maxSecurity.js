@@ -50,11 +50,19 @@ function validateMaxWebhookRequest({ config, headers = {}, rawHeaders = [], path
   const routeEnabled = Boolean(config.maxEnabled);
   const tokenPresent = Boolean(token);
   const secretCheckPassed = secretPresent && receivedSecret === expectedSecret;
+  const normalizedMethod = String(method || '').toUpperCase();
+  const methodValid = normalizedMethod === 'POST';
+  const pathValid = String(pathname || '').startsWith('/max/');
+  const bodyKeys = payloadValid ? Object.keys(body).sort() : [];
 
-  logger.info(`${routeLabel} webhook received`, {
+  logger.info(`${routeLabel} MAX validation start`, {
     channel: 'max',
     pathname,
-    method,
+    method: normalizedMethod,
+    pathValid,
+    methodValid,
+    bodyPresent: Boolean(body),
+    bodyKeys,
     headers: headerInfo.sanitized,
     hasSecretHeader: headerInfo.hasSecretHeader,
     actualSecretHeaderName: headerInfo.actualSecretHeaderName,
@@ -65,22 +73,31 @@ function validateMaxWebhookRequest({ config, headers = {}, rawHeaders = [], path
     payloadValid
   });
 
+  if (!pathValid) {
+    logger.warn(`${routeLabel} MAX route rejected because pathname is invalid`, { pathname, method: normalizedMethod, reason: 'PATH_INVALID' });
+    return { ok: false, error: 'INVALID_MAX_PATH', statusCode: 400, headerInfo };
+  }
+  if (!methodValid) {
+    logger.warn(`${routeLabel} MAX route rejected because HTTP method is invalid`, { pathname, method: normalizedMethod, reason: 'METHOD_INVALID' });
+    return { ok: false, error: 'INVALID_MAX_METHOD', statusCode: 405, headerInfo };
+  }
   if (!routeEnabled) {
-    logger.warn(`${routeLabel} MAX route rejected because MAX is disabled`, { pathname, method });
+    logger.warn(`${routeLabel} MAX route rejected because MAX is disabled`, { pathname, method: normalizedMethod, reason: 'MAX_DISABLED' });
     return { ok: false, error: 'MAX_DISABLED', statusCode: 503, headerInfo };
   }
   if (!tokenPresent) {
-    logger.warn(`${routeLabel} MAX route rejected because bot token is missing`, { pathname, method });
+    logger.warn(`${routeLabel} MAX route rejected because bot token is missing`, { pathname, method: normalizedMethod, reason: 'MAX_BOT_TOKEN_MISSING' });
     return { ok: false, error: 'MAX_BOT_TOKEN_MISSING', statusCode: 503, headerInfo };
   }
   if (!secretPresent) {
-    logger.warn(`${routeLabel} MAX route rejected because MAX_WEBHOOK_SECRET is missing`, { pathname, method });
+    logger.warn(`${routeLabel} MAX route rejected because MAX_WEBHOOK_SECRET is missing`, { pathname, method: normalizedMethod, reason: 'MAX_WEBHOOK_SECRET_MISSING' });
     return { ok: false, error: 'MAX_WEBHOOK_SECRET_MISSING', statusCode: 503, headerInfo };
   }
   if (!headerInfo.hasSecretHeader || !secretCheckPassed) {
     logger.warn(`${routeLabel} MAX secret check failed`, {
       pathname,
-      method,
+      method: normalizedMethod,
+      reason: 'INVALID_WEBHOOK_SECRET',
       hasSecretHeader: headerInfo.hasSecretHeader,
       actualSecretHeaderName: headerInfo.actualSecretHeaderName,
       receivedSecretPreview: sanitizeHeaderValue('x-max-bot-api-secret', receivedSecret),
@@ -89,10 +106,11 @@ function validateMaxWebhookRequest({ config, headers = {}, rawHeaders = [], path
     return { ok: false, error: 'INVALID_WEBHOOK_SECRET', statusCode: 403, headerInfo };
   }
   if (!payloadValid) {
-    logger.warn(`${routeLabel} MAX route rejected because payload is invalid`, { pathname, method });
+    logger.warn(`${routeLabel} MAX route rejected because payload is invalid`, { pathname, method: normalizedMethod, reason: 'INVALID_MAX_PAYLOAD', bodyPresent: Boolean(body), bodyKeys });
     return { ok: false, error: 'INVALID_MAX_PAYLOAD', statusCode: 400, headerInfo };
   }
 
+  logger.info(`${routeLabel} MAX validation passed`, { pathname, method: normalizedMethod, bodyKeys, hasSecretHeader: headerInfo.hasSecretHeader });
   return { ok: true, headerInfo };
 }
 
