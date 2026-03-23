@@ -349,7 +349,9 @@ function buildHistoryText(card) {
 
 async function handleMasterWebhook({ body, config, headers = {}, rawHeaders = [], pathname = '', method = 'POST', channel = 'telegram' }) {
   if (channel === 'max') {
-    db.createAnalyticsEvent({ eventType: 'max_webhook_received', channel: 'max', platform: 'max', status: 'received', metaJson: { route: 'master_bot', pathname, method } });
+    const bodyKeys = body && typeof body === 'object' && !Array.isArray(body) ? Object.keys(body).sort() : [];
+    logger.info('master_bot MAX webhook route hit', { channel, pathname, method: String(method || '').toUpperCase(), bodyPresent: Boolean(body), bodyKeys });
+    db.createAnalyticsEvent({ eventType: 'max_webhook_received', channel: 'max', platform: 'max', status: 'received', metaJson: { route: 'master_bot', pathname, method: String(method || '').toUpperCase(), bodyKeys } });
     const validation = validateMaxWebhookRequest({ config, headers, rawHeaders, pathname, method, logger, routeLabel: 'master_bot', token: masterToken(config, channel), body });
     if (!validation.ok) {
       db.createAnalyticsEvent({ eventType: 'max_webhook_rejected', channel: 'max', platform: 'max', status: validation.error, metaJson: { route: 'master_bot', pathname, method, statusCode: validation.statusCode } });
@@ -361,8 +363,11 @@ async function handleMasterWebhook({ body, config, headers = {}, rawHeaders = []
     const event = extractIncomingEvent({ body, channel });
     const updateType = event.callback ? 'callback' : (event.message ? 'message' : 'unknown');
     const senderBlock = buildSenderSnapshot({ body, event });
-    logger.info('master_bot webhook parsed update', { channel, pathname, method, updateType, senderBlock, text: String(event.callback ? event.callback.data || '' : event.text || '').slice(0, 500) });
-    if (!event.message && !event.callback) return { ok: true, action: 'ignored_unknown_update', updateType };
+    logger.info('master_bot webhook parsed update', { channel, pathname, method, updateType, senderBlock, text: String(event.callback ? event.callback.data || '' : event.text || '').slice(0, 500), rawSummary: channel === 'max' ? event.rawSummary : undefined });
+    if (!event.message && !event.callback) {
+      logger.warn('master_bot unknown update without message/callback', { channel, pathname, method, reason: 'NO_MESSAGE_AND_NO_CALLBACK', rawSummary: channel === 'max' ? event.rawSummary : undefined, body });
+      return { ok: true, action: 'ignored_unknown_update', updateType };
+    }
 
     const token = masterToken(config, channel);
     const masterService = createMasterService({ db, sendClientMessage: sendChannelMessage, adminIds: adminIds(config, channel), actorChannel: channel });

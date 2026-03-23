@@ -128,6 +128,55 @@ test('MAX master bot enforces access, works with roles and sends clarification f
   }, { MAX_ENABLED: 'true', MAX_CLIENT_BOT_TOKEN: 'max-client-token', MAX_MASTER_BOT_TOKEN: 'max-master-token', MAX_WEBHOOK_SECRET: 'secret-max', MAX_MASTER_BOT_ADMIN_IDS: 'mx-admin-1' });
 });
 
+
+test('MAX client webhook parses message_created payload when webhook body is nested directly under payload', async () => {
+  await withMockedFetch(async () => {
+    const config = loadConfig();
+    config.maxEnabled = true;
+    config.maxWebhookSecret = 'secret-max';
+    config.maxClientBotToken = 'max-client-token';
+
+    const start = await handleClientWebhook({
+      body: {
+        update_type: 'message_created',
+        payload: {
+          sender: { user_id: 'mx-client-payload', first_name: 'Payload' },
+          recipient: { chat_id: 'chat-payload' },
+          body: { text: '/start form_service' }
+        }
+      },
+      config,
+      headers: { 'X-Max-Bot-Api-Secret': 'secret-max' },
+      rawHeaders: ['X-Max-Bot-Api-Secret', 'secret-max'],
+      pathname: '/max/client_bot/webhook',
+      method: 'POST',
+      channel: 'max'
+    });
+    assert.equal(start.ok, true);
+    assert.equal(start.action, 'start');
+    assert.equal(start.deeplink.payload, 'form_service');
+
+    const help = await handleClientWebhook({
+      body: {
+        update_type: 'message_created',
+        payload: {
+          sender: { user_id: 'mx-client-payload', first_name: 'Payload' },
+          recipient: { chat_id: 'chat-payload' },
+          body: { text: '/help' }
+        }
+      },
+      config,
+      headers: { 'X-Max-Bot-Api-Secret': 'secret-max' },
+      rawHeaders: ['X-Max-Bot-Api-Secret', 'secret-max'],
+      pathname: '/max/client_bot/webhook',
+      method: 'POST',
+      channel: 'max'
+    });
+    assert.equal(help.ok, true);
+    assert.equal(help.action, 'help');
+  });
+});
+
 test('MAX webhook secret check reads env secret and accepts header name casing from runtime', async () => {
   await withMockedFetch(async () => {
     const config = loadConfig();

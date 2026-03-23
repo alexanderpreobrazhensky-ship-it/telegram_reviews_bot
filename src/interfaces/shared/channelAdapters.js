@@ -101,10 +101,67 @@ function extractTelegramEvent(body = {}) {
   };
 }
 
+function isMaxMessageShape(value) {
+  return Boolean(value)
+    && typeof value === 'object'
+    && !Array.isArray(value)
+    && (Boolean(value.body) || Boolean(value.sender) || Boolean(value.recipient) || Boolean(value.chat_id));
+}
+
+function isMaxCallbackShape(value) {
+  return Boolean(value)
+    && typeof value === 'object'
+    && !Array.isArray(value)
+    && (Boolean(value.callback_id) || Boolean(value.payload) || Boolean(value.data) || Boolean(value.message));
+}
+
+function summarizeMaxEvent(body = {}) {
+  const topLevelKeys = Object.keys(body || {}).sort();
+  const payloadKeys = body?.payload && typeof body.payload === 'object' && !Array.isArray(body.payload)
+    ? Object.keys(body.payload).sort()
+    : [];
+  const messageCandidate = body?.message || (isMaxMessageShape(body?.payload) ? body.payload : body?.payload?.message) || body?.update?.message || null;
+  const callbackCandidate = body?.callback || body?.message_callback || (isMaxCallbackShape(body?.payload) ? body.payload : body?.payload?.callback) || body?.update?.callback || null;
+  return {
+    updateType: String(body?.update_type || body?.type || body?.event_type || '').trim(),
+    topLevelKeys,
+    payloadKeys,
+    hasMessage: Boolean(messageCandidate),
+    hasCallback: Boolean(callbackCandidate),
+    textLocations: {
+      bodyMessageBodyText: Boolean(body?.message?.body?.text),
+      payloadBodyText: Boolean(body?.payload?.body?.text),
+      payloadMessageBodyText: Boolean(body?.payload?.message?.body?.text),
+      topLevelText: Boolean(body?.text)
+    },
+    senderLocations: {
+      messageSender: Boolean(body?.message?.sender || body?.message?.from),
+      payloadSender: Boolean(body?.payload?.sender || body?.payload?.from),
+      payloadMessageSender: Boolean(body?.payload?.message?.sender || body?.payload?.message?.from),
+      topLevelSender: Boolean(body?.sender || body?.user)
+    },
+    chatLocations: {
+      messageRecipientChat: Boolean(body?.message?.recipient?.chat_id || body?.message?.chat_id || body?.message?.chat?.id),
+      payloadRecipientChat: Boolean(body?.payload?.recipient?.chat_id || body?.payload?.chat_id || body?.payload?.chat?.id),
+      payloadMessageRecipientChat: Boolean(body?.payload?.message?.recipient?.chat_id || body?.payload?.message?.chat_id || body?.payload?.message?.chat?.id),
+      topLevelChat: Boolean(body?.chat_id || body?.chat?.chat_id || body?.chat?.id)
+    }
+  };
+}
+
 function extractMaxEvent(body = {}) {
   const updateType = String(body?.update_type || body?.type || body?.event_type || '').trim();
-  const message = body?.message || body?.payload?.message || body?.update?.message || null;
-  const callback = body?.callback || body?.message_callback || body?.payload?.callback || body?.update?.callback || null;
+  const message = body?.message
+    || (isMaxMessageShape(body?.payload) ? body.payload : null)
+    || body?.payload?.message
+    || body?.update?.message
+    || null;
+  const callback = body?.callback
+    || body?.message_callback
+    || (isMaxCallbackShape(body?.payload) ? body.payload : null)
+    || body?.payload?.callback
+    || body?.update?.callback
+    || null;
   const startPayload = String(body?.start_payload || body?.payload?.start_payload || (typeof body?.payload === 'string' ? body.payload : '') || '').trim();
   const syntheticBotStartedMessage = updateType === 'bot_started'
     ? {
@@ -139,7 +196,8 @@ function extractMaxEvent(body = {}) {
     chatId: effectiveMessage?.recipient?.chat_id || effectiveMessage?.chat_id || effectiveMessage?.chat?.chat_id || effectiveMessage?.chat?.id || body?.chat_id || body?.chat?.chat_id || body?.chat?.id || null,
     userId: String(user.user_id || user.id || effectiveMessage?.recipient?.user_id || ''),
     fullName: [user.first_name, user.last_name, user.name].filter(Boolean).join(' ').trim(),
-    startPayload
+    startPayload,
+    rawSummary: summarizeMaxEvent(body)
   };
 }
 

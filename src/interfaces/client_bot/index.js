@@ -121,12 +121,20 @@ function resolveRecipientId(channel, primaryId, fallbackId) {
 
 async function handleClientWebhook({ body, config, headers = {}, rawHeaders = [], pathname = '', method = 'POST', channel = 'telegram' }) {
   if (channel === 'max') {
+    const bodyKeys = body && typeof body === 'object' && !Array.isArray(body) ? Object.keys(body).sort() : [];
+    logger.info('client_bot MAX webhook route hit', {
+      channel,
+      pathname,
+      method: String(method || '').toUpperCase(),
+      bodyPresent: Boolean(body),
+      bodyKeys
+    });
     db.createAnalyticsEvent({
       eventType: 'max_webhook_received',
       channel: 'max',
       platform: 'max',
       status: 'received',
-      metaJson: { route: 'client_bot', pathname, method }
+      metaJson: { route: 'client_bot', pathname, method: String(method || '').toUpperCase(), bodyKeys }
     });
     const validation = validateMaxWebhookRequest({
       config,
@@ -161,11 +169,12 @@ async function handleClientWebhook({ body, config, headers = {}, rawHeaders = []
       method,
       updateType,
       hasMessage: Boolean(event.message),
-      hasSender: Boolean(event.message?.from || body?.sender || body?.user || event.callback),
+      hasSender: Boolean(event.message?.from || event.message?.sender || body?.sender || body?.user || event.callback),
       senderBlock,
       userId: event.callback?.userId || event.userId || null,
       messagePresent: Boolean(event.message),
-      text: String(event.callback ? event.callback.data || '' : event.text || '').slice(0, 500)
+      text: String(event.callback ? event.callback.data || '' : event.text || '').slice(0, 500),
+      rawSummary: channel === 'max' ? event.rawSummary : undefined
     });
     if (!event.message && !event.callback) {
       logger.warn('client_bot unknown update without message/callback', {
@@ -173,6 +182,7 @@ async function handleClientWebhook({ body, config, headers = {}, rawHeaders = []
         pathname,
         method,
         reason: 'NO_MESSAGE_AND_NO_CALLBACK',
+        rawSummary: channel === 'max' ? event.rawSummary : undefined,
         body
       });
       return { ok: true, action: 'ignored_unknown_update', updateType };
