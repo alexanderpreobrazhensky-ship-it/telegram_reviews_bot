@@ -4,6 +4,7 @@ const logger = require('./src/infrastructure/logging/logger');
 const db = require('./src/infrastructure/db');
 const { createScheduler } = require('./src/infrastructure/scheduler');
 const { sendChannelMessage } = require('./src/infrastructure/messaging');
+const { reconcileMaxWebhookSubscriptions } = require('./src/infrastructure/max/subscriptions');
 
 function bootstrap() {
   const config = loadConfig();
@@ -129,6 +130,13 @@ function bootstrap() {
       `Platform skeleton server listening on port ${runtimePort} (env PORT=${process.env.PORT || 'not-set'}, fallback=3000)`
     );
     scheduler.start();
+    reconcileMaxWebhookSubscriptions({ config, logger })
+      .then((result) => {
+        logger.info('MAX subscription reconciliation finished', result);
+      })
+      .catch((error) => {
+        logger.error('MAX subscription reconciliation failed', { error: String(error?.message || error) });
+      });
   });
 
   server.on('close', () => {

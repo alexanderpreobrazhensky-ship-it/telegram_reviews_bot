@@ -34,6 +34,7 @@
 - `MAX_CLIENT_BOT_TOKEN`
 - `MAX_MASTER_BOT_TOKEN`
 - `MAX_WEBHOOK_SECRET`
+- `MAX_WEBHOOK_BASE_URL` (optional explicit public base for MAX webhook subscription reconciliation)
 - `MAX_MASTER_BOT_ADMIN_IDS`
 - `MAX_WEBAPP_URL`
 - `MAX_BOT_NAME`

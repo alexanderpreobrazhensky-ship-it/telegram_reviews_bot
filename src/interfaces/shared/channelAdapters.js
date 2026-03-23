@@ -102,14 +102,29 @@ function extractTelegramEvent(body = {}) {
 }
 
 function extractMaxEvent(body = {}) {
+  const updateType = String(body?.update_type || body?.type || body?.event_type || '').trim();
   const message = body?.message || body?.payload?.message || body?.update?.message || null;
-  const callback = body?.callback || body?.message_callback || body?.payload?.callback || null;
-  const user = message?.from || message?.sender || body?.user || callback?.user || {};
-  const callbackUser = callback?.from || callback?.sender || user;
-  const callbackMessage = callback?.message || message || {};
+  const callback = body?.callback || body?.message_callback || body?.payload?.callback || body?.update?.callback || null;
+  const startPayload = String(body?.start_payload || body?.payload?.start_payload || (typeof body?.payload === 'string' ? body.payload : '') || '').trim();
+  const syntheticBotStartedMessage = updateType === 'bot_started'
+    ? {
+        body: { text: startPayload ? `/start ${startPayload}` : '/start' },
+        chat_id: body?.chat_id || body?.chat?.chat_id || body?.chat?.id || body?.dialog?.chat_id || null,
+        from: body?.user || body?.sender || null,
+        sender: body?.user || body?.sender || null,
+        recipient: {
+          user_id: body?.user?.user_id || body?.user?.id || body?.sender?.user_id || body?.sender?.id || null,
+          chat_id: body?.chat_id || body?.chat?.chat_id || body?.chat?.id || body?.dialog?.chat_id || null
+        }
+      }
+    : null;
+  const effectiveMessage = message || syntheticBotStartedMessage;
+  const user = effectiveMessage?.from || effectiveMessage?.sender || body?.sender || body?.user || callback?.user || {};
+  const callbackUser = callback?.from || callback?.sender || callback?.user || user;
+  const callbackMessage = callback?.message || effectiveMessage || {};
   return {
-    message,
-    contact: message?.contact ? { phoneNumber: String(message.contact.phone_number || message.contact.phone || ''), firstName: message.contact.first_name || '', lastName: message.contact.last_name || '', userId: String(message.contact.user_id || message.contact.userId || '') } : (body?.contact ? { phoneNumber: String(body.contact.phone_number || body.contact.phone || ''), userId: String(body.contact.user_id || body.contact.userId || '') } : null),
+    message: effectiveMessage,
+    contact: effectiveMessage?.contact ? { phoneNumber: String(effectiveMessage.contact.phone_number || effectiveMessage.contact.phone || ''), firstName: effectiveMessage.contact.first_name || '', lastName: effectiveMessage.contact.last_name || '', userId: String(effectiveMessage.contact.user_id || effectiveMessage.contact.userId || '') } : (body?.contact ? { phoneNumber: String(body.contact.phone_number || body.contact.phone || ''), userId: String(body.contact.user_id || body.contact.userId || '') } : null),
     callback: callback
       ? {
           id: callback.callback_id || callback.id || callback.query_id || '',
@@ -120,11 +135,11 @@ function extractMaxEvent(body = {}) {
           text: String(callbackMessage.body?.text || callbackMessage.text || '')
         }
       : null,
-    text: String(message?.body?.text || message?.text || body?.text || ''),
-    chatId: message?.recipient?.chat_id || message?.chat_id || message?.chat?.chat_id || message?.chat?.id || null,
-    userId: String(user.user_id || user.id || message?.recipient?.user_id || ''),
+    text: String(effectiveMessage?.body?.text || effectiveMessage?.text || body?.text || ''),
+    chatId: effectiveMessage?.recipient?.chat_id || effectiveMessage?.chat_id || effectiveMessage?.chat?.chat_id || effectiveMessage?.chat?.id || body?.chat_id || body?.chat?.chat_id || body?.chat?.id || null,
+    userId: String(user.user_id || user.id || effectiveMessage?.recipient?.user_id || ''),
     fullName: [user.first_name, user.last_name, user.name].filter(Boolean).join(' ').trim(),
-    startPayload: String(body?.start_payload || body?.payload?.start_payload || '').trim()
+    startPayload
   };
 }
 
