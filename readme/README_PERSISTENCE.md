@@ -3,16 +3,31 @@
 ## Canonical store
 SQLite via `src/infrastructure/db/index.js`.
 
-## Path rules
-- Prefer `DB_SQLITE_PATH`.
-- `DB_FILE_PATH` still works as a legacy alias.
-- If a legacy `.json` path is supplied, the runtime converts the active DB path to `.sqlite` and can import JSON on first empty init.
+## Request fields in active lifecycle
+- `status`
+- `substatus`
+- `assigned_to`
+- `assigned_by`
+- `assigned_at`
+- `archived`
+- `last_followup_at`
+- `completed_at`
+- `last_outbound_error`
+- `rejection_comment`
 
-## Important behavior
-- Schema is auto-created.
-- SQLite uses WAL mode.
-- Legacy JSON import exists for migration.
-- Request export exists via `/internal/export`.
+## Request events
+`request_events` is the operational audit trail and stores:
+- request id
+- event type
+- actor type/id/role
+- old/new values
+- comment
+- `meta_json`
+- creation time
 
-## Operational caution
-- Treat import/replace flows as destructive operations unless backed up first.
+## Scheduler persistence
+Follow-up reminders and retries are persisted in `tasks`.
+This includes:
+- `waiting_decision_followup`
+- `consulted_followup`
+- `feedback_request`

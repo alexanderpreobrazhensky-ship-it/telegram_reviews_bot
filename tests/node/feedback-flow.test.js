@@ -118,7 +118,7 @@ test('waiting_decision and consulted follow-up tasks are persisted and processed
   db.updateRequestAssignment({ requestId: requestB.id, assignedTo: staff.id, assignedBy: 'admin', actorId: 'admin', actorRole: 'admin' });
   db.updateRequestStatus({ requestId: requestA.id, toStatus: 'in_progress', actorId: staff.id, actorRole: 'master' });
   db.updateRequestStatus({ requestId: requestB.id, toStatus: 'in_progress', actorId: staff.id, actorRole: 'master' });
-  db.updateRequestStatus({ requestId: requestA.id, toStatus: 'waiting_decision', actorId: staff.id, actorRole: 'master' });
+  db.updateRequestStatus({ requestId: requestA.id, toStatus: 'processed', substatus: 'waiting_decision', actorId: staff.id, actorRole: 'master' });
   db.updateRequestStatus({ requestId: requestB.id, toStatus: 'processed', substatus: 'consulted', actorId: staff.id, actorRole: 'master' });
 
   const tasks = db.listTasks(['scheduled']);

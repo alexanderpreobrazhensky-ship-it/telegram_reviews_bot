@@ -1,27 +1,16 @@
 # WebApp
 
-## Served pages
-- `/`
-- `/requests`
-- `/recommendations`
-- `/forms/service-request`
-- `/forms/parts-request`
-- `/forms/consultation`
-- `/forms/warranty-request`
-- `/forms/data-change-request`
+## Canonical frontend files
+- `public/index.html`
+- `public/webapp.js`
+- `public/styles.css`
 
-## Behavior
-- Shell comes from `public/index.html`.
-- Logic lives in `public/webapp.js`.
-- Runtime config is injected by the server.
-- Form submit APIs live under `/api/client/requests/*`.
+## Important constraints
+- Do not rely on `review.html` for runtime changes.
+- Phone input/storage rule remains strict: exactly 10 digits without `+7/8`.
+- Current backend compatibility assumes Node-first APIs under `/api/client/requests/*`.
 
-## Phone rule
-- Store only 10 digits.
-- Strip `+7` / `8` prefixes.
-- Validate on both client and server.
-
-## Identity
-- Telegram WebApp uses `Telegram.WebApp.initDataUnsafe.user.id` when available.
-- MAX WebApp uses `MAX.WebApp.initDataUnsafe.user.id` when available.
-- This is runtime-derived identity, not cryptographically verified identity.
+## Channel identities
+- Telegram source keeps `telegramId` when present.
+- MAX source keeps `maxId` when present.
+- These IDs are later reused for safe outbound clarification routing.

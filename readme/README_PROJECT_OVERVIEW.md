@@ -1,7 +1,7 @@
 # Project Overview
 
 ## What this project is
-A Node.js-first BotHost-safe service that combines:
+A Node-first multi-bot platform with one shared runtime:
 - shared HTTP server
 - shared WebApp
 - Telegram client bot
@@ -9,8 +9,9 @@ A Node.js-first BotHost-safe service that combines:
 - Telegram integration bot
 - MAX client bot
 - MAX master bot
-- SQLite-backed operational storage
-- in-process scheduler for follow-up tasks
+- SQLite persistence
+- in-process persisted scheduler
+- AI-ready infrastructure layer kept disabled by default
 
 ## Canonical production path
 - `app.js`
@@ -22,15 +23,26 @@ A Node.js-first BotHost-safe service that combines:
 - `src/interfaces/integration_bot/index.js`
 - `public/webapp.js`
 
-## Hard rules to keep in mind
-- Backend is Node-first only.
-- MAX stays inside the current project; no separate BotHost project.
-- `review.html` and `public/index.html` are not to be edited casually.
-- Admin bootstrap is env-driven.
-- Manager/master access is granted through bot flows.
-- Phone is stored as 10 digits without `+7/8`.
-- Recommendations only become meaningful after real 1C sync.
-- Integration bot remains Telegram-only.
+## Current master-bot model
+- Main menu is inline callback-based.
+- Stable callbacks: `menu:new_requests`, `menu:in_progress`, `menu:archive`, `menu:search`, `menu:quality_cases`, `menu:instruction`, `menu:diagnostics`, `menu:logs`, `menu:access`.
+- Request cards use: take in progress, ask client, processed, in service, complete, comment, details.
+- Legacy inline callbacks are remapped and refreshed instead of surfacing raw transition failures.
 
-## What is not canonical
-- `bots/**`, `services/**`, `shared/clients_registry.py`, and `legacy/index.js` are legacy/historical.
+## Current request lifecycle
+Primary statuses:
+- `new`
+- `in_progress`
+- `processed`
+- `in_service`
+- `completed`
+- `error`
+
+Processed substatuses:
+- `recorded`
+- `consulted`
+- `spam`
+- `waiting_decision`
+- `rejected`
+
+Archive is modeled by `archived=true`, not by a separate operational queue status.

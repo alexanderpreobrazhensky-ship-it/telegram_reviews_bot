@@ -447,20 +447,25 @@ function createServer({ config, logger }) {
       return sendJson(res, 200, {
         db: { connected: true, path: runtime.path, type: runtime.type },
         env: {
-          WEBAPP_URL: Boolean(config.webAppUrl),
+          WEBAPP_URL: config.webAppUrl || '',
+          DB_SQLITE_PATH: config.dbSqlitePath || runtime.path || '',
+          DB_FILE_PATH: process.env.DB_FILE_PATH ? 'configured (legacy)' : '',
           TELEGRAM_CLIENT_BOT_TOKEN: Boolean(config.telegramClientBotToken),
           TELEGRAM_MASTER_BOT_TOKEN: Boolean(config.telegramMasterBotToken),
           TELEGRAM_INTEGRATION_BOT_TOKEN: Boolean(config.telegramIntegrationBotToken),
           MASTER_BOT_ADMIN_IDS: (config.masterBotAdminIds || []).length,
+          TELEGRAM_MASTERS_CHAT_ID: Boolean(config.telegramMastersChatId),
           MAX_ENABLED: Boolean(config.maxEnabled),
           MAX_CLIENT_BOT_TOKEN: Boolean(config.maxClientBotToken),
           MAX_MASTER_BOT_TOKEN: Boolean(config.maxMasterBotToken),
           MAX_WEBHOOK_SECRET: Boolean(config.maxWebhookSecret),
           MAX_MASTER_BOT_ADMIN_IDS: (config.maxMasterBotAdminIds || []).length,
-          MAX_WEBAPP_URL: Boolean(config.maxWebAppUrl),
+          MAX_WEBAPP_URL: config.maxWebAppUrl || '',
+          INTERNAL_ADMIN_WHITELIST: (config.internalAdminWhitelist || []).length,
           AI_ENABLED: Boolean(config.ai?.enabled),
           AI_PROVIDER: config.ai?.provider || '',
-          AI_MODEL: Boolean(config.ai?.model)
+          AI_MODEL: config.ai?.model || '',
+          AI_TIMEOUT_MS: config.ai?.timeoutMs || 0
         },
         healthEndpoints: ['/health', '/health/db', '/health/max'],
         scheduler: {

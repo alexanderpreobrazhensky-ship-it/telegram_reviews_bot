@@ -4,15 +4,15 @@
 1. `GET /health`
 2. `GET /health/db`
 3. `GET /health/max`
-4. open `/` and one form route
-5. submit one request through WebApp
-6. verify Telegram client bot `/start`
-7. verify Telegram master bot `/start` with an allowed admin
-8. verify Telegram integration bot `/start` if token is configured
-9. verify MAX webhooks if MAX is enabled
-10. restart once and confirm SQLite data still exists
+4. Telegram master bot: `/start` -> every menu button
+5. MAX master bot: `/start` -> every menu button
+6. Create one request and verify: take in progress, processed/substatus, in service, complete
+7. Trigger legacy callback on an old card and verify friendly refresh UX
+8. Trigger `/diagnostics` and `/logs` as admin
+9. Verify one `waiting_decision` and one `consulted` task exist in scheduler persistence
+10. Confirm archive contains `spam`, `rejected`, and `completed`
 
-## Operational caveats
-- Missing Telegram/MAX tokens do not always kill webhook routes; they can degrade outbound delivery instead.
-- Internal routes rely on env allowlists, not sessions.
-- Integration endpoints currently need stronger auth before broader exposure.
+## Operator notes
+- Archived requests are read-only from the bot UI.
+- `error` indicates outbound clarification failure and should be investigated through logs.
+- Diagnostics and logs are admin-only.

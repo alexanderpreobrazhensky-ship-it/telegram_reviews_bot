@@ -45,6 +45,15 @@ test('master bot /start menu list and search work', async () => {
     const start = await sendMaster(base, '/start');
     assert.equal(start.action, 'start');
 
+    const callbackMenu = await fetch(`${base}/telegram/master_bot/webhook`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ callback_query: { id: 'menu-1', from: { id: 5001, first_name: 'Admin' }, message: { chat: { id: 5001 } }, data: 'menu:new_requests' } })
+    }).then((res) => res.json());
+    assert.equal(callbackMenu.ok, true);
+    assert.equal(callbackMenu.action, 'menu:new_requests');
+    assert.notEqual(callbackMenu.action, 'fallback');
+
     const menu = await sendMaster(base, 'Новые заявки');
     assert.equal(menu.items.length, 1);
     assert.equal(menu.items[0].id, req.id);
@@ -76,7 +85,7 @@ test('status transitions and lost reason validation work', async () => {
 
     const waiting = await sendMaster(base, `/set_status ${reqA.id} processed waiting_decision`);
     assert.equal(waiting.ok, true);
-    assert.equal(waiting.request.status, 'waiting_decision');
+    assert.equal(waiting.request.status, 'processed');
     assert.equal(waiting.request.substatus, 'waiting_decision');
 
     const inProgressAgain = await sendMaster(base, `/set_status ${reqA.id} in_progress`);
