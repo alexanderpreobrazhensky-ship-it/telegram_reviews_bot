@@ -297,12 +297,33 @@ function markIntegrationEventFailed(eventId, error) {
 }
 
 function integrationStats() {
-  const items = db.listIntegrationEvents({ limit: 500 });
-  return {
-    received: items.filter((item) => item.processingStatus === 'received').length,
-    processed: items.filter((item) => item.processingStatus === 'processed').length,
-    failed: items.filter((item) => item.processingStatus === 'failed').length
+  const items = db.listIntegrationEvents({ limit: 1000 });
+  const latestEventAt = items[0]?.createdAt || null;
+  const stats = {
+    total: items.length,
+    received: 0,
+    normalized: 0,
+    processing: 0,
+    retryScheduled: 0,
+    pending: 0,
+    processed: 0,
+    failed: 0,
+    ignored: 0,
+    latestEventAt
   };
+
+  for (const item of items) {
+    if (item.processingStatus === 'received') stats.received += 1;
+    if (item.processingStatus === 'normalized') stats.normalized += 1;
+    if (item.processingStatus === 'processing') stats.processing += 1;
+    if (item.processingStatus === 'retry_scheduled') stats.retryScheduled += 1;
+    if (item.processingStatus === 'processed') stats.processed += 1;
+    if (item.processingStatus === 'failed') stats.failed += 1;
+    if (item.processingStatus === 'ignored') stats.ignored += 1;
+  }
+
+  stats.pending = stats.received + stats.normalized + stats.processing + stats.retryScheduled;
+  return stats;
 }
 
 module.exports = {

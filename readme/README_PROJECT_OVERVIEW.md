@@ -23,6 +23,12 @@ A Node-first multi-bot platform with one shared runtime:
 - `src/interfaces/integration_bot/index.js`
 - `public/webapp.js`
 
+## Current integration-bot model
+- Telegram-only operator bot with reply-keyboard main menu.
+- Main sections: all events, failed, pending, stats, instruction, selfcheck.
+- Event cards support inline callbacks for details, retry, and ignore.
+- Slash commands remain as compatibility/fallback for manual operation.
+
 ## Current master-bot model
 - Main menu is inline callback-based.
 - Stable callbacks: `menu:new_requests`, `menu:in_progress`, `menu:archive`, `menu:search`, `menu:quality_cases`, `menu:instruction`, `menu:diagnostics`, `menu:logs`, `menu:access`.
