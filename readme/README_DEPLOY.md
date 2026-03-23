@@ -21,12 +21,14 @@ MAX_ENABLED=true
 MAX_CLIENT_BOT_TOKEN=...
 MAX_MASTER_BOT_TOKEN=...
 MAX_WEBHOOK_SECRET=...
+MAX_WEBHOOK_BASE_URL=https://your-public-origin.example.com   # optional explicit webhook base, otherwise WEBAPP_URL origin is used
 MAX_MASTER_BOT_ADMIN_IDS=max-admin-id
 MAX_BOT_NAME=your_max_bot
 MAX_WEBAPP_URL=https://your-host
 ```
 
 ## Important deploy notes
-- Telegram and MAX webhook registration is external to the app.
+- Telegram webhook registration is external to the app.
+- MAX webhook subscriptions are now reconciled by the Node runtime at startup for both `/max/client_bot/webhook` and `/max/master_bot/webhook`; if you need a non-root public origin, set `MAX_WEBHOOK_BASE_URL`.
 - Persistence durability depends on the mounted SQLite path.
 - Do not split MAX into a separate BotHost project.
