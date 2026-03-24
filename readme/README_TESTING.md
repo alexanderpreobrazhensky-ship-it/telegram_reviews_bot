@@ -29,3 +29,11 @@ npm test
 - Diagnostics short/detailed/rerun.
 - Email intake diagnostics (when enabled).
 - README ↔ code ↔ audit consistency pass.
+
+## Reference dataset checks (required)
+После обновления bridge dataset дополнительно прогонять:
+1. Repository check: файлы не в корне, структура `data/reference/client_vehicle_bridge/` корректна.
+2. Dataset check: XLSX/SQLite открываются, таблицы/листы читаемы.
+3. Structure check: `clients`, `vehicles`, owner linkage, mileage fields, phone/VIN assumptions.
+4. Documentation check: bridge README + repo README + `audit/MASTER_AUDIT.md` согласованы.
+5. Regression check: runtime тесты проходят, `app.js` и production DB path не подменены.
