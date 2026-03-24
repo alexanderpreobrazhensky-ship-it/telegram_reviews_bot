@@ -52,6 +52,13 @@
 
 Важное ограничение: runtime сервисы не должны автоматически подхватывать этот dataset без отдельной задачи/feature.
 
+### Текущий runtime use-case (WebApp exact lookup)
+- В runtime используется **только read-only lookup** для web/site заявок.
+- Источник: `data/reference/client_vehicle_bridge/lira_normalized_database.sqlite` (предпочтительно к XLSX для программного поиска).
+- Текущий ключ: только `phone_norm + client_name/client_name_norm` (exact deterministic match).
+- При одном совпадении заявка получает `existing_client=true`; при `0` совпадений — `false`; при `>1` — conflict (`needs_review=true`).
+- Lookup не меняет runtime production DB и не делает auto-merge с клиентской production-историей.
+
 ## 8) Future 1С bridge
 Датасет является промежуточным контрактом между 1С-выгрузками и бот-контуром:
 - фиксирует стабильные сущности и поля;
