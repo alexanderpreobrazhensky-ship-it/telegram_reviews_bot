@@ -18,7 +18,7 @@ Do not recreate split audit files.
 - Core env is loaded in `src/infrastructure/config/index.js`.
 - AI env has canonical `AI_*` contract with Railway legacy compatibility mapping.
 - Canonical priority is enforced: canonical `AI_*` -> shared legacy -> `CLIENT_*` legacy -> defaults.
-- Diagnostics mask secrets and expose readiness plus source-resolution metadata.
+- Diagnostics mask secrets and expose readiness plus source-resolution metadata, including `legacy detected/ignored/used`.
 
 ## Persistence
 - SQLite is canonical.
@@ -68,6 +68,6 @@ Do not recreate split audit files.
 ## AI Stage 1 (Infrastructure Only, DeepSeek-first)
 - Canonical AI envs: `AI_ENABLED`, `AI_BUSINESS_USAGE_ENABLED`, `AI_PROVIDER`, `AI_MODEL`, `AI_PROXY_URL`, `AI_PROXY_TOKEN`, `AI_TIMEOUT_MS`, `AI_ALLOWED_PROVIDERS`, `AI_DIAGNOSTICS_ENABLED`.
 - Defaults are DeepSeek-focused: provider `proxy`, model `deepseek-chat`, allowed providers `proxy,deepseek`, business usage `false`.
-- Legacy Railway aliases are supported, including `AI_ENGINE`, `AI_TIMEOUT_SECONDS`, `DEEPSEEK_*`, `CLIENT_DEEPSEEK_*`, `OPENAI_API_KEY`, `GEMINI_API_KEY`.
-- `FORCT_FALLBACK` is handled as legacy typo/deprecated compatibility input.
-- Admin diagnostics include resolved provider/model/timeout source and list of legacy env keys that were consumed.
+- Legacy Railway aliases are supported only as fallback inputs when canonical keys are absent.
+- `CLIENT_FORCE_FALLBACK` and `FORCT_FALLBACK` are deprecated legacy flags and are ignored for runtime resolution.
+- Admin diagnostics include resolved provider/model/timeout source and explicit lists for legacy env keys: detected, ignored, and used.

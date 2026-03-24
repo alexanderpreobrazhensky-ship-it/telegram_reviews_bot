@@ -489,6 +489,11 @@ function createServer({ config, logger }) {
             timeoutMs: config.ai?.timeoutMs || 0,
             allowedProviders: config.ai?.allowedProviders || [],
             sources: config.ai?.sources || {},
+            sourceProvider: config.ai?.sources?.AI_PROVIDER?.source || 'default',
+            sourceModel: config.ai?.sources?.AI_MODEL?.source || 'default',
+            sourceTimeoutMs: config.ai?.sources?.AI_TIMEOUT_MS?.source || 'default',
+            legacyDetected: config.ai?.legacyDetected || [],
+            legacyIgnored: config.ai?.legacyIgnored || [],
             legacyUsed: config.ai?.legacyUsed || [],
             legacyForceFallbackRequested: Boolean(config.ai?.legacyForceFallbackRequested),
             legacyForceFallbackFlags: config.ai?.legacyForceFallbackFlags || []

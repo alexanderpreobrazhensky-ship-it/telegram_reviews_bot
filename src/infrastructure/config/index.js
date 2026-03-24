@@ -20,6 +20,28 @@ function hasExplicitEnv(key) {
   return process.env[key] !== undefined && process.env[key] !== null && String(process.env[key]).trim() !== '';
 }
 
+function envHasValue(key) {
+  return process.env[key] !== undefined && process.env[key] !== '';
+}
+
+const LEGACY_AI_ENV_KEYS = [
+  'AI_ENGINE',
+  'AI_TIMEOUT_SECONDS',
+  'CLIENT_AI_TIMEOUT_SECONDS',
+  'DEEPSEEK_API_KEY',
+  'DEEPSEEK_BASE_URL',
+  'DEEPSEEK_MODEL',
+  'CLIENT_DEEPSEEK_API_KEY',
+  'CLIENT_DEEPSEEK_BASE_URL',
+  'CLIENT_DEEPSEEK_MODEL',
+  'CLIENT_FORCE_FALLBACK',
+  'FORCT_FALLBACK',
+  'OPENAI_API_KEY',
+  'GEMINI_API_KEY',
+  'DEEPSEEK_ALLOW_REQUESTS_FALLBACK',
+  'AI_API_KEY'
+];
+
 function resolveEnv({ canonical = null, sharedLegacy = [], clientLegacy = [], transform = (value) => value, defaultValue = '' }) {
   if (canonical && process.env[canonical] !== undefined && process.env[canonical] !== '') {
     return { value: transform(process.env[canonical]), source: canonical, tier: 'canonical' };
@@ -44,6 +66,23 @@ function resolveAiEnv() {
   const timeoutFromSeconds = (value) => {
     const seconds = parseNumber(value, 8, { min: 1, max: 120 });
     return seconds * 1000;
+  };
+  const legacyDetectedSet = new Set(LEGACY_AI_ENV_KEYS.filter((key) => envHasValue(key)));
+  const legacyUsedSet = new Set();
+  const legacyIgnoredSet = new Set();
+  const registerResolution = (meta, aliases = []) => {
+    const configuredAliases = aliases.filter((key) => envHasValue(key));
+    if (!configuredAliases.length) return;
+
+    if (String(meta?.tier || '').startsWith('legacy') && meta?.source) {
+      legacyUsedSet.add(meta.source);
+      configuredAliases
+        .filter((key) => key !== meta.source)
+        .forEach((key) => legacyIgnoredSet.add(key));
+      return;
+    }
+
+    configuredAliases.forEach((key) => legacyIgnoredSet.add(key));
   };
 
   const enabled = resolveEnv({ canonical: 'AI_ENABLED', defaultValue: true, transform: (value) => parseBoolean(value, true) });
@@ -103,6 +142,19 @@ function resolveAiEnv() {
   const deepseekBaseUrl = resolveEnv({ canonical: 'AI_DEEPSEEK_BASE_URL', sharedLegacy: ['DEEPSEEK_BASE_URL'], clientLegacy: ['CLIENT_DEEPSEEK_BASE_URL'], defaultValue: 'https://api.deepseek.com/chat/completions' });
   const geminiApiKey = resolveEnv({ canonical: 'AI_GEMINI_API_KEY', sharedLegacy: ['GEMINI_API_KEY'], defaultValue: '' });
 
+  registerResolution(provider, ['AI_ENGINE']);
+  registerResolution(model, ['DEEPSEEK_MODEL', 'CLIENT_DEEPSEEK_MODEL']);
+  registerResolution(proxyUrl, ['DEEPSEEK_BASE_URL', 'CLIENT_DEEPSEEK_BASE_URL']);
+  registerResolution(proxyToken, ['DEEPSEEK_API_KEY', 'CLIENT_DEEPSEEK_API_KEY']);
+  registerResolution(timeoutMs, ['AI_TIMEOUT_SECONDS', 'CLIENT_AI_TIMEOUT_SECONDS']);
+  registerResolution(openaiApiKey, ['OPENAI_API_KEY', 'AI_API_KEY']);
+  registerResolution(deepseekApiKey, ['DEEPSEEK_API_KEY', 'CLIENT_DEEPSEEK_API_KEY']);
+  registerResolution(deepseekBaseUrl, ['DEEPSEEK_BASE_URL', 'CLIENT_DEEPSEEK_BASE_URL']);
+  registerResolution(geminiApiKey, ['GEMINI_API_KEY']);
+  ['CLIENT_FORCE_FALLBACK', 'FORCT_FALLBACK', 'DEEPSEEK_ALLOW_REQUESTS_FALLBACK'].forEach((key) => {
+    if (envHasValue(key)) legacyIgnoredSet.add(key);
+  });
+
   const sources = {
     AI_ENABLED: enabled,
     AI_BUSINESS_USAGE_ENABLED: businessUsageEnabled,
@@ -121,11 +173,9 @@ function resolveAiEnv() {
     AI_GEMINI_API_KEY: geminiApiKey
   };
 
-  const legacyUsed = Object.entries(sources)
-    .filter(([, meta]) => String(meta.tier || '').startsWith('legacy'))
-    .map(([, meta]) => meta.source)
-    .concat(enabledFallbackFlags)
-    .filter(Boolean);
+  const legacyUsed = Array.from(legacyUsedSet).sort();
+  const legacyIgnored = Array.from(legacyIgnoredSet).sort();
+  const legacyDetected = Array.from(new Set([...legacyDetectedSet, ...legacyUsed, ...legacyIgnored])).sort();
 
   return {
     enabled: enabled.value,
@@ -144,10 +194,12 @@ function resolveAiEnv() {
     allowedProviders: Array.isArray(allowedProviders.value) && allowedProviders.value.length ? allowedProviders.value : ['proxy', 'deepseek'],
     diagnosticsEnabled: diagnosticsEnabled.value,
     timeoutMs: timeoutMs.value,
-    legacyForceFallbackRequested: enabledFallbackFlags.length > 0,
+    legacyForceFallbackRequested: false,
     legacyForceFallbackFlags: enabledFallbackFlags,
     sources,
-    legacyUsed
+    legacyUsed,
+    legacyIgnored,
+    legacyDetected
   };
 }
 
@@ -297,6 +349,15 @@ function loadConfig() {
         process.env.AI_API_KEY ? 'AI_API_KEY' : null,
         process.env.FORCT_FALLBACK ? 'FORCT_FALLBACK (legacy typo)' : null
       ].filter(Boolean),
+      aiResolution: {
+        provider: resolvedAiConfig.provider,
+        model: resolvedAiConfig.model,
+        sourceProvider: resolvedAiConfig.sources?.AI_PROVIDER?.source || 'default',
+        sourceModel: resolvedAiConfig.sources?.AI_MODEL?.source || 'default',
+        sourceTimeoutMs: resolvedAiConfig.sources?.AI_TIMEOUT_MS?.source || 'default'
+      },
+      legacyAiDetected: resolvedAiConfig.legacyDetected || [],
+      legacyAiIgnored: resolvedAiConfig.legacyIgnored || [],
       legacyAiConfigured: resolvedAiConfig.legacyUsed,
       unknownConfigured: Object.keys(process.env).filter((key) => /^(TELEGRAM|MAX|WEBAPP|DB_|QUEUE_|ONE_C_|INTEGRATION_|MASTER_BOT_|INTERNAL_ADMIN_|SCHEDULER_|FEEDBACK_|PORT|NODE_ENV|AI_|DEEPSEEK_|CLIENT_|OPENAI_|GEMINI_|FORCT_)/.test(key) && !knownEnv.has(key)).sort()
     }

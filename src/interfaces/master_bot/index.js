@@ -405,7 +405,9 @@ function buildAiStatusText({ aiInfrastructure, config }) {
     `Allowed providers: ${(runtime.allowedProviders || []).join(', ') || '-'}`,
     `Timeout: ${config.ai?.timeoutMs || 0}ms (source=${config.ai?.sources?.AI_TIMEOUT_MS?.source || 'default'})`,
     `Proxy configured: ${config.ai?.proxyUrl && config.ai?.proxyToken ? 'yes' : 'no'}`,
-    `Legacy AI env used: ${(config.ai?.legacyUsed || []).join(', ') || '-'}`,
+    `Legacy env detected: ${(config.ai?.legacyDetected || []).join(', ') || '-'}`,
+    `Legacy env ignored: ${(config.ai?.legacyIgnored || []).join(', ') || '-'}`,
+    `Legacy env used: ${(config.ai?.legacyUsed || []).join(', ') || '-'}`,
     `Last diagnostics: ${diagnostics.status || runtime.lastAiDiagnosticsStatus || 'never'}`,
     `Last diagnostics at: ${diagnostics.at || runtime.lastAiDiagnosticsAt || '-'}`,
     `Last diagnostics summary: ${diagnostics.summary || runtime.lastAiDiagnosticsSummary || '-'}`
@@ -413,6 +415,9 @@ function buildAiStatusText({ aiInfrastructure, config }) {
 }
 
 function buildAiLogsText(aiInfrastructure, filters = {}) {
+  const runtime = aiInfrastructure?.runtimeSettings?.get ? aiInfrastructure.runtimeSettings.get() : {};
+  const configAi = aiInfrastructure?.configAi || {};
+  const resolved = resolveAiConfig({ configAi, runtime, diagnostics: aiInfrastructure?.runtimeSettings?.getDiagnosticsState?.() || {} });
   const events = aiInfrastructure?.listLogs({
     since: filters.since || null,
     provider: filters.provider || null,
@@ -421,7 +426,14 @@ function buildAiLogsText(aiInfrastructure, filters = {}) {
     limit: Number(filters.limit || 20)
   }) || [];
   const lines = events.map((item) => `${item.timestamp} | task_type=${item.taskType} | provider=${item.provider} | model=${item.model} | duration_ms=${item.durationMs} | ${item.success ? 'success' : 'fail'} | fallback_used=${item.fallbackUsed ? 'yes' : 'no'} | error_code=${item.errorCode || '-'} | error=${item.errorSummary || '-'}`);
-  return ['AI логи:', `Фильтры: since=${filters.since || '-'} provider=${filters.provider || '-'} status=${filters.status || '-'} task=${filters.task || '-'}`, lines.join('\n') || 'Нет AI событий'].join('\n\n');
+  return [
+    'AI логи:',
+    `Фильтры: since=${filters.since || '-'} provider=${filters.provider || '-'} status=${filters.status || '-'} task=${filters.task || '-'}`,
+    `Effective provider/model: ${resolved.effectiveProvider}/${resolved.effectiveModel}`,
+    `Resolution source: provider=${resolved.sources.provider} model=${resolved.sources.model} timeout=${configAi?.sources?.AI_TIMEOUT_MS?.source || 'default'}`,
+    `Ignored legacy keys: ${(configAi?.legacyIgnored || []).join(', ') || '-'}`,
+    lines.join('\n') || 'Нет AI событий'
+  ].join('\n\n');
 }
 
 function parseAiSwitchCommand(text = '') {
