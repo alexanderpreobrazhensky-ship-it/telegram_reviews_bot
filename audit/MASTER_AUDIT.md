@@ -133,3 +133,60 @@ AI вынесен в отдельный блок, где отражаются:
 
 ### Текущий статус
 - **partially confirmed**: архитектурно разделение и прозрачность статусов подтверждены; live provider health зависит от внешнего окружения и runtime config.
+
+## 15) Reference Bridge Database (Client/Vehicle)
+
+### Что сделано
+- Файлы `lira_normalized_database.xlsx` и `lira_normalized_database.sqlite` перенесены из корня репозитория в `data/reference/client_vehicle_bridge/`.
+- Добавлен формализованный schema-документ: `data/reference/client_vehicle_bridge/schema.md`.
+- Добавлен профильный README: `readme/README_CLIENT_VEHICLE_BRIDGE.md`.
+- README-контур репозитория синхронизирован с новым reference dataset и границами runtime.
+
+### Где лежат теперь
+- `data/reference/client_vehicle_bridge/lira_normalized_database.xlsx`
+- `data/reference/client_vehicle_bridge/lira_normalized_database.sqlite`
+- `data/reference/client_vehicle_bridge/schema.md`
+
+### Что содержат
+Подтверждённые сущности/листы:
+- SQLite: `clients`, `vehicles`, `vehicle_owner_history`, `invalid_phones`, `schema_dictionary`, `summary_metrics`
+- XLSX: `Summary`, `Schema`, `Clients`, `Vehicles`, `OwnerHistory`, `InvalidPhones`, `SourceMap`
+
+### Назначение
+- Временный data bridge для future Excel/1С import.
+- Подготовка matching и enrichment контуров (client lookup + owner linkage + mileage hints).
+- Справочный слой для дальнейшей интеграции с master bot / integration pipeline.
+
+### Ограничения текущей версии
+- Это snapshot/reference слой, а не live-sync.
+- Нет runtime автоподключения в production flow (и это ожидаемое поведение).
+- Возможны неразрешённые связи owner/vehicle и placeholder VIN (`no_vin_*`).
+- Нужна отдельная import/update задача для регулярного обновления.
+
+### Следующие шаги
+1. Ввести batch metadata (дата выгрузки, источник, checksum) для каждой новой поставки.
+2. Добавить автоматизированный import-пайплайн staging -> normalization -> upsert.
+3. Ввести quality-метрики для ambiguous owner matches и invalid phones.
+4. Зафиксировать runbook по reconciliation с 1С-справочниками.
+
+### Confirmed
+- Файлы убраны из корня и находятся в `data/reference/client_vehicle_bridge/`.
+- SQLite/XLSX открываются, таблицы/листы читаются.
+- Формализация canonical полей clients/vehicles и linkage rules зафиксирована в `schema.md`.
+- README и audit обновлены с явной границей «reference dataset != runtime DB».
+
+### Hypothesis only
+- Текущей структуры достаточно для будущего production-grade 1С sync без дополнительных полей/индексов.
+- Текущие owner match статусы полностью покрывают все edge-cases исторических владений.
+
+### Требует runtime/use-case проверки
+- Эффективность client lookup enrichment в реальном потоке master bot.
+- Устойчивость matching-эвристик (`phone -> fio -> vin`) на новых batch-выгрузках.
+- Согласованность mileage-индикаторов при инкрементальных обновлениях.
+
+## 16) Known issue block — AI diagnostics/config resolution
+
+Статус AI-проблемы сохраняется как **unresolved/partially resolved** в рамках этой задачи:
+- Документационная прозрачность и диагностика подтверждены.
+- Live корректность зависит от валидности окружения и внешней доступности провайдеров.
+- Задача по переносу reference dataset не включает исправление AI runtime/config logic.

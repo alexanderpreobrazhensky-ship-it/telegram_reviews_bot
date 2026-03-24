@@ -63,3 +63,12 @@ AI уже реализован как отдельный control plane:
 
 ## Аудит
 Единый audit source of truth: `audit/MASTER_AUDIT.md`.
+
+## Reference bridge dataset (client/vehicle)
+В репозитории добавлен отдельный reference-слой данных:
+- `data/reference/client_vehicle_bridge/lira_normalized_database.xlsx`
+- `data/reference/client_vehicle_bridge/lira_normalized_database.sqlite`
+
+Назначение: подготовка future Excel/1С import, matching и enrichment.
+Это не production runtime DB и не подменяет SQLite runtime слой.
+Подробности: `readme/README_CLIENT_VEHICLE_BRIDGE.md`.

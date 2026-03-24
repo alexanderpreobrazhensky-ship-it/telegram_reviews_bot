@@ -98,3 +98,7 @@ Canonical has higher priority than legacy keys.
 - configured vs runtime override
 - source of resolution
 - legacy detected/ignored/used
+
+## Environment boundary for bridge dataset
+Bridge dataset (`data/reference/client_vehicle_bridge/*`) не требует отдельных env-переменных и не должен подключаться через `DB_SQLITE_PATH`.
+Использование допускается только как offline/reference слой по отдельным import/enrichment задачам.

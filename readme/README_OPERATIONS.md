@@ -30,3 +30,9 @@
 - Не заявлять «AI исправлен», если диагностика всё ещё показывает mismatch/failure.
 - Отдельно трактовать `CONFIG_INVALID` и provider connectivity failures.
 - Единый audit источник: `audit/MASTER_AUDIT.md`.
+
+## Reference dataset operational checks
+При ручных релизных проверках дополнительно убедиться, что:
+1. Bridge dataset лежит в `data/reference/client_vehicle_bridge/`.
+2. Файлы отсутствуют в корне репозитория.
+3. Runtime конфиг (`DB_SQLITE_PATH`) не указывает на bridge SQLite.

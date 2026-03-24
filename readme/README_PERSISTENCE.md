@@ -44,3 +44,10 @@ DB runtime info включает:
 - intake diagnostics state
 - dedupe/parse counters
 - payload flags (`existing_client`, `needs_review`, `match_confidence`, `source_provider`)
+
+## Reference dataset (not runtime persistence)
+Справочный bridge dataset хранится отдельно:
+- `data/reference/client_vehicle_bridge/lira_normalized_database.xlsx`
+- `data/reference/client_vehicle_bridge/lira_normalized_database.sqlite`
+
+Важно: этот SQLite не участвует в runtime migration/state и не заменяет canonical persistence для заявок/событий/задач.
