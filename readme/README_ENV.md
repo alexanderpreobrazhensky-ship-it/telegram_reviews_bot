@@ -102,3 +102,8 @@ Canonical has higher priority than legacy keys.
 ## Environment boundary for bridge dataset
 Bridge dataset (`data/reference/client_vehicle_bridge/*`) не требует отдельных env-переменных и не должен подключаться через `DB_SQLITE_PATH`.
 Использование допускается только как offline/reference слой по отдельным import/enrichment задачам.
+
+## Reports/admin access env
+- `MASTER_BOT_ADMIN_IDS` — кто видит/использует раздел `Отчёты` в master-боте.
+- `INTERNAL_ADMIN_WHITELIST` — доступ к `/api/reports/*` и `/internal/reports`.
+- (Опционально) пороги `stuck` можно передавать query-параметрами: `stuckNewHours`, `stuckInProgressHours`, `stuckWaitingDecisionHours`, `stuckNeedsReviewHours`.

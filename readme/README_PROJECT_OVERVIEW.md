@@ -72,3 +72,10 @@ AI уже реализован как отдельный control plane:
 Назначение: подготовка future Excel/1С import, matching и enrichment.
 Это не production runtime DB и не подменяет SQLite runtime слой.
 Подробности: `readme/README_CLIENT_VEHICLE_BRIDGE.md`.
+
+## Management reporting contour
+- В master-бот добавлен admin-only кнопочный раздел `Отчёты`.
+- Реализованы отчёты: summary, funnel, sources, rejections, warranty, stuck, existing_new, t_business.
+- Периоды и навигация (`Назад`/`В меню`) доступны кнопками.
+- Экспорт выполняется в CSV по текущим фильтрам отчёта.
+- Внутренний API `/api/reports/*` и `/internal/reports` ограничены admin whitelist.

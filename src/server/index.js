@@ -567,6 +567,15 @@ function createServer({ config, logger }) {
       }));
     }
 
+    if (req.method === 'GET' && pathname === '/internal/reports') {
+      const auth = isInternalAuthorized(req, requestUrl, config);
+      if (!auth.ok) return sendJson(res, 403, { error: 'FORBIDDEN' });
+      const reportType = requestUrl.searchParams.get('reportType') || 'summary';
+      const period = requestUrl.searchParams.get('period') || '7d';
+      const report = reportingService.buildReport(reportType, { ...Object.fromEntries(requestUrl.searchParams.entries()), period });
+      return sendJson(res, 200, { reportType, period, report, exportCsvUrl: `/api/reports/export?admin_id=${encodeURIComponent(auth.adminId)}&reportType=${encodeURIComponent(reportType)}&period=${encodeURIComponent(period)}` });
+    }
+
     if (req.method === 'GET' && pathname === '/internal/export') {
       const auth = isInternalAuthorized(req, requestUrl, config);
       if (!auth.ok) return sendJson(res, 403, { error: 'FORBIDDEN' });
@@ -902,6 +911,11 @@ function createServer({ config, logger }) {
 
 
 
+    if (pathname.startsWith('/api/reports/')) {
+      const auth = isInternalAuthorized(req, requestUrl, config);
+      if (!auth.ok) return sendJson(res, 403, { error: 'FORBIDDEN', reason: 'ADMIN_REQUIRED', whitelistSize: auth.whitelistSize });
+    }
+
     if (req.method === 'GET' && pathname === '/api/reports/summary') {
       const params = {
         period: requestUrl.searchParams.get('period') || 'weekly',
@@ -921,6 +935,12 @@ function createServer({ config, logger }) {
     if (req.method === 'GET' && pathname === '/api/reports/masters') return sendJson(res, 200, reportingService.buildMasterMetrics(Object.fromEntries(requestUrl.searchParams.entries())));
     if (req.method === 'GET' && pathname === '/api/reports/sources') return sendJson(res, 200, reportingService.buildSourceMetrics(Object.fromEntries(requestUrl.searchParams.entries())));
     if (req.method === 'GET' && pathname === '/api/reports/recommendations') return sendJson(res, 200, reportingService.buildRecommendationMetrics(Object.fromEntries(requestUrl.searchParams.entries())));
+    if (req.method === 'GET' && pathname === '/api/reports/export') {
+      const params = Object.fromEntries(requestUrl.searchParams.entries());
+      const reportType = requestUrl.searchParams.get('reportType') || 'summary';
+      const exported = reportingService.exportReportCsv({ reportType, ...params });
+      return sendText(res, 200, exported.csv, 'text/csv', { 'Content-Disposition': `attachment; filename=report-${reportType}.csv` });
+    }
 
     if (req.method === 'POST' && pathname === '/api/reports/snapshots') {
       const { body, invalidJson } = await readBody(req);

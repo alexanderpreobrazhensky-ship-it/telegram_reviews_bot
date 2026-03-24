@@ -46,3 +46,9 @@ WebApp формы доступны по:
 ## Runtime boundary for reference datasets
 `data/reference/client_vehicle_bridge/*` используется только как справочный/offline bridge dataset.
 Runtime не должен автоматически подключать этот SQLite как рабочую БД и не должен менять `DB_SQLITE_PATH` на bridge-файл.
+
+## Reports runtime
+- Вычисление отчётов выполняется в `src/core/application/reportingService.js` на базе runtime-данных заявок.
+- API контур: `/api/reports/*` защищён internal admin whitelist и не доступен публично.
+- Internal маршрут `/internal/reports` доступен только для admin id из whitelist.
+- Отчёты детерминированные, AI не требуется для расчёта чисел/таблиц.
