@@ -4,6 +4,7 @@ const db = require('../../src/infrastructure/db');
 const { loadConfig } = require('../../src/infrastructure/config');
 const { createAiRuntimeSettings } = require('../../src/infrastructure/ai/aiRuntimeSettings');
 const { createAiService } = require('../../src/infrastructure/ai/aiService');
+const { runAiDiagnostics } = require('../../src/infrastructure/ai/aiDiagnostics');
 const { handleMasterWebhook } = require('../../src/interfaces/master_bot');
 
 function restoreEnv(snapshot) {
@@ -44,6 +45,27 @@ test('ai config defaults and env contract are parsed', () => {
   assert.equal(config.ai.fallbackProvider, 'openai');
   assert.equal(config.ai.fallbackModel, 'gpt-4o-mini');
   assert.deepEqual(config.ai.allowedProviders, ['proxy', 'openai', 'deepseek']);
+
+  restoreEnv(snapshot);
+});
+
+test('ai config does not auto-enable fallback when fallback env is empty', () => {
+  const snapshot = {
+    AI_PROVIDER: process.env.AI_PROVIDER,
+    AI_MODEL: process.env.AI_MODEL,
+    AI_FALLBACK_PROVIDER: process.env.AI_FALLBACK_PROVIDER,
+    AI_FALLBACK_MODEL: process.env.AI_FALLBACK_MODEL
+  };
+
+  process.env.AI_PROVIDER = 'proxy';
+  process.env.AI_MODEL = 'deepseek-chat';
+  delete process.env.AI_FALLBACK_PROVIDER;
+  delete process.env.AI_FALLBACK_MODEL;
+
+  const config = loadConfig();
+  assert.equal(config.ai.fallbackProvider, '');
+  assert.equal(config.ai.fallbackModel, '');
+  assert.equal(config.ai.fallbackConfigured, false);
 
   restoreEnv(snapshot);
 });
@@ -118,8 +140,8 @@ test('ai runtime settings bootstrap from env and allow runtime override', () => 
       businessUsageEnabled: false,
       provider: 'proxy',
       model: 'deepseek-chat',
-      fallbackProvider: 'openai',
-      fallbackModel: 'gpt-4o-mini',
+      fallbackProvider: '',
+      fallbackModel: '',
       allowedProviders: ['proxy', 'openai', 'deepseek']
     }
   });
@@ -127,6 +149,7 @@ test('ai runtime settings bootstrap from env and allow runtime override', () => 
   const initial = runtime.get();
   assert.equal(initial.activeProvider, 'proxy');
   assert.equal(initial.activeModel, 'deepseek-chat');
+  assert.equal(initial.fallbackConfigured, false);
 
   const updated = runtime.update({ activeProvider: 'openai', activeModel: 'gpt-4o-mini' });
   assert.equal(updated.ok, true);
@@ -135,6 +158,10 @@ test('ai runtime settings bootstrap from env and allow runtime override', () => 
   const invalid = runtime.update({ activeProvider: 'anthropic' });
   assert.equal(invalid.ok, false);
   assert.equal(invalid.error, 'ACTIVE_PROVIDER_NOT_ALLOWED');
+
+  const invalidPair = runtime.update({ activeProvider: 'deepseek', activeModel: 'gpt-4o-mini' });
+  assert.equal(invalidPair.ok, false);
+  assert.equal(invalidPair.error, 'AI_PRIMARY_PROVIDER_MODEL_MISMATCH');
 });
 
 test('ai service supports business-disabled mode and fallback', async () => {
@@ -195,6 +222,111 @@ test('ai service supports business-disabled mode and fallback', async () => {
   const diag = await aiService.runHealthCheck();
   assert.equal(diag.ok, true);
   assert.equal(diag.probe.fallbackUsed, true);
+});
+
+test('ai diagnostics in proxy-only mode do not require direct deepseek config', async () => {
+  db.resetStore();
+  const runtimeSettings = {
+    get() {
+      return {
+        activeProvider: 'proxy',
+        activeModel: 'deepseek-chat',
+        activeFallbackProvider: '',
+        activeFallbackModel: '',
+        fallbackConfigured: false,
+        aiEnabledRuntime: true,
+        aiBusinessUsageEnabledRuntime: false
+      };
+    },
+    setDiagnosticsState(state) {
+      return state;
+    },
+    getDiagnosticsState() {
+      return null;
+    }
+  };
+  const aiService = {
+    async runHealthCheck() {
+      return {
+        ok: true,
+        probe: {
+          ok: true,
+          provider: 'proxy',
+          model: 'deepseek-chat',
+          fallbackUsed: false,
+          fallbackConfigured: false,
+          targetProvider: 'proxy',
+          targetModel: 'deepseek-chat'
+        }
+      };
+    }
+  };
+  const providerRegistry = {
+    list() { return ['proxy', 'openai', 'deepseek']; },
+    has(provider) { return ['proxy', 'openai', 'deepseek'].includes(provider); }
+  };
+
+  const result = await runAiDiagnostics({
+    aiService,
+    runtimeSettings,
+    configAi: {
+      enabled: true,
+      provider: 'proxy',
+      model: 'deepseek-chat',
+      fallbackProvider: '',
+      fallbackModel: '',
+      timeoutMs: 8000,
+      proxyUrl: 'https://proxy.local/ai',
+      proxyToken: 'proxy-token',
+      deepseekApiKey: '',
+      openaiApiKey: '',
+      geminiApiKey: '',
+      sources: { AI_PROVIDER: { source: 'AI_PROVIDER' }, AI_MODEL: { source: 'AI_MODEL' } },
+      legacyUsed: []
+    },
+    providerRegistry
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.checks.fallbackConfigured, false);
+  assert.equal(result.checks.runtimeConfigValid, true);
+  assert.equal(result.checks.resolvedConfig.diagnosticsTargetProvider, 'proxy');
+});
+
+test('ai service rejects invalid provider/model pair and skips implicit fallback path', async () => {
+  db.resetStore();
+  const runtimeSettings = {
+    get() {
+      return {
+        activeProvider: 'deepseek',
+        activeModel: 'gpt-4o-mini',
+        activeFallbackProvider: '',
+        activeFallbackModel: '',
+        fallbackConfigured: false,
+        aiEnabledRuntime: true,
+        aiBusinessUsageEnabledRuntime: true
+      };
+    },
+    setDiagnosticsState(state) {
+      return state;
+    },
+    getDiagnosticsState() {
+      return null;
+    }
+  };
+
+  const aiService = createAiService({
+    configAi: { enabled: true, timeoutMs: 1000 },
+    runtimeSettings,
+    providerRegistry: { get() { return null; } },
+    db,
+    logger: { info() {}, warn() {}, error() {} }
+  });
+
+  const result = await aiService.classifyIntent({ text: 'hello' });
+  assert.equal(result.ok, false);
+  assert.equal(result.error, 'AI_PRIMARY_PROVIDER_MODEL_MISMATCH');
+  assert.equal(result.fallbackConfigured, false);
 });
 
 test('master bot AI control plane commands are admin-only and usable', async () => {

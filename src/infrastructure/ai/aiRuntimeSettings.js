@@ -1,5 +1,11 @@
 const DEFAULT_RUNTIME_KEY = 'ai_runtime_settings';
 const DEFAULT_DIAGNOSTICS_KEY = 'ai_diagnostics_state';
+const {
+  normalizeProvider,
+  normalizeModel,
+  isFallbackConfigured,
+  validateProviderModelPair
+} = require('./providerModelRules');
 
 function nowIso() {
   return new Date().toISOString();
@@ -11,11 +17,13 @@ function normalizeProviders(value = []) {
 }
 
 function buildDefaults(configAi = {}) {
+  const fallbackConfigured = isFallbackConfigured(configAi.fallbackProvider, configAi.fallbackModel);
   return {
     activeProvider: configAi.provider || 'proxy',
     activeModel: configAi.model || 'deepseek-chat',
-    activeFallbackProvider: configAi.fallbackProvider || 'openai',
-    activeFallbackModel: configAi.fallbackModel || 'gpt-4o-mini',
+    activeFallbackProvider: fallbackConfigured ? normalizeProvider(configAi.fallbackProvider) : '',
+    activeFallbackModel: fallbackConfigured ? normalizeModel(configAi.fallbackModel) : '',
+    fallbackConfigured,
     aiEnabledRuntime: configAi.enabled !== false,
     aiBusinessUsageEnabledRuntime: Boolean(configAi.businessUsageEnabled),
     lastAiDiagnosticsAt: null,
@@ -36,7 +44,13 @@ function createAiRuntimeSettings({ db, configAi }) {
     const allowed = getAllowedProviders();
 
     if (!allowed.includes(merged.activeProvider)) merged.activeProvider = defaults.activeProvider;
-    if (!allowed.includes(merged.activeFallbackProvider)) merged.activeFallbackProvider = defaults.activeFallbackProvider;
+
+    merged.fallbackConfigured = isFallbackConfigured(merged.activeFallbackProvider, merged.activeFallbackModel);
+    if (merged.fallbackConfigured && !allowed.includes(merged.activeFallbackProvider)) {
+      merged.activeFallbackProvider = defaults.activeFallbackProvider;
+      merged.activeFallbackModel = defaults.activeFallbackModel;
+      merged.fallbackConfigured = isFallbackConfigured(merged.activeFallbackProvider, merged.activeFallbackModel);
+    }
 
     return {
       ...merged,
@@ -46,16 +60,36 @@ function createAiRuntimeSettings({ db, configAi }) {
 
   function validate(next) {
     const allowed = getAllowedProviders();
-    if (!allowed.includes(next.activeProvider)) return { ok: false, error: 'ACTIVE_PROVIDER_NOT_ALLOWED' };
-    if (!allowed.includes(next.activeFallbackProvider)) return { ok: false, error: 'FALLBACK_PROVIDER_NOT_ALLOWED' };
-    if (!next.activeModel) return { ok: false, error: 'ACTIVE_MODEL_REQUIRED' };
-    if (!next.activeFallbackModel) return { ok: false, error: 'FALLBACK_MODEL_REQUIRED' };
+    const primaryProvider = normalizeProvider(next.activeProvider);
+    const primaryModel = normalizeModel(next.activeModel);
+    if (!allowed.includes(primaryProvider)) return { ok: false, error: 'ACTIVE_PROVIDER_NOT_ALLOWED' };
+    const primaryPair = validateProviderModelPair(primaryProvider, primaryModel, { context: 'PRIMARY' });
+    if (!primaryPair.ok) return primaryPair;
+
+    const fallbackConfigured = isFallbackConfigured(next.activeFallbackProvider, next.activeFallbackModel);
+    if (!fallbackConfigured && (normalizeProvider(next.activeFallbackProvider) || normalizeModel(next.activeFallbackModel))) {
+      return { ok: false, error: 'FALLBACK_PROVIDER_MODEL_INCOMPLETE' };
+    }
+    if (fallbackConfigured) {
+      const fallbackProvider = normalizeProvider(next.activeFallbackProvider);
+      const fallbackModel = normalizeModel(next.activeFallbackModel);
+      if (!allowed.includes(fallbackProvider)) return { ok: false, error: 'FALLBACK_PROVIDER_NOT_ALLOWED' };
+      const fallbackPair = validateProviderModelPair(fallbackProvider, fallbackModel, { context: 'FALLBACK' });
+      if (!fallbackPair.ok) return fallbackPair;
+    }
     return { ok: true };
   }
 
   function update(patch = {}) {
     const current = get();
-    const next = { ...current, ...(patch || {}) };
+    const next = {
+      ...current,
+      ...(patch || {}),
+      activeProvider: normalizeProvider((patch || {}).activeProvider !== undefined ? patch.activeProvider : current.activeProvider),
+      activeModel: normalizeModel((patch || {}).activeModel !== undefined ? patch.activeModel : current.activeModel),
+      activeFallbackProvider: normalizeProvider((patch || {}).activeFallbackProvider !== undefined ? patch.activeFallbackProvider : current.activeFallbackProvider),
+      activeFallbackModel: normalizeModel((patch || {}).activeFallbackModel !== undefined ? patch.activeFallbackModel : current.activeFallbackModel)
+    };
     const check = validate(next);
     if (!check.ok) return { ok: false, error: check.error, current };
 
@@ -64,6 +98,7 @@ function createAiRuntimeSettings({ db, configAi }) {
       activeModel: next.activeModel,
       activeFallbackProvider: next.activeFallbackProvider,
       activeFallbackModel: next.activeFallbackModel,
+      fallbackConfigured: isFallbackConfigured(next.activeFallbackProvider, next.activeFallbackModel),
       aiEnabledRuntime: Boolean(next.aiEnabledRuntime),
       aiBusinessUsageEnabledRuntime: Boolean(next.aiBusinessUsageEnabledRuntime),
       lastAiDiagnosticsAt: next.lastAiDiagnosticsAt || null,
@@ -82,7 +117,10 @@ function createAiRuntimeSettings({ db, configAi }) {
       durationMs: Number(state.durationMs) || 0,
       provider: state.provider || '',
       model: state.model || '',
+      targetProvider: state.targetProvider || '',
+      targetModel: state.targetModel || '',
       fallbackUsed: Boolean(state.fallbackUsed),
+      fallbackConfigured: Boolean(state.fallbackConfigured),
       errorCode: state.errorCode || ''
     };
     db.setMetaValue(DEFAULT_DIAGNOSTICS_KEY, payload);

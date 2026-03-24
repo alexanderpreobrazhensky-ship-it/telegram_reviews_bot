@@ -1,4 +1,5 @@
 const { resolveTaskPolicy } = require('./taskRouter');
+const { validateProviderModelPair, isFallbackConfigured } = require('./providerModelRules');
 
 function buildBusinessDisabled(taskType) {
   return {
@@ -41,9 +42,21 @@ function createAiService({ configAi, runtimeSettings, providerRegistry, db, logg
     const model = options.model || runtime.activeModel;
     const fallbackProviderName = runtime.activeFallbackProvider;
     const fallbackModel = runtime.activeFallbackModel;
+    const fallbackConfigured = isFallbackConfigured(fallbackProviderName, fallbackModel);
+
+    const primaryPairCheck = validateProviderModelPair(providerName, model, { context: 'PRIMARY' });
+    if (!primaryPairCheck.ok) {
+      return { ok: false, error: primaryPairCheck.error, taskType, provider: providerName, model, fallbackUsed: false, fallbackConfigured };
+    }
+    if (fallbackConfigured) {
+      const fallbackPairCheck = validateProviderModelPair(fallbackProviderName, fallbackModel, { context: 'FALLBACK' });
+      if (!fallbackPairCheck.ok) {
+        return { ok: false, error: fallbackPairCheck.error, taskType, provider: fallbackProviderName, model: fallbackModel, fallbackUsed: false, fallbackConfigured };
+      }
+    }
 
     const primaryProvider = providerRegistry.get(providerName);
-    const fallbackProvider = providerRegistry.get(fallbackProviderName);
+    const fallbackProvider = fallbackConfigured ? providerRegistry.get(fallbackProviderName) : null;
 
     if (!primaryProvider) {
       return { ok: false, error: 'AI_INVALID_PROVIDER', taskType, provider: providerName };
@@ -55,7 +68,8 @@ function createAiService({ configAi, runtimeSettings, providerRegistry, db, logg
       provider: providerName,
       model,
       fallbackProvider: fallbackProviderName,
-      fallbackModel
+      fallbackModel,
+      fallbackConfigured
     };
 
     try {
@@ -67,14 +81,35 @@ function createAiService({ configAi, runtimeSettings, providerRegistry, db, logg
       const durationMs = Date.now() - startedAt;
       db.createAiEvent({ ...baseEvent, durationMs, success: true, fallbackUsed: false });
       logger.info('ai task completed', { ...baseEvent, durationMs, success: true, fallbackUsed: false });
-      return { ok: true, output: response.output, provider: response.provider, model: response.model || model, durationMs, fallbackUsed: false };
+      return {
+        ok: true,
+        output: response.output,
+        provider: response.provider,
+        model: response.model || model,
+        durationMs,
+        fallbackUsed: false,
+        fallbackConfigured,
+        targetProvider: providerName,
+        targetModel: model
+      };
     } catch (primaryError) {
       const normalizedPrimaryError = normalizeError(primaryError);
-      if (!fallbackProvider || fallbackProviderName === providerName) {
+      if (!fallbackConfigured || !fallbackProvider || fallbackProviderName === providerName) {
         const durationMs = Date.now() - startedAt;
         db.createAiEvent({ ...baseEvent, durationMs, success: false, fallbackUsed: false, errorCode: normalizedPrimaryError.code, errorSummary: normalizedPrimaryError.message });
         logger.warn('ai task failed without fallback', { ...baseEvent, durationMs, errorCode: normalizedPrimaryError.code });
-        return { ok: false, error: normalizedPrimaryError.code, errorMessage: normalizedPrimaryError.message, provider: providerName, model, durationMs, fallbackUsed: false };
+        return {
+          ok: false,
+          error: normalizedPrimaryError.code,
+          errorMessage: normalizedPrimaryError.message,
+          provider: providerName,
+          model,
+          durationMs,
+          fallbackUsed: false,
+          fallbackConfigured,
+          targetProvider: providerName,
+          targetModel: model
+        };
       }
 
       try {
@@ -93,6 +128,9 @@ function createAiService({ configAi, runtimeSettings, providerRegistry, db, logg
           model: response.model || fallbackModel,
           durationMs,
           fallbackUsed: true,
+          fallbackConfigured,
+          targetProvider: providerName,
+          targetModel: model,
           primaryError: normalizedPrimaryError.code
         };
       } catch (fallbackError) {
@@ -108,6 +146,9 @@ function createAiService({ configAi, runtimeSettings, providerRegistry, db, logg
           model: fallbackModel,
           durationMs,
           fallbackUsed: true,
+          fallbackConfigured,
+          targetProvider: providerName,
+          targetModel: model,
           primaryError: normalizedPrimaryError.code
         };
       }
@@ -135,7 +176,10 @@ function createAiService({ configAi, runtimeSettings, providerRegistry, db, logg
       provider: probe.provider || runtime.activeProvider,
       model: probe.model || runtime.activeModel,
       fallbackUsed: probe.fallbackUsed,
-      errorCode: probe.error || ''
+      errorCode: probe.error || '',
+      targetProvider: probe.targetProvider || runtime.activeProvider,
+      targetModel: probe.targetModel || runtime.activeModel,
+      fallbackConfigured: Boolean(probe.fallbackConfigured)
     });
     return { ok: probe.ok, probe, summary, state };
   }
