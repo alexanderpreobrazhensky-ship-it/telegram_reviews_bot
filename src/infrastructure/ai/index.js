@@ -1,84 +1,34 @@
-const PROVIDERS = Object.freeze({
-  openai: 'openai',
-  anthropic: 'anthropic',
-  none: 'none'
-});
+const { createProviderRegistry } = require('./providerRegistry');
+const { createAiRuntimeSettings } = require('./aiRuntimeSettings');
+const { createAiService } = require('./aiService');
+const { runAiDiagnostics, maskSecret } = require('./aiDiagnostics');
 
-function normalizeProvider(provider = '') {
-  const value = String(provider || '').trim().toLowerCase();
-  return Object.values(PROVIDERS).includes(value) ? value : (value || PROVIDERS.none);
+let singleton = null;
+
+function initializeAiInfrastructure({ config, db, logger }) {
+  const configAi = config.ai || {};
+  const providerRegistry = createProviderRegistry({ config: configAi });
+  const runtimeSettings = createAiRuntimeSettings({ db, configAi });
+  const aiService = createAiService({ configAi, runtimeSettings, providerRegistry, db, logger });
+
+  singleton = {
+    configAi,
+    providerRegistry,
+    runtimeSettings,
+    aiService,
+    async runDiagnostics() {
+      return runAiDiagnostics({ aiService, runtimeSettings, configAi, providerRegistry });
+    },
+    listLogs(filters = {}) {
+      return db.listAiEvents(filters);
+    },
+    maskSecret
+  };
+  return singleton;
 }
 
-function buildDisabledResult(aiConfig, operation, payloadKey, payload) {
-  return {
-    ok: false,
-    enabled: aiConfig.enabled,
-    provider: aiConfig.provider,
-    model: aiConfig.model,
-    error: 'AI_DISABLED',
-    operation,
-    [payloadKey]: payload
-  };
+function getAiInfrastructure() {
+  return singleton;
 }
 
-function createDisabledProvider(aiConfig) {
-  return {
-    async processMessage(input) {
-      return buildDisabledResult(aiConfig, 'processMessage', 'input', input);
-    },
-    async suggestReply(request) {
-      return { ...buildDisabledResult(aiConfig, 'suggestReply', 'request', request), text: '' };
-    },
-    async classifyRequest(data) {
-      return { ...buildDisabledResult(aiConfig, 'classifyRequest', 'data', data), label: '' };
-    }
-  };
-}
-
-function createProviderRegistry(aiConfig) {
-  const disabledProvider = createDisabledProvider(aiConfig);
-  return {
-    getSelectedProvider() {
-      return aiConfig.enabled ? aiConfig.provider : PROVIDERS.none;
-    },
-    has(provider) {
-      return Object.values(PROVIDERS).includes(normalizeProvider(provider));
-    },
-    get(provider = aiConfig.provider) {
-      const normalized = normalizeProvider(provider);
-      if (!aiConfig.enabled || normalized === PROVIDERS.none) return disabledProvider;
-      return disabledProvider;
-    }
-  };
-}
-
-function createAiService({ config = {} } = {}) {
-  const aiConfig = {
-    enabled: Boolean(config.enabled),
-    provider: normalizeProvider(config.provider || PROVIDERS.openai),
-    model: config.model || '',
-    timeoutMs: Number(config.timeoutMs) || 5000,
-    apiKeyConfigured: Boolean(config.apiKey)
-  };
-  const registry = createProviderRegistry(aiConfig);
-
-  return {
-    getConfig() {
-      return { ...aiConfig, selectedProvider: registry.getSelectedProvider(), availableProviders: Object.values(PROVIDERS) };
-    },
-    getProviderRegistry() {
-      return registry;
-    },
-    async processMessage(input) {
-      return registry.get().processMessage(input);
-    },
-    async suggestReply(request) {
-      return registry.get().suggestReply(request);
-    },
-    async classifyRequest(data) {
-      return registry.get().classifyRequest(data);
-    }
-  };
-}
-
-module.exports = { createAiService, createProviderRegistry, PROVIDERS };
+module.exports = { initializeAiInfrastructure, getAiInfrastructure };

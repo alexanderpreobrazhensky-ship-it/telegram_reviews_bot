@@ -139,6 +139,7 @@ const MENU_TEXT_TO_ACTION = Object.freeze({
   'Инструкция': 'menu:instruction',
   'Диагностика': 'menu:diagnostics',
   'Логи': 'menu:logs',
+  'AI': 'menu:ai',
   'Доступы': 'menu:access'
 });
 
@@ -158,6 +159,7 @@ function buildMainMenuKeyboard(actor) {
     ]
   ];
   if (isAdmin(actor)) rows.push([{ text: 'Диагностика', callback_data: 'menu:diagnostics' }, { text: 'Логи', callback_data: 'menu:logs' }]);
+  if (isAdmin(actor)) rows.push([{ text: 'AI', callback_data: 'menu:ai' }]);
   if (canManageAccess(actor)) rows.push([{ text: 'Доступы', callback_data: 'menu:access' }]);
   return { inline_keyboard: rows };
 }
@@ -223,7 +225,11 @@ function helpText(channel) {
     `/access_grant <${channel === 'max' ? 'maxId' : 'telegramId'}> <master|manager> [ФИО]`,
     `/access_revoke <${channel === 'max' ? 'maxId' : 'telegramId'}>`,
     '/diagnostics',
-    '/logs [request:<id>] [type:<type>] [bot:<bot>] [since:YYYY-MM-DD]'
+    '/logs [request:<id>] [type:<type>] [bot:<bot>] [since:YYYY-MM-DD]',
+    '/ai_status',
+    '/ai_diagnostics',
+    '/ai_logs [since:YYYY-MM-DD] [provider:<proxy|openai|deepseek>] [status:<success|fail>] [task:<task_type>]',
+    '/ai_switch provider:<name> model:<name> fallbackProvider:<name> fallbackModel:<name>'
   ].join('\n');
 }
 
@@ -273,11 +279,12 @@ function maskConfigValue(value) {
   return `${raw.slice(0, 2)}***${raw.slice(-2)}`;
 }
 
-function buildDiagnosticsText({ config, actor, channel, detailed = false }) {
+function buildDiagnosticsText({ config, actor, channel, detailed = false, aiInfrastructure = null }) {
   const runtime = db.getDbRuntimeInfo();
   const followupTasks = db.listTasks(['scheduled', 'processing', 'failed']).filter((item) => ['waiting_decision_followup', 'consulted_followup'].includes(item.taskType));
   const writable = require('node:fs').existsSync(runtime.dir || '.');
   const ai = config.ai || {};
+  const aiRuntime = aiInfrastructure?.runtimeSettings?.get ? aiInfrastructure.runtimeSettings.get() : null;
   const base = [
     'Диагностика:',
     `/health: OK`,
@@ -290,7 +297,7 @@ function buildDiagnosticsText({ config, actor, channel, detailed = false }) {
     `Master admins: ${(config.masterBotAdminIds || []).length}`,
     `MAX master admins: ${(config.maxMasterBotAdminIds || []).length}`,
     `Scheduler follow-up tasks: ${followupTasks.length}`,
-    `AI ready: ${ai.enabled ? 'ON' : 'OFF'} (${ai.provider || 'openai'}${ai.model ? `/${ai.model}` : ''})`,
+    `AI ready: ${ai.enabled ? 'ON' : 'OFF'} (${(aiRuntime?.activeProvider || ai.provider || 'proxy')}${(aiRuntime?.activeModel || ai.model) ? `/${aiRuntime?.activeModel || ai.model}` : ''})`,
     `Webhook routes: /${channel}/master_bot/webhook, /telegram/client_bot/webhook, /max/client_bot/webhook, /telegram/integration_bot/webhook`,
     `Internal routes: /internal/requests, /internal/export, /internal/diagnostics, /internal/logs`,
     `Actor: ${actor.id} (${actor.role})`
@@ -309,7 +316,9 @@ function buildDiagnosticsText({ config, actor, channel, detailed = false }) {
     `ai enabled: ${ai.enabled ? 'true' : 'false'}`,
     `ai provider: ${ai.provider || '-'}`,
     `ai model: ${ai.model || '-'}`,
-    `ai api key: ${maskConfigValue(ai.apiKey)}`
+    `ai proxy token: ${maskConfigValue(ai.proxyToken)}`,
+    `ai openai key: ${maskConfigValue(ai.openaiApiKey)}`,
+    `ai deepseek key: ${maskConfigValue(ai.deepseekApiKey)}`
   ].join('\n');
 }
 
@@ -341,7 +350,65 @@ function buildLogsText(filters = {}, detailed = false) {
   return sections.join('\n\n');
 }
 
-async function handleMenuAction({ action, actor, channel, token, recipientId, masterService, config, sessionKey, callbackId = null }) {
+
+function buildAiMenuKeyboard() {
+  return {
+    inline_keyboard: [
+      [{ text: 'AI Статус', callback_data: 'ai:status' }],
+      [{ text: 'AI Диагностика', callback_data: 'ai:diagnostics' }],
+      [{ text: 'AI Переключение', callback_data: 'ai:switch' }],
+      [{ text: 'AI Логи', callback_data: 'ai:logs' }]
+    ]
+  };
+}
+
+function buildAiStatusText({ aiInfrastructure, config }) {
+  if (!aiInfrastructure) return 'AI infrastructure not initialized';
+  const runtime = aiInfrastructure.runtimeSettings.get();
+  const diagnostics = aiInfrastructure.runtimeSettings.getDiagnosticsState() || {};
+  return [
+    'AI статус:',
+    `AI enabled: ${runtime.aiEnabledRuntime ? 'ON' : 'OFF'} (env=${config.ai?.enabled ? 'ON' : 'OFF'})`,
+    `AI business usage enabled: ${runtime.aiBusinessUsageEnabledRuntime ? 'ON' : 'OFF'} (env=${config.ai?.businessUsageEnabled ? 'ON' : 'OFF'})`,
+    `Active provider/model: ${runtime.activeProvider}/${runtime.activeModel}`,
+    `Fallback provider/model: ${runtime.activeFallbackProvider}/${runtime.activeFallbackModel}`,
+    `Allowed providers: ${(runtime.allowedProviders || []).join(', ') || '-'}`,
+    `Proxy configured: ${config.ai?.proxyUrl && config.ai?.proxyToken ? 'yes' : 'no'}`,
+    `Last diagnostics: ${diagnostics.status || runtime.lastAiDiagnosticsStatus || 'never'}`,
+    `Last diagnostics at: ${diagnostics.at || runtime.lastAiDiagnosticsAt || '-'}`,
+    `Last diagnostics summary: ${diagnostics.summary || runtime.lastAiDiagnosticsSummary || '-'}`
+  ].join('\n');
+}
+
+function buildAiLogsText(aiInfrastructure, filters = {}) {
+  const events = aiInfrastructure?.listLogs({
+    since: filters.since || null,
+    provider: filters.provider || null,
+    status: filters.status || null,
+    taskType: filters.task || null,
+    limit: Number(filters.limit || 20)
+  }) || [];
+  const lines = events.map((item) => `${item.timestamp} | task_type=${item.taskType} | provider=${item.provider} | model=${item.model} | duration_ms=${item.durationMs} | ${item.success ? 'success' : 'fail'} | fallback_used=${item.fallbackUsed ? 'yes' : 'no'} | error_code=${item.errorCode || '-'} | error=${item.errorSummary || '-'}`);
+  return ['AI логи:', `Фильтры: since=${filters.since || '-'} provider=${filters.provider || '-'} status=${filters.status || '-'} task=${filters.task || '-'}`, lines.join('\n') || 'Нет AI событий'].join('\n\n');
+}
+
+function parseAiSwitchCommand(text = '') {
+  const parts = String(text || '').trim().split(/\s+/);
+  if (parts[0] !== '/ai_switch') return null;
+  const payload = {};
+  for (const part of parts.slice(1)) {
+    const [key, ...rest] = part.split(':');
+    if (!rest.length) continue;
+    payload[key] = rest.join(':');
+  }
+  return {
+    activeProvider: payload.provider,
+    activeModel: payload.model,
+    activeFallbackProvider: payload.fallbackProvider,
+    activeFallbackModel: payload.fallbackModel
+  };
+}
+async function handleMenuAction({ action, actor, channel, token, recipientId, masterService, config, sessionKey, callbackId = null, aiInfrastructure = null }) {
   const callbackText = {
     'menu:new_requests': 'Новые заявки',
     'menu:in_progress': 'В работе',
@@ -351,6 +418,7 @@ async function handleMenuAction({ action, actor, channel, token, recipientId, ma
     'menu:instruction': 'Инструкция',
     'menu:diagnostics': 'Диагностика',
     'menu:logs': 'Логи',
+    'menu:ai': 'AI',
     'menu:access': 'Доступы'
   }[action] || 'Готово';
   if (callbackId) await answerChannelCallback({ channel, token, callbackId, text: callbackText });
@@ -395,12 +463,16 @@ async function handleMenuAction({ action, actor, channel, token, recipientId, ma
   }
   if (action === 'menu:diagnostics') {
     if (!isAdmin(actor)) return respondWithMessage({ channel, token, recipientId, text: 'Недостаточно прав.', payload: { ok: false, error: 'ACCESS_DENIED', action } });
-    return respondWithMessage({ channel, token, recipientId, text: buildDiagnosticsText({ config, actor, channel, detailed: false }), payload: { ok: true, action }, extra: { reply_markup: { inline_keyboard: [[{ text: 'обновить', callback_data: 'admin:diagnostics' }, { text: 'прогнать проверку', callback_data: 'admin:diagnostics' }], [{ text: 'краткий статус', callback_data: 'admin:diagnostics_short' }, { text: 'подробный статус', callback_data: 'admin:diagnostics_detailed' }]] } } });
+    return respondWithMessage({ channel, token, recipientId, text: buildDiagnosticsText({ config, actor, channel, detailed: false, aiInfrastructure }), payload: { ok: true, action }, extra: { reply_markup: { inline_keyboard: [[{ text: 'обновить', callback_data: 'admin:diagnostics' }, { text: 'прогнать проверку', callback_data: 'admin:diagnostics' }], [{ text: 'краткий статус', callback_data: 'admin:diagnostics_short' }, { text: 'подробный статус', callback_data: 'admin:diagnostics_detailed' }]] } } });
   }
   if (action === 'menu:logs') {
     if (!isAdmin(actor)) return respondWithMessage({ channel, token, recipientId, text: 'Недостаточно прав.', payload: { ok: false, error: 'ACCESS_DENIED', action } });
     sessions.set(sessionKey, { step: 'logs_filter' });
     return respondWithMessage({ channel, token, recipientId, text: 'Введите фильтр логов в формате request:<id> type:<type> bot:<bot> since:YYYY-MM-DD', payload: { ok: true, action } });
+  }
+  if (action === 'menu:ai') {
+    if (!isAdmin(actor)) return respondWithMessage({ channel, token, recipientId, text: 'Недостаточно прав.', payload: { ok: false, error: 'ACCESS_DENIED', action } });
+    return respondWithMessage({ channel, token, recipientId, text: 'AI control plane', payload: { ok: true, action }, extra: { reply_markup: buildAiMenuKeyboard() } });
   }
   if (action === 'menu:access') {
     if (!canManageAccess(actor)) return respondWithMessage({ channel, token, recipientId, text: 'Недостаточно прав.', payload: { ok: false, error: 'ACCESS_DENIED', action } });
@@ -436,7 +508,7 @@ function buildHistoryText(card) {
   return `История заявки ${card.request.id}:\n${buildHistoryLines(card)}`;
 }
 
-async function handleMasterWebhook({ body, config, headers = {}, rawHeaders = [], pathname = '', method = 'POST', channel = 'telegram' }) {
+async function handleMasterWebhook({ body, config, headers = {}, rawHeaders = [], pathname = '', method = 'POST', channel = 'telegram', aiInfrastructure = null }) {
   if (channel === 'max') {
     const bodyKeys = body && typeof body === 'object' && !Array.isArray(body) ? Object.keys(body).sort() : [];
     logger.info('master_bot MAX webhook route hit', { channel, pathname, method: String(method || '').toUpperCase(), bodyPresent: Boolean(body), bodyKeys });
@@ -485,7 +557,7 @@ async function handleMasterWebhook({ body, config, headers = {}, rawHeaders = []
     if (event.callback?.id) {
       const data = String(event.callback.data || '');
       if (data.startsWith('menu:')) {
-        return handleMenuAction({ action: data, actor, channel, token, recipientId, masterService, config, sessionKey, callbackId: event.callback.id });
+        return handleMenuAction({ action: data, actor, channel, token, recipientId, masterService, config, sessionKey, callbackId: event.callback.id, aiInfrastructure });
       }
       if (data.startsWith('card:')) {
         const requestId = data.split(':')[1];
@@ -512,16 +584,47 @@ async function handleMasterWebhook({ body, config, headers = {}, rawHeaders = []
       }
       if (data === 'admin:diagnostics' || data === 'admin:diagnostics_short') {
         await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: 'Готово' });
-        return respondWithMessage({ channel, token, recipientId, text: buildDiagnosticsText({ config, actor, channel, detailed: false }), payload: { ok: true } });
+        return respondWithMessage({ channel, token, recipientId, text: buildDiagnosticsText({ config, actor, channel, detailed: false, aiInfrastructure }), payload: { ok: true } });
       }
       if (data === 'admin:diagnostics_detailed') {
         await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: 'Подробно' });
-        return respondWithMessage({ channel, token, recipientId, text: buildDiagnosticsText({ config, actor, channel, detailed: true }), payload: { ok: true } });
+        return respondWithMessage({ channel, token, recipientId, text: buildDiagnosticsText({ config, actor, channel, detailed: true, aiInfrastructure }), payload: { ok: true } });
       }
       if (data === 'admin:logs' || data === 'admin:logs_short' || data === 'admin:logs_detailed') {
         sessions.set(sessionKey, { step: 'logs_filter', detailed: data === 'admin:logs_detailed' });
         await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: 'Введите фильтр' });
         return respondWithMessage({ channel, token, recipientId, text: 'Введите фильтр логов в формате request:<id> type:<type> bot:<bot> since:YYYY-MM-DD' });
+      }
+
+      if (data.startsWith('ai:')) {
+        if (!isAdmin(actor)) {
+          await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: 'Недостаточно прав' });
+          return respondWithMessage({ channel, token, recipientId, text: 'Недостаточно прав.', payload: { ok: false, error: 'ACCESS_DENIED' } });
+        }
+        if (!aiInfrastructure) {
+          await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: 'AI infra missing' });
+          return respondWithMessage({ channel, token, recipientId, text: 'AI infrastructure unavailable', payload: { ok: false, error: 'AI_INFRA_UNAVAILABLE' } });
+        }
+        if (data === 'ai:status') {
+          await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: 'AI статус' });
+          return respondWithMessage({ channel, token, recipientId, text: buildAiStatusText({ aiInfrastructure, config }), payload: { ok: true }, extra: { reply_markup: buildAiMenuKeyboard() } });
+        }
+        if (data === 'ai:diagnostics') {
+          await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: 'AI диагностика...' });
+          const result = await aiInfrastructure.runDiagnostics();
+          return respondWithMessage({ channel, token, recipientId, text: `${result.ok ? '✅' : '❌'} ${result.probe.summary}
+provider=${result.probe.state.provider || '-'} model=${result.probe.state.model || '-'} fallback=${result.probe.state.fallbackUsed ? 'yes' : 'no'} duration=${result.probe.state.durationMs}ms`, payload: { ok: result.ok, diagnostics: result }, extra: { reply_markup: buildAiMenuKeyboard() } });
+        }
+        if (data === 'ai:switch') {
+          await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: 'Введите /ai_switch ...' });
+          sessions.set(sessionKey, { step: 'ai_switch' });
+          return respondWithMessage({ channel, token, recipientId, text: 'Формат: /ai_switch provider:<name> model:<name> fallbackProvider:<name> fallbackModel:<name>' });
+        }
+        if (data === 'ai:logs') {
+          await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: 'AI логи' });
+          sessions.set(sessionKey, { step: 'ai_logs_filter' });
+          return respondWithMessage({ channel, token, recipientId, text: 'Введите фильтр: since:YYYY-MM-DD provider:proxy status:success task:classifyIntent' });
+        }
       }
       if (data.startsWith('req:')) {
         const [, requestId, rawAction, maybeSubstatus] = data.split(':');
@@ -592,14 +695,14 @@ async function handleMasterWebhook({ body, config, headers = {}, rawHeaders = []
     }
 
     if (String(text).startsWith('menu:')) {
-      return handleMenuAction({ action: text, actor, channel, token, recipientId, masterService, config, sessionKey });
+      return handleMenuAction({ action: text, actor, channel, token, recipientId, masterService, config, sessionKey, aiInfrastructure });
     }
 
     if (text === '/diagnostics') {
-      return handleMenuAction({ action: 'menu:diagnostics', actor, channel, token, recipientId, masterService, config, sessionKey });
+      return handleMenuAction({ action: 'menu:diagnostics', actor, channel, token, recipientId, masterService, config, sessionKey, aiInfrastructure });
     }
     if (text === 'Логи' || text.startsWith('/logs')) {
-      if (text === 'Логи') return handleMenuAction({ action: 'menu:logs', actor, channel, token, recipientId, masterService, config, sessionKey });
+      if (text === 'Логи') return handleMenuAction({ action: 'menu:logs', actor, channel, token, recipientId, masterService, config, sessionKey, aiInfrastructure });
       if (!isAdmin(actor)) return respondWithMessage({ channel, token, recipientId, text: 'Недостаточно прав.', payload: { ok: false, error: 'ACCESS_DENIED' } });
       const filters = parseLogsFilter(text.replace('/logs', '').trim());
       return respondWithMessage({
@@ -611,8 +714,31 @@ async function handleMasterWebhook({ body, config, headers = {}, rawHeaders = []
         extra: { reply_markup: { inline_keyboard: [[{ text: 'кратко', callback_data: 'admin:logs_short' }, { text: 'подробно', callback_data: 'admin:logs_detailed' }]] } }
       });
     }
+
+    if (text === '/ai_status') {
+      if (!isAdmin(actor)) return respondWithMessage({ channel, token, recipientId, text: 'Недостаточно прав.', payload: { ok: false, error: 'ACCESS_DENIED' } });
+      return respondWithMessage({ channel, token, recipientId, text: buildAiStatusText({ aiInfrastructure, config }), payload: { ok: true }, extra: { reply_markup: buildAiMenuKeyboard() } });
+    }
+    if (text === '/ai_diagnostics') {
+      if (!isAdmin(actor)) return respondWithMessage({ channel, token, recipientId, text: 'Недостаточно прав.', payload: { ok: false, error: 'ACCESS_DENIED' } });
+      const result = await aiInfrastructure.runDiagnostics();
+      return respondWithMessage({ channel, token, recipientId, text: `${result.ok ? '✅' : '❌'} ${result.probe.summary}` , payload: { ok: result.ok, diagnostics: result }, extra: { reply_markup: buildAiMenuKeyboard() } });
+    }
+    if (text.startsWith('/ai_logs')) {
+      if (!isAdmin(actor)) return respondWithMessage({ channel, token, recipientId, text: 'Недостаточно прав.', payload: { ok: false, error: 'ACCESS_DENIED' } });
+      const filters = parseLogsFilter(text.replace('/ai_logs', '').trim());
+      return respondWithMessage({ channel, token, recipientId, text: buildAiLogsText(aiInfrastructure, filters), payload: { ok: true, filters }, extra: { reply_markup: buildAiMenuKeyboard() } });
+    }
+    if (text.startsWith('/ai_switch')) {
+      if (!isAdmin(actor)) return respondWithMessage({ channel, token, recipientId, text: 'Недостаточно прав.', payload: { ok: false, error: 'ACCESS_DENIED' } });
+      const payload = parseAiSwitchCommand(text) || {};
+      const patch = Object.fromEntries(Object.entries(payload).filter(([, v]) => Boolean(v)));
+      const updated = aiInfrastructure.runtimeSettings.update(patch);
+      return respondWithMessage({ channel, token, recipientId, text: updated.ok ? 'AI runtime settings updated' : `Ошибка: ${updated.error}`, payload: updated, extra: { reply_markup: buildAiMenuKeyboard() } });
+    }
+
     if (text === '/quality_cases') {
-      return handleMenuAction({ action: 'menu:quality_cases', actor, channel, token, recipientId, masterService, config, sessionKey });
+      return handleMenuAction({ action: 'menu:quality_cases', actor, channel, token, recipientId, masterService, config, sessionKey, aiInfrastructure });
     }
 
     const session = sessions.get(sessionKey);
@@ -645,6 +771,19 @@ async function handleMasterWebhook({ body, config, headers = {}, rawHeaders = []
     if (session?.step === 'logs_filter') {
       sessions.delete(sessionKey);
       return respondWithMessage({ channel, token, recipientId, text: buildLogsText(parseLogsFilter(text), Boolean(session.detailed)), payload: { ok: true } });
+    }
+
+
+    if (session?.step === 'ai_logs_filter') {
+      sessions.delete(sessionKey);
+      return respondWithMessage({ channel, token, recipientId, text: buildAiLogsText(aiInfrastructure, parseLogsFilter(text)), payload: { ok: true } });
+    }
+    if (session?.step === 'ai_switch') {
+      sessions.delete(sessionKey);
+      const payload = parseAiSwitchCommand(text) || {};
+      const patch = Object.fromEntries(Object.entries(payload).filter(([, v]) => Boolean(v)));
+      const updated = aiInfrastructure.runtimeSettings.update(patch);
+      return respondWithMessage({ channel, token, recipientId, text: updated.ok ? 'AI runtime settings updated' : `Ошибка: ${updated.error}`, payload: updated, extra: { reply_markup: buildAiMenuKeyboard() } });
     }
 
     if (text.startsWith('/access_list')) {

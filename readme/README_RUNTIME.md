@@ -20,3 +20,12 @@
 - Persistence and migration in `src/infrastructure/db/index.js`.
 - Internal diagnostics/logs in `/internal/diagnostics` and `/internal/logs`.
 - AI-ready provider registry in `src/infrastructure/ai/index.js`.
+
+
+## AI runtime settings (DB/meta)
+Runtime overrides are stored in DB meta and can be changed without redeploy:
+- `active_ai_provider` / `active_ai_model`
+- `active_ai_fallback_provider` / `active_ai_fallback_model`
+- `ai_enabled_runtime`
+- `ai_business_usage_enabled_runtime`
+- `last_ai_diagnostics_at` / `last_ai_diagnostics_status` / `last_ai_diagnostics_summary`

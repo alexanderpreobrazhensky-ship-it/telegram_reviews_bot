@@ -2520,6 +2520,62 @@ function resetStore() {
   initializeStore();
 }
 
+
+function createAiEvent({
+  taskType = 'unknown',
+  provider = '',
+  model = '',
+  durationMs = 0,
+  success = false,
+  fallbackUsed = false,
+  errorCode = '',
+  errorSummary = '',
+  status = null,
+  metaJson = {}
+} = {}) {
+  return createAnalyticsEvent({
+    eventType: 'ai_event',
+    channel: 'internal',
+    platform: 'ai',
+    status: status || (success ? 'success' : 'fail'),
+    metaJson: {
+      taskType,
+      provider,
+      model,
+      durationMs,
+      fallbackUsed,
+      errorCode,
+      errorSummary: String(errorSummary || '').slice(0, 500),
+      ...metaJson
+    }
+  });
+}
+
+function listAiEvents({ since = null, provider = null, status = null, taskType = null, limit = 100 } = {}) {
+  initializeStore();
+  return listRows('analytics_events', 'created_at DESC').map(analyticsEventRowToEntity)
+    .filter((item) => {
+      if (item.eventType !== 'ai_event') return false;
+      if (since && Date.parse(item.createdAt || '') < Date.parse(since)) return false;
+      if (provider && String(item.metaJson?.provider || '').toLowerCase() !== String(provider).toLowerCase()) return false;
+      if (status && String(item.status || '').toLowerCase() !== String(status).toLowerCase()) return false;
+      if (taskType && String(item.metaJson?.taskType || '') !== String(taskType)) return false;
+      return true;
+    })
+    .slice(0, limit)
+    .map((item) => ({
+      id: item.id,
+      taskType: item.metaJson?.taskType || 'unknown',
+      provider: item.metaJson?.provider || '',
+      model: item.metaJson?.model || '',
+      durationMs: Number(item.metaJson?.durationMs) || 0,
+      success: (item.status || '') === 'success',
+      fallbackUsed: Boolean(item.metaJson?.fallbackUsed),
+      errorCode: item.metaJson?.errorCode || '',
+      errorSummary: item.metaJson?.errorSummary || '',
+      timestamp: item.createdAt
+    }));
+}
 function createIntegrationEvent({ sourceSystem, eventType, rawPayload, dedupeKey = null }) {
   initializeStore();
   const event = {
@@ -2717,6 +2773,7 @@ const api = {
   upsertVehicle,
   createRequest,
   createAnalyticsEvent,
+  createAiEvent,
   createCommunicationEvent,
   listRequests,
   listRecommendations,
@@ -2763,13 +2820,16 @@ const api = {
   getIntegrationEventCard,
   listRequestEvents,
   listOperationalLogs,
+  listAiEvents,
   applyEntitySyncMetadata,
   listTables,
   replaceStore,
   shutdown,
   normalizePhone10,
   reactivateWaitingDecisionRequest,
-  registerConsultedFollowup
+  registerConsultedFollowup,
+  getMetaValue,
+  setMetaValue
 };
 
 module.exports = api;
