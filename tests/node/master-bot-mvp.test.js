@@ -270,6 +270,49 @@ test('instruction and diagnostics include new workflow, email and separate AI se
   delete process.env.AI_MODEL;
 });
 
+test('reports button and callbacks are admin-only and fully button driven', async () => {
+  await withServer(async (base) => {
+    db.createStaffUser({ telegramId: '7007', fullName: 'Manager', role: 'manager' });
+
+    const adminStart = await sendMaster(base, '/start', 5001);
+    assert.equal(adminStart.ok, true);
+    assert.equal(adminStart.action, 'start');
+
+    const openReports = await fetch(`${base}/telegram/master_bot/webhook`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ callback_query: { id: 'reports-1', from: { id: 5001, first_name: 'Admin' }, message: { chat: { id: 5001 } }, data: 'menu:reports' } })
+    }).then((res) => res.json());
+    assert.equal(openReports.ok, true);
+    assert.equal(openReports.action, 'menu:reports');
+
+    const summaryByPeriod = await fetch(`${base}/telegram/master_bot/webhook`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ callback_query: { id: 'reports-2', from: { id: 5001, first_name: 'Admin' }, message: { chat: { id: 5001 } }, data: 'reports:period:summary:today' } })
+    }).then((res) => res.json());
+    assert.equal(summaryByPeriod.ok, true);
+    assert.equal(summaryByPeriod.action, 'reports:period');
+
+    const exportByButton = await fetch(`${base}/telegram/master_bot/webhook`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ callback_query: { id: 'reports-3', from: { id: 5001, first_name: 'Admin' }, message: { chat: { id: 5001 } }, data: 'reports:export' } })
+    }).then((res) => res.json());
+    assert.equal(exportByButton.ok, true);
+    assert.equal(exportByButton.action, 'reports:export');
+    assert.match(exportByButton.text, /CSV экспорт/i);
+
+    const managerDenied = await fetch(`${base}/telegram/master_bot/webhook`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ callback_query: { id: 'reports-4', from: { id: 7007, first_name: 'Manager' }, message: { chat: { id: 7007 } }, data: 'menu:reports' } })
+    }).then((res) => res.json());
+    assert.equal(managerDenied.ok, false);
+    assert.match(`${managerDenied.error || managerDenied.text || ''}`, /ACCESS_DENIED|REPORT_ACCESS_DENIED|Недостаточно прав/i);
+  });
+});
+
 test('persistence stores status history internal comments and assignment', async () => {
   await withServer(async (base) => {
     const req = await createClientRequest(base, { fullName: 'Сохранение', phone: '0000000004', wasClientBefore: 'yes', brand: 'Toyota', model: 'Corolla', year: '2022', vin: 'VINP', description: 'persist' });

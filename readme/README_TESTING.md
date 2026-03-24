@@ -37,3 +37,13 @@ npm test
 3. Structure check: `clients`, `vehicles`, owner linkage, mileage fields, phone/VIN assumptions.
 4. Documentation check: bridge README + repo README + `audit/MASTER_AUDIT.md` согласованы.
 5. Regression check: runtime тесты проходят, `app.js` и production DB path не подменены.
+
+## Management reports test checklist
+1. `Отчёты` видит только admin.
+2. Не-admin получает отказ на `menu:reports` и `reports:*` callbacks.
+3. Разделы отчётов открываются кнопками (без текстовых команд).
+4. Периоды переключаются кнопками.
+5. `Назад` / `В меню` работают из screens отчётов.
+6. Проверены: summary/funnel/sources/rejections/warranty/stuck/existing_new/t_business.
+7. Экспорт CSV работает и учитывает текущий reportType/period.
+8. Regression: master/client/integration/webapp маршруты живы.

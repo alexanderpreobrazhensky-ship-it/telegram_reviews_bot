@@ -35,7 +35,7 @@ const LEGACY_CALLBACK_MAP = Object.freeze({
 });
 
 function canUseReports(actor) {
-  return actor?.role === 'manager' || actor?.role === 'admin';
+  return actor?.role === 'admin';
 }
 function canManageAccess(actor) {
   return actor?.role === 'manager' || actor?.role === 'admin';
@@ -154,7 +154,8 @@ const MENU_TEXT_TO_ACTION = Object.freeze({
   'Диагностика': 'menu:diagnostics',
   'Логи': 'menu:logs',
   'AI': 'menu:ai',
-  'Доступы': 'menu:access'
+  'Доступы': 'menu:access',
+  'Отчёты': 'menu:reports'
 });
 
 function buildMainMenuKeyboard(actor) {
@@ -174,6 +175,7 @@ function buildMainMenuKeyboard(actor) {
   ];
   if (isAdmin(actor)) rows.push([{ text: 'Диагностика', callback_data: 'menu:diagnostics' }, { text: 'Логи', callback_data: 'menu:logs' }]);
   if (isAdmin(actor)) rows.push([{ text: 'AI', callback_data: 'menu:ai' }]);
+  if (isAdmin(actor)) rows.push([{ text: 'Отчёты', callback_data: 'menu:reports' }]);
   if (canManageAccess(actor)) rows.push([{ text: 'Доступы', callback_data: 'menu:access' }]);
   return { inline_keyboard: rows };
 }
@@ -195,6 +197,7 @@ function helpText(channel) {
     '- Инструкция: этот справочник.',
     '- Диагностика (admin): short/detailed + обновление/прогон.',
     '- Логи (admin): request events, communications, integration/analytics.',
+    '- Отчёты (admin): управленческие отчёты кнопками (сводка, воронка, источники, отказы, гарантия, зависшие, existing/new, t_business, экспорт CSV).',
     '- Доступы (manager/admin): выдача/отзыв ролей master/manager/admin.',
     '- AI (admin): отдельная control plane для AI статуса/диагностики/переключения/логов.',
     '',
@@ -248,7 +251,7 @@ function helpText(channel) {
     '- Email не используется как outbound-канал.',
     '',
     'Права:',
-    '- Админ: диагностика, логи, переназначение, доступы.',
+    '- Админ: диагностика, логи, переназначение, доступы, отчёты.',
     '- Master/manager: работа с заявками и поиском.',
     '',
     'AI control plane (admin):',
@@ -557,6 +560,59 @@ function buildAiDiagnosticsSummary(result) {
   ].join('\n');
 }
 
+
+const REPORT_PERIOD_OPTIONS = [
+  { id: 'today', label: 'Сегодня' },
+  { id: '7d', label: '7 дней' },
+  { id: '30d', label: '30 дней' },
+  { id: 'month', label: 'Месяц' },
+  { id: 'quarter', label: 'Квартал' },
+  { id: 'all_time', label: 'Всё время' }
+];
+const REPORT_TYPE_OPTIONS = [
+  { id: 'summary', label: 'Сводка' },
+  { id: 'funnel', label: 'Воронка' },
+  { id: 'sources', label: 'Источники' },
+  { id: 'rejections', label: 'Отказы' },
+  { id: 'warranty', label: 'Гарантия' },
+  { id: 'stuck', label: 'Зависшие' },
+  { id: 'existing_new', label: 'Existing/New' },
+  { id: 't_business', label: 'T-Business' }
+];
+
+function reportTypeLabel(type) {
+  return REPORT_TYPE_OPTIONS.find((item) => item.id === type)?.label || type;
+}
+
+function periodLabel(period) {
+  return REPORT_PERIOD_OPTIONS.find((item) => item.id === period)?.label || period;
+}
+
+function reportMenuKeyboard() {
+  return withNavigationRows([
+    [{ text: 'Сводка', callback_data: 'reports:type:summary' }, { text: 'Воронка', callback_data: 'reports:type:funnel' }],
+    [{ text: 'Источники', callback_data: 'reports:type:sources' }, { text: 'Отказы', callback_data: 'reports:type:rejections' }],
+    [{ text: 'Гарантия', callback_data: 'reports:type:warranty' }, { text: 'Зависшие', callback_data: 'reports:type:stuck' }],
+    [{ text: 'Existing/New', callback_data: 'reports:type:existing_new' }, { text: 'T-Business', callback_data: 'reports:type:t_business' }],
+    [{ text: 'Экспорт', callback_data: 'reports:export' }]
+  ], { includeBack: true, includeMenu: true });
+}
+
+function reportPeriodKeyboard(type) {
+  const rows = REPORT_PERIOD_OPTIONS.map((item) => [{ text: item.label, callback_data: `reports:period:${type}:${item.id}` }]);
+  rows.push([{ text: 'Экспорт', callback_data: 'reports:export' }, { text: 'Подробнее', callback_data: 'reports:details' }]);
+  rows.push([{ text: 'Обновить', callback_data: 'reports:refresh' }]);
+  return withNavigationRows(rows, { includeBack: true, includeMenu: true });
+}
+
+function formatReportText(type, period, report) {
+  return [
+    `Отчёт: ${reportTypeLabel(type)}`,
+    `Период: ${periodLabel(period)}`,
+    JSON.stringify(report, null, 2)
+  ].join('\n');
+}
+
 function parseAiSwitchCommand(text = '') {
   const parts = String(text || '').trim().split(/\s+/);
   if (parts[0] !== '/ai_switch') return null;
@@ -585,7 +641,8 @@ async function handleMenuAction({ action, actor, channel, token, recipientId, ma
     'menu:diagnostics': 'Диагностика',
     'menu:logs': 'Логи',
     'menu:ai': 'AI',
-    'menu:access': 'Доступы'
+    'menu:access': 'Доступы',
+    'menu:reports': 'Отчёты'
   }[action] || 'Готово';
   if (callbackId) await answerChannelCallback({ channel, token, callbackId, text: callbackText });
 
@@ -654,6 +711,11 @@ async function handleMenuAction({ action, actor, channel, token, recipientId, ma
 /access_list
 /access_grant <${channel === 'max' ? 'maxId' : 'telegramId'}> <master|manager> [ФИО]
 /access_revoke <${channel === 'max' ? 'maxId' : 'telegramId'}>`, payload: { ok: true, action }, extra: { reply_markup: buildMainMenuKeyboard(actor) } });
+  }
+  if (action === 'menu:reports') {
+    if (!canUseReports(actor)) return respondWithMessage({ channel, token, recipientId, text: 'Недостаточно прав для отчётов.', payload: { ok: false, error: 'REPORT_ACCESS_DENIED', action } });
+    updateSession(sessionKey, { screen: 'menu:reports', backAction: 'menu:root', step: null, reportType: 'summary', reportPeriod: '7d' });
+    return respondWithMessage({ channel, token, recipientId, text: 'Раздел отчётов руководителя. Выберите тип отчёта:', payload: { ok: true, action }, extra: { reply_markup: reportMenuKeyboard() } });
   }
   return { ok: false, error: 'UNKNOWN_MENU_ACTION', action };
 }
@@ -747,6 +809,49 @@ async function handleMasterWebhook({ body, config, headers = {}, rawHeaders = []
       }
       if (data.startsWith('menu:')) {
         return handleMenuAction({ action: data, actor, channel, token, recipientId, masterService, config, sessionKey, callbackId: event.callback.id, aiInfrastructure });
+      }
+
+      if (data.startsWith('reports:')) {
+        if (!canUseReports(actor)) {
+          await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: 'Нет доступа' });
+          return respondWithMessage({ channel, token, recipientId, text: 'Недостаточно прав для отчётов.', payload: { ok: false, error: 'REPORT_ACCESS_DENIED' } });
+        }
+        const session = sessions.get(sessionKey) || { reportType: 'summary', reportPeriod: '7d' };
+        if (data === 'reports:export') {
+          await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: 'Экспорт' });
+          const exported = reportingService.exportReportCsv({ reportType: session.reportType || 'summary', period: session.reportPeriod || '7d' });
+          const preview = exported.csv.split('\n').slice(0, 20).join('\n');
+          updateSession(sessionKey, { ...session, screen: 'menu:reports:export', backAction: 'menu:reports' });
+          return respondWithMessage({
+            channel,
+            token,
+            recipientId,
+            text: `CSV экспорт (${reportTypeLabel(session.reportType || 'summary')}, ${periodLabel(session.reportPeriod || '7d')}):\n\n${preview}`,
+            payload: { ok: true, action: 'reports:export', reportType: session.reportType, period: session.reportPeriod },
+            extra: { reply_markup: reportPeriodKeyboard(session.reportType || 'summary') }
+          });
+        }
+        if (data === 'reports:details' || data === 'reports:refresh') {
+          await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: data === 'reports:refresh' ? 'Обновлено' : 'Подробнее' });
+          const report = reportingService.buildReport(session.reportType || 'summary', { period: session.reportPeriod || '7d' });
+          updateSession(sessionKey, { ...session, screen: 'menu:reports:view', backAction: 'menu:reports' });
+          return respondWithMessage({ channel, token, recipientId, text: formatReportText(session.reportType || 'summary', session.reportPeriod || '7d', report), payload: { ok: true, action: data, reportType: session.reportType, period: session.reportPeriod, report }, extra: { reply_markup: reportPeriodKeyboard(session.reportType || 'summary') } });
+        }
+        if (data.startsWith('reports:type:')) {
+          const [, , reportType] = data.split(':');
+          await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: reportTypeLabel(reportType) });
+          const period = session.reportPeriod || '7d';
+          const report = reportingService.buildReport(reportType, { period });
+          updateSession(sessionKey, { ...session, screen: 'menu:reports:period', backAction: 'menu:reports', reportType, reportPeriod: period });
+          return respondWithMessage({ channel, token, recipientId, text: formatReportText(reportType, period, report), payload: { ok: true, action: 'reports:type', reportType, period, report }, extra: { reply_markup: reportPeriodKeyboard(reportType) } });
+        }
+        if (data.startsWith('reports:period:')) {
+          const [, , reportType, period] = data.split(':');
+          await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: periodLabel(period) });
+          const report = reportingService.buildReport(reportType, { period });
+          updateSession(sessionKey, { ...session, screen: 'menu:reports:view', backAction: 'menu:reports', reportType, reportPeriod: period });
+          return respondWithMessage({ channel, token, recipientId, text: formatReportText(reportType, period, report), payload: { ok: true, action: 'reports:period', reportType, period, report }, extra: { reply_markup: reportPeriodKeyboard(reportType) } });
+        }
       }
       if (data.startsWith('card:')) {
         const requestId = data.split(':')[1];
@@ -1074,8 +1179,8 @@ async function handleMasterWebhook({ body, config, headers = {}, rawHeaders = []
       return respondWithMessage({ channel, token, recipientId, text: result.error ? `Ошибка: ${result.error}` : 'Запрос клиенту отправлен/зафиксирован', payload: result });
     }
     if (text === '/report_week' || text === '/report_month' || text === '/report_quarter' || text === '/report_stats') {
-      if (!canUseReports(actor)) return respondWithMessage({ channel, token, recipientId, text: 'Недостаточно прав для отчётов.', payload: { ok: false, error: 'REPORT_ACCESS_DENIED', allowedRoles: ['manager', 'admin'] } });
-      const periodMap = { '/report_week': 'weekly', '/report_month': 'monthly', '/report_quarter': 'quarterly', '/report_stats': 'weekly' };
+      if (!canUseReports(actor)) return respondWithMessage({ channel, token, recipientId, text: 'Недостаточно прав для отчётов.', payload: { ok: false, error: 'REPORT_ACCESS_DENIED', allowedRoles: ['admin'] } });
+      const periodMap = { '/report_week': '7d', '/report_month': 'month', '/report_quarter': 'quarter', '/report_stats': '7d' };
       const report = reportingService.buildManagementSummary({ period: periodMap[text] });
       return respondWithMessage({ channel, token, recipientId, text: report.summaryText, payload: { ok: true, report } });
     }

@@ -51,9 +51,10 @@ test('report snapshots can be created, persisted and retrieved', () => {
   assert.equal(loaded.id, snapshot.id);
 });
 
-test('report routes and stage 2-5 regression routes stay alive', async () => {
+test('report routes and stage 2-5 regression routes stay alive with admin auth', async () => {
   db.resetStore();
   process.env.MASTER_BOT_ADMIN_IDS = '2,778';
+  process.env.INTERNAL_ADMIN_WHITELIST = '2,778';
   const server = createServer({ config: loadConfig(), logger });
   await new Promise((resolve) => server.listen(0, resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
@@ -63,24 +64,29 @@ test('report routes and stage 2-5 regression routes stay alive', async () => {
     const clientHook = await fetch(`${base}/telegram/client_bot/webhook`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: { text: '/start', chat: { id: 1 }, from: { id: 1 } } }) });
     const masterHook = await fetch(`${base}/telegram/master_bot/webhook`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: { text: '/start', chat: { id: 2 }, from: { id: 2 } } }) });
     const integrationHook = await fetch(`${base}/telegram/integration_bot/webhook`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: { text: '/start', chat: { id: 3 }, from: { id: 3 } } }) });
-    const summary = await fetch(`${base}/api/reports/summary?period=weekly`);
-    const snapshotCreate = await fetch(`${base}/api/reports/snapshots`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ period: 'weekly' }) });
-    const snapshots = await fetch(`${base}/api/reports/snapshots`);
+    const summaryDenied = await fetch(`${base}/api/reports/summary?period=weekly`);
+    const summary = await fetch(`${base}/api/reports/summary?period=7d&admin_id=2`);
+    const snapshotCreate = await fetch(`${base}/api/reports/snapshots?admin_id=2`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ period: '7d' }) });
+    const snapshots = await fetch(`${base}/api/reports/snapshots?admin_id=2`);
+    const exported = await fetch(`${base}/api/reports/export?admin_id=2&reportType=summary&period=7d`);
 
     assert.equal(health.status, 200);
     assert.equal(clientHook.status, 200);
     assert.equal(masterHook.status, 200);
     assert.equal(integrationHook.status, 200);
+    assert.equal(summaryDenied.status, 403);
     assert.equal(summary.status, 200);
     assert.equal(snapshotCreate.status, 201);
     assert.equal(snapshots.status, 200);
+    assert.equal(exported.status, 200);
   } finally {
     await new Promise((resolve) => server.close(resolve));
     delete process.env.MASTER_BOT_ADMIN_IDS;
+    delete process.env.INTERNAL_ADMIN_WHITELIST;
   }
 });
 
-test('manager/admin can use report bot hooks while master cannot', async () => {
+test('only admin can use report bot hooks while master/manager cannot', async () => {
   db.resetStore();
   process.env.MASTER_BOT_ADMIN_IDS = '778';
   db.createStaffUser({ telegramId: '777', fullName: 'M', role: 'manager' });
@@ -91,6 +97,6 @@ test('manager/admin can use report bot hooks while master cannot', async () => {
   delete process.env.MASTER_BOT_ADMIN_IDS;
 
   assert.equal(denied.ok, false);
-  assert.equal(allowedManager.ok, true);
+  assert.equal(allowedManager.ok, false);
   assert.equal(allowedAdmin.ok, true);
 });
