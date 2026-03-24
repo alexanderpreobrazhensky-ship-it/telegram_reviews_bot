@@ -1,33 +1,32 @@
 # Operations
 
-## Recommended smoke checks after deploy
+## Recommended production checks
 1. `GET /health`
 2. `GET /health/db`
 3. `GET /health/max`
-4. Telegram master bot: `/start` -> every menu button
-5. MAX master bot: `/start` -> every menu button
-6. Create one request and verify: take in progress, processed/substatus, in service, complete
-7. Trigger legacy callback on an old card and verify friendly refresh UX
-8. Trigger `/diagnostics` and `/logs` as admin
-9. Verify one `waiting_decision` and one `consulted` task exist in scheduler persistence
-10. Confirm archive contains `spam`, `rejected`, and `completed`
-11. Trigger `/ai_status` and verify resolved provider/model and env-source lines are present
-12. Trigger `/ai_diagnostics` and ensure secrets are masked and legacy env usage is visible when configured
+4. `GET /internal/diagnostics` (authorized)
+5. Telegram master bot: `/start`, пройти всё меню.
+6. MAX master bot: `/start`, пройти всё меню.
+7. Проверить навигацию `Назад` / `В меню` в menu/input режимах.
+8. Создать заявку и пройти card actions.
+9. Проверить архив (spam/rejected/completed).
+10. Проверить follow-up visibility (`waiting_decision`, `consulted`).
+11. Проверить `/logs` и `/internal/logs`.
+12. Проверить AI status/diagnostics/switch/logs как admin.
+13. Если email intake enabled: проверить IMAP состояние, folder, last poll, duplicates/parse counters.
 
-## Operator notes
-- Archived requests are read-only from the bot UI.
-- `error` indicates outbound clarification failure and should be investigated through logs.
-- Diagnostics and logs are admin-only.
+## Master operator notes
+- `error` обычно означает проблему outbound доставки клиенту.
+- Archived заявки не должны менять статус.
+- Для `needs_review` (email intake) требуется ручная валидация карточки и payload.
 
-## AI operations (admin)
-Master bot has admin-only AI control plane:
-- `AI Статус` (`/ai_status`)
-- `AI Диагностика` (`/ai_diagnostics`)
-- `AI Переключение` (`/ai_switch provider:<...> model:<...> fallbackProvider:<...> fallbackModel:<...>`)
-- `AI Логи` (`/ai_logs ...`)
+## AI control-plane operations
+- `AI Статус` / `/ai_status`
+- `AI Диагностика` / `/ai_diagnostics`
+- `AI Переключение` / `/ai_switch ...`
+- `AI Логи` / `/ai_logs ...`
 
-## AI stage-1 operational policy
-- Keep `AI_BUSINESS_USAGE_ENABLED=false`.
-- Prefer `AI_PROVIDER=proxy` + DeepSeek model.
-- Allow `deepseek` as direct provider for diagnostics/switching when needed.
-- OpenAI/Gemini env presence is tolerated for compatibility but not required for stage-1 operations.
+## Policy
+- Не заявлять «AI исправлен», если диагностика всё ещё показывает mismatch/failure.
+- Отдельно трактовать `CONFIG_INVALID` и provider connectivity failures.
+- Единый audit источник: `audit/MASTER_AUDIT.md`.

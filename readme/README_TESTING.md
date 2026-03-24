@@ -1,22 +1,31 @@
 # Testing
 
-## Primary suite
+## Primary automated suite
 ```bash
 npm test
 ```
 
-## Coverage focus
-- master-bot menu routing and callback handling
-- request card actions and state transitions
-- legacy callback compatibility
-- SQLite persistence and follow-up tasks
-- Telegram and MAX webhook behavior
-- diagnostics/log masking
-- AI-ready config loading without runtime enablement
+## Focus areas
+- master-bot menu/actions/navigation
+- request status/substatus transitions
+- archive immutability and legacy callback compatibility
+- Telegram/MAX webhook regressions
+- SQLite persistence + scheduler follow-up
+- diagnostics/log visibility + masking
+- AI control plane behavior (status, diagnostics, runtime switch, logs)
+- internal routes (`/internal/requests`, `/internal/export`, `/internal/diagnostics`, `/internal/logs`)
 
+## AI-specific checks (must run)
+1. Valid proxy-only config path.
+2. Invalid runtime override path.
+3. Config mismatch detection.
+4. Fallback behavior path (if configured).
+5. Status vs diagnostics consistency.
+6. Logs consistency (final diagnostics verdict, provider attempt/result).
 
-## AI Stage 1 tests
-- Config parsing for AI env defaults and overrides.
-- AI runtime settings override and validation tests.
-- AI service fallback and business-usage-disabled behavior tests.
-- Master bot admin-only AI commands tests.
+## Manual smoke additions
+- `/start` + full main menu traversal in master bot.
+- `Назад`/`В меню` в interactive states.
+- Diagnostics short/detailed/rerun.
+- Email intake diagnostics (when enabled).
+- README ↔ code ↔ audit consistency pass.

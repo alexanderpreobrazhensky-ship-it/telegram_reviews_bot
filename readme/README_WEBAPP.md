@@ -1,16 +1,25 @@
 # WebApp
 
-## Canonical frontend files
+## Canonical files
 - `public/index.html`
 - `public/webapp.js`
 - `public/styles.css`
 
-## Important constraints
-- Do not rely on `review.html` for runtime changes.
-- Phone input/storage rule remains strict: exactly 10 digits without `+7/8`.
-- Current backend compatibility assumes Node-first APIs under `/api/client/requests/*`.
+## Routes
+- `/`
+- `/requests`
+- `/recommendations`
+- `/forms/service-request`
+- `/forms/parts-request`
+- `/forms/consultation`
+- `/forms/warranty-request`
+- `/forms/data-change-request`
 
-## Channel identities
-- Telegram source keeps `telegramId` when present.
-- MAX source keeps `maxId` when present.
-- These IDs are later reused for safe outbound clarification routing.
+## Constraints
+- `app.js` + Node runtime остаются primary execution path.
+- `review.html` и `public/index.html` не используются как место для изменений этой задачи.
+- Phone validation остаётся строгой: ровно 10 цифр.
+
+## Channel context
+WebApp payload может содержать Telegram/MAX identity;
+дальше эти идентификаторы используются master-ботом для безопасного outbound маршрута.

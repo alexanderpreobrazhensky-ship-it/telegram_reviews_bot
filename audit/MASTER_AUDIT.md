@@ -1,73 +1,135 @@
 # MASTER_AUDIT
 
-`audit/MASTER_AUDIT.md` is the single source of truth for repository audit information.
-Do not recreate split audit files.
+`audit/MASTER_AUDIT.md` — единственный актуальный audit source of truth в репозитории.
 
-## Architecture
-- Node-first runtime rooted at `app.js` and `src/server/index.js`.
-- Shared server hosts WebApp, Telegram webhooks, MAX webhooks, internal admin routes, and scheduler bootstrap.
-- MAX remains embedded in the same project; no separate BotHost service.
-- AI layer exists as infrastructure in `src/infrastructure/ai/` and uses normalized config from `src/infrastructure/config/index.js`.
+## 1) Executive summary
+- Node-first архитектура подтверждена: runtime строится вокруг `app.js` и `src/server/index.js`.
+- Master-bot flow и status model подтверждены, включая архивную модель через `archived=true`.
+- Диагностика расширена: runtime/db/channels/webapp/internal/email/workflow + отдельный AI блок.
+- README-контур синхронизирован с кодом и текущей эксплуатационной моделью.
+- AI проблема не скрывается: диагностика и runtime override отражаются отдельно и прозрачно.
 
-## Runtime
-- Single-process Node runtime.
-- Master-bot menu is inline callback-based with stable `menu:*` callback ids.
-- Request-card actions are handled in `src/interfaces/master_bot/index.js` and validated through centralized transition rules.
+## 2) Runtime reality
+- Единый Node runtime обслуживает HTTP, webhooks, internal routes, scheduler.
+- Health endpoints: `/health`, `/health/db`, `/health/max`.
+- Scheduler persisted: follow-up задачи и retries живут в SQLite tasks.
+- Internal routes присутствуют: `/internal/requests`, `/internal/export`, `/internal/diagnostics`, `/internal/logs`.
 
-## Env
-- Core env is loaded in `src/infrastructure/config/index.js`.
-- AI env has canonical `AI_*` contract with Railway legacy compatibility mapping.
-- Canonical priority is enforced: canonical `AI_*` -> shared legacy -> `CLIENT_*` legacy -> defaults.
-- Diagnostics mask secrets and expose readiness plus source-resolution metadata, including `legacy detected/ignored/used`.
+## 3) Bot reality
+- Master bot main menu: Новые заявки, В работе, Архив, Поиск, Quality Cases, Инструкция, Диагностика, Логи, Доступы, AI (по ролям).
+- Карточка заявки: Взять в работу, Запросить данные, Обработана, В сервисе, Завершить, Комментарий, Подробнее.
+- Legacy callback compatibility работает через map/refresh.
+- Telegram и MAX используют единый flow/status model.
 
-## Persistence
-- SQLite is canonical.
-- Requests store lifecycle fields for assignment, archive, follow-up, completion, outbound errors, and rejection reason.
-- `request_events` is the operational audit trail.
-- `tasks` persists scheduler work for feedback and follow-up.
+## 4) WebApp reality
+- Production webapp контур: `public/index.html`, `public/webapp.js`, `public/styles.css`.
+- Формы доступны через `/forms/*` маршруты.
+- Phone validation policy (10 digits) остаётся действующей.
+- `review.html` не рассматривается как production runtime source.
 
-## WebApp
-- Production shell stays in `public/index.html` and `public/webapp.js`.
-- Phone rule remains 10 digits without `+7/8`.
-- `review.html` and `public/index.html` are outside this modernization scope for direct edits.
+## 5) Persistence reality
+- SQLite — canonical persistence.
+- request lifecycle fields покрывают assignment/substatus/archive/follow-up/error/rejection.
+- `request_events` ведёт операционный trail.
+- `tasks` хранит follow-up и retry сценарии.
+- runtime info возвращает path/init/migration metadata.
 
-## Telegram
-- Telegram client, master, and integration bots remain supported.
-- Integration bot is still Telegram-only.
-- Integration bot now uses a button-first operator UX with reply keyboard sections and inline event actions while preserving slash-command fallback.
-- Integration bot selfcheck covers token presence, SQLite/file DB access, event-store readability, scheduler persistence visibility, retry-path availability, and config audit warnings.
-- Telegram source requests route clarification back to Telegram first.
+## 6) Diagnostics reality
+Общая диагностика покрывает:
+- Runtime/health/status routes
+- DB path/readiness/schema/migration hints
+- Telegram/MAX readiness
+- WebApp/internal routes visibility
+- Email intake diagnostics (config, IMAP, folder, poll, dedupe/parse counters)
+- Workflow visibility (waiting_decision/consulted follow-up)
 
-## MAX
-- MAX client/master webhooks remain in the same runtime.
-- MAX source requests route clarification back to MAX first.
-- Fallback to Telegram is allowed only when a real Telegram identity exists.
+UX поддерживает:
+- краткий статус
+- подробный статус
+- обновить/прогнать проверку
 
-## Security
-- Admin bootstrap is env-driven.
-- Persistent role grants/revocations happen through bot access flow.
-- Diagnostics/logs are admin-only.
-- Secrets are masked in diagnostics.
-- Email is not used as an outbound clarification channel.
+## 7) AI diagnostics block (separate)
+AI вынесен в отдельный блок, где отражаются:
+- Config validation status
+- Primary provider status
+- Fallback status
+- Runtime override present/valid
+- Effective provider/model + resolution sources
+- Final diagnostics verdict:
+  - `CONFIG_INVALID`
+  - `PRIMARY_PROVIDER_FAILED`
+  - `FALLBACK_PROVIDER_FAILED`
+  - `DIAGNOSTICS_OK`
 
-## Testing
-- Node test suite covers state transitions, follow-up scheduler behavior, routing, diagnostics/logging, and regression flows.
-- Post-deploy smoke should explicitly exercise both Telegram and MAX master menus plus legacy callbacks.
-- AI env compatibility is covered by node tests validating legacy mapping and canonical override priority.
+## 8) Email intake block
+Если email intake включён:
+- IMAP enabled/config state
+- connection/folder status
+- last poll and result
+- processed/duplicate/parse counters
+- last processed email marker
+- T-Business detection readiness/priority
+- payload flags (`existing_client`, `needs_review`, `match_basis`, `match_confidence`)
 
-## Deploy risks
-- SQLite file permissions and persistence mount quality remain critical.
-- Real provider delivery still depends on valid bot tokens and network reachability.
-- Live MAX subscription health should still be verified after deployment.
+## 9) Status/workflow block
+Подтверждённая модель:
+- statuses: `new`, `in_progress`, `processed`, `in_service`, `completed`, `error`
+- substatuses: `recorded`, `consulted`, `spam`, `waiting_decision`, `rejected`
+- archive rules: `spam`/`rejected`/`completed` -> archived
+- waiting_decision requeue flow
+- consulted reminder flow
+- архивные заявки иммутабельны для статусных переходов в UI
 
-## External AI starter notes
-- AI is infrastructure-only right now.
-- Runtime request handling does not invoke AI providers.
-- Before enabling AI in production, add provider-specific rate limiting, audit logging, and user-facing fallback messaging.
+## 10) Security observations
+- Admin access bootstrap через env + persisted staff roles.
+- Internal routes защищаются allowlist-подходом.
+- Секреты маскируются в бот-диагностике и internal surfaces.
+- Outbound клиентская коммуникация не использует email fallback.
 
-## AI Stage 1 (Infrastructure Only, DeepSeek-first)
-- Canonical AI envs: `AI_ENABLED`, `AI_BUSINESS_USAGE_ENABLED`, `AI_PROVIDER`, `AI_MODEL`, `AI_PROXY_URL`, `AI_PROXY_TOKEN`, `AI_TIMEOUT_MS`, `AI_ALLOWED_PROVIDERS`, `AI_DIAGNOSTICS_ENABLED`.
-- Defaults are DeepSeek-focused: provider `proxy`, model `deepseek-chat`, allowed providers `proxy,deepseek`, business usage `false`.
-- Legacy Railway aliases are supported only as fallback inputs when canonical keys are absent.
-- `CLIENT_FORCE_FALLBACK` and `FORCT_FALLBACK` are deprecated legacy flags and are ignored for runtime resolution.
-- Admin diagnostics include resolved provider/model/timeout source and explicit lists for legacy env keys: detected, ignored, and used.
+## 11) Testing coverage
+- Automated: `npm test` (master bot, status model, routing, persistence, AI infra, MAX/Telegram regressions и т.д.).
+- Added focus: обновлённые инструкция и диагностика в master bot.
+- Documentation consistency pass: README + audit сверены с runtime reality.
+
+## 12) Known issues
+- AI business usage может быть intentionally OFF при включённой AI infrastructure.
+- Runtime override может присутствовать и быть invalid относительно provider/model rules.
+- Internal endpoints опираются на allowlist, а не на полнофункциональный IAM.
+
+## 13) Remaining risks
+- Риск неверной интерпретации AI состояния при смешении config-invalid и provider-failed (смягчено отдельными статусами).
+- Риск эксплуатационных проблем при неперсистентном/небезопасном пути SQLite.
+- Риск IMAP деградации (folder/connection failures) при включённом email intake.
+
+## 14) Recommended next checks
+1. Регулярно прогонять `/diagnostics`, `/ai_diagnostics`, `/internal/diagnostics` после деплоя.
+2. Ввести алерты на `CONFIG_INVALID` и provider failures отдельно.
+3. Добавить периодическую сверку email-intake counters и duplicate spikes.
+4. Зафиксировать runbook для needs_review/T-Business triage.
+5. Усилить internal IAM, если проект выходит за текущий trusted perimeter.
+
+---
+
+## AI issue deep-dive (required explicit block)
+
+### Что подтверждено
+- AI diagnostics/runtime override/config resolution существуют и отображаются в admin командах.
+- Доступны отдельные статусы config, primary provider, fallback provider и финальный verdict.
+- Legacy env detection/ignored/used отражается в AI status/diagnostics.
+
+### Что исправлено
+- AI блок явно отделён от общей диагностики.
+- Вынесены отдельные поля runtime override present/valid и effective provider/model.
+- Документация приведена к модели «не смешивать config-invalid и provider-failed».
+
+### Что не исправлено / остаётся открытым
+- Нельзя гарантировать `DIAGNOSTICS_OK` без валидного окружения и доступности внешних AI провайдеров.
+- При некорректных env/runtime override проблема остаётся эксплуатационной и должна лечиться конфигурацией.
+
+### Как проверялось
+- Кодовый аудит master-bot diagnostics + AI diagnostics/state resolution.
+- Проверка связки config normalization -> runtime settings -> diagnostics reporting.
+- Прогон автоматических тестов (`npm test`) с AI/infra сценариями.
+
+### Текущий статус
+- **partially confirmed**: архитектурно разделение и прозрачность статусов подтверждены; live provider health зависит от внешнего окружения и runtime config.

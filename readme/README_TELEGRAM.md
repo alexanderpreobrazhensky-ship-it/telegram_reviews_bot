@@ -1,25 +1,24 @@
 # Telegram
 
-## Active routes
-- `/telegram/client_bot/webhook`
-- `/telegram/master_bot/webhook`
-- `/telegram/integration_bot/webhook`
+## Active webhook routes
+- `POST /telegram/client_bot/webhook`
+- `POST /telegram/master_bot/webhook`
+- `POST /telegram/integration_bot/webhook`
 
 ## Master bot
-- Uses inline callback main menu.
-- Valid menu callbacks do not fall through to `/help` fallback.
-- Legacy request-card callbacks are compatibility-mapped and refresh the card UX.
+- Inline callback main menu.
+- Поддерживаются: новые заявки, в работе, архив, поиск, quality cases, инструкция, диагностика, логи, доступы, AI (admin).
+- Карточка заявки: взять в работу, запросить данные, обработана(+substatus), в сервисе, завершить, комментарий, подробнее.
+- Legacy callbacks маппятся в актуальные действия и не ломают UX.
 
-## Client clarification routing
-- Telegram-source requests send outbound clarification back to Telegram first.
-- Fallback to MAX is allowed only if a real `maxId` exists.
+## Navigation
+- `⬅️ Назад` возвращает на предыдущий экран (включая AI submenu/input states).
+- `🏠 В меню` возвращает в корневое меню.
 
 ## Integration bot
-- Remains Telegram-only by design.
-- Webhook route: `POST /telegram/integration_bot/webhook`.
-- Primary UX is button-first: reply keyboard sections `Все события`, `Ошибки`, `В ожидании`, `Статистика`, `Инструкция`, `Самодиагностика`.
-- Slash commands remain supported as fallback: `/start`, `/help`, `/selfcheck` (`/diag`), `/events`, `/failed`, `/pending`, `/stats`, `/event <id>`, `/retry <id>`, `/ignore <id>`.
-- Event cards expose inline actions `Подробнее`, `Повторить`, `Игнорировать`.
-- `/help` and the `Инструкция` button return the same operator-facing usage guide in Russian.
-- `/selfcheck` and `Самодиагностика` run real checks for token presence, SQLite/file DB access, integration event store readability, route/dependency availability, scheduler persistence access, event counters, and obvious config issues.
-- Empty stores are handled explicitly: bot returns human-readable empty states instead of silent failures.
+Telegram-only operator bot.
+Поддерживает button-first режим + slash command fallback.
+
+## Clarification routing
+Для заявок из Telegram первичный outbound канал — Telegram;
+fallback в MAX допускается только при подтверждённом `maxId`.

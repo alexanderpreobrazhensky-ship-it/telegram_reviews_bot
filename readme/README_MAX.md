@@ -1,18 +1,25 @@
 # MAX
 
-## Active routes
-- `/max/client_bot/webhook`
-- `/max/master_bot/webhook`
+## Active webhook routes
+- `POST /max/client_bot/webhook`
+- `POST /max/master_bot/webhook`
 
-## Master bot behavior
-- Shares the same request state machine and menu callback logic as Telegram.
-- MAX main menu uses the same stable callback ids.
+## Runtime model
+MAX работает внутри того же Node runtime, что и Telegram/WebApp.
+Отдельный MAX BotHost/проект не используется.
+
+## Master bot behavior in MAX
+- Та же status/substatus модель, что и в Telegram.
+- То же callback-меню и flow карточек заявок.
+- AI/diagnostics/admin поведение единообразно с Telegram (в рамках ролей).
 
 ## Clarification routing
-- MAX-source requests send outbound clarification to MAX first.
-- Fallback to Telegram is allowed only if a real `telegramId` exists.
-- Email is never used as a fallback transport.
+Для заявок из MAX первичный outbound канал — MAX;
+fallback в Telegram допускается только при подтверждённом `telegramId`.
+Email не используется как outbound fallback.
 
-## Constraints
-- No separate MAX BotHost project.
-- No MAX integration bot.
+## MAX readiness checks
+Используются `/health/max` и master diagnostics:
+- enabled/disabled state
+- token/secret readiness
+- webhook route availability

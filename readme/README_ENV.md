@@ -2,7 +2,7 @@
 
 ## Required
 - `WEBAPP_URL`
-- `DB_SQLITE_PATH` (preferred)
+- `DB_SQLITE_PATH` (предпочтительно) или legacy `DB_FILE_PATH`
 
 ## Telegram
 - `TELEGRAM_CLIENT_BOT_TOKEN`
@@ -32,27 +32,22 @@
 - `SCHEDULER_MAX_ATTEMPTS`
 - `SCHEDULER_STUCK_TIMEOUT_MS`
 - `FEEDBACK_REQUEST_DELAY_MINUTES`
-- `REQUEST_FOLLOWUP_INTERVAL_DAYS`
 
 ## Email intake (IMAP / T-Business)
 - `EMAIL_INTAKE_ENABLED`
 - `EMAIL_INTAKE_PROVIDER` (`imap`)
-- `EMAIL_IMAP_HOST`
-- `EMAIL_IMAP_PORT`
-- `EMAIL_IMAP_SECURE`
-- `EMAIL_IMAP_USER`
-- `EMAIL_IMAP_PASSWORD`
-- `EMAIL_IMAP_FOLDER` (set to `Т-БАНК ЗАЯВКИ`)
+- `EMAIL_IMAP_HOST` / `EMAIL_IMAP_PORT` / `EMAIL_IMAP_SECURE`
+- `EMAIL_IMAP_USER` / `EMAIL_IMAP_PASSWORD` / `EMAIL_IMAP_FOLDER`
 - `EMAIL_POLL_INTERVAL_SECONDS`
 - `EMAIL_SOURCE_TBUSINESS_ENABLED`
-- `EMAIL_SOURCE_TBUSINESS_PRIORITY` (`high`)
+- `EMAIL_SOURCE_TBUSINESS_PRIORITY`
 - `EMAIL_ALLOW_ATTACHMENTS`
 - `EMAIL_PDF_PARSE_ENABLED`
 - `EMAIL_IDEMPOTENCY_ENABLED`
 - `EMAIL_MATCH_PHONE_ENABLED`
 - `EMAIL_MATCH_FIO_ENABLED`
 - `EMAIL_MATCH_VIN_ENABLED`
-- `EMAIL_MATCH_EMAIL_ENABLED` (default `false`)
+- `EMAIL_MATCH_EMAIL_ENABLED`
 - `EMAIL_NEEDS_REVIEW_ON_UNCERTAIN_MATCH`
 - `EMAIL_AUTO_CREATE_CLIENT_IF_NO_MATCH`
 - `EMAIL_SAVE_RAW_MESSAGE`
@@ -61,58 +56,45 @@
 - `EMAIL_AI_ENRICHMENT_ENABLED`
 - `EMAIL_AI_SUMMARY_ENABLED`
 - `EMAIL_AI_CLASSIFICATION_ENABLED`
-- `EMAIL_AI_BUSINESS_USAGE_SCOPE` (`email_intake`)
+- `EMAIL_AI_BUSINESS_USAGE_SCOPE` (обычно `email_intake`)
 
-## AI canonical env contract (Stage 1, DeepSeek-focused)
-These are canonical and must be used as source of truth:
-- `AI_ENABLED=true`
-- `AI_BUSINESS_USAGE_ENABLED=false`
-- `AI_PROVIDER=proxy`
-- `AI_MODEL=deepseek-chat`
-- `AI_PROXY_URL=`
-- `AI_PROXY_TOKEN=`
-- `AI_TIMEOUT_MS=8000`
-- `AI_ALLOWED_PROVIDERS=proxy,deepseek`
-- `AI_DIAGNOSTICS_ENABLED=true`
+## AI canonical contract
+- `AI_ENABLED`
+- `AI_BUSINESS_USAGE_ENABLED`
+- `AI_PROVIDER`
+- `AI_MODEL`
+- `AI_FALLBACK_PROVIDER`
+- `AI_FALLBACK_MODEL`
+- `AI_PROXY_URL`
+- `AI_PROXY_TOKEN`
+- `AI_TIMEOUT_MS`
+- `AI_ALLOWED_PROVIDERS`
+- `AI_DIAGNOSTICS_ENABLED`
+- `AI_OPENAI_API_KEY`
+- `AI_DEEPSEEK_API_KEY`
+- `AI_DEEPSEEK_BASE_URL`
+- `AI_GEMINI_API_KEY`
 
-Additional compatibility env (non-canonical but supported):
-- `AI_FALLBACK_PROVIDER=deepseek`
-- `AI_FALLBACK_MODEL=deepseek-chat`
-- `AI_DEEPSEEK_API_KEY=`
-- `AI_DEEPSEEK_BASE_URL=https://api.deepseek.com/chat/completions`
-- `AI_OPENAI_API_KEY=`
-- `AI_GEMINI_API_KEY=`
+## Legacy AI aliases (supported as compatibility)
+Canonical has higher priority than legacy keys.
+- `AI_ENGINE`
+- `AI_TIMEOUT_SECONDS`
+- `CLIENT_AI_TIMEOUT_SECONDS`
+- `DEEPSEEK_API_KEY`
+- `DEEPSEEK_BASE_URL`
+- `DEEPSEEK_MODEL`
+- `CLIENT_DEEPSEEK_API_KEY`
+- `CLIENT_DEEPSEEK_BASE_URL`
+- `CLIENT_DEEPSEEK_MODEL`
+- `CLIENT_FORCE_FALLBACK`
+- `FORCT_FALLBACK`
+- `OPENAI_API_KEY`
+- `GEMINI_API_KEY`
+- `AI_API_KEY`
 
-## Legacy Railway compatibility (old -> new)
-Priority order (hard): canonical `AI_*` -> shared legacy -> `CLIENT_*` legacy -> defaults.
-If canonical env is configured for a key, corresponding legacy aliases are detected and ignored (they are no longer source of truth).
-
-| Legacy env | Canonical/internal target | Notes |
-|---|---|---|
-| `AI_ENGINE` | `AI_PROVIDER` | shared legacy alias |
-| `AI_TIMEOUT_SECONDS` | `AI_TIMEOUT_MS` | converted seconds -> milliseconds |
-| `CLIENT_AI_TIMEOUT_SECONDS` | `AI_TIMEOUT_MS` | fallback alias after shared legacy |
-| `DEEPSEEK_MODEL` | `AI_MODEL` | shared legacy alias |
-| `CLIENT_DEEPSEEK_MODEL` | `AI_MODEL` | fallback alias |
-| `DEEPSEEK_BASE_URL` | `AI_PROXY_URL` + `AI_DEEPSEEK_BASE_URL` | proxy-first compatibility + deepseek direct endpoint compatibility |
-| `CLIENT_DEEPSEEK_BASE_URL` | `AI_PROXY_URL` + `AI_DEEPSEEK_BASE_URL` | fallback alias |
-| `DEEPSEEK_API_KEY` | `AI_PROXY_TOKEN` + `AI_DEEPSEEK_API_KEY` | proxy token compatibility + deepseek direct compatibility |
-| `CLIENT_DEEPSEEK_API_KEY` | `AI_PROXY_TOKEN` + `AI_DEEPSEEK_API_KEY` | fallback alias |
-| `DEEPSEEK_ALLOW_REQUESTS_FALLBACK` | diagnostics-only legacy signal | detected as legacy, ignored for runtime resolution |
-| `CLIENT_FORCE_FALLBACK` | deprecated legacy flag | detected as legacy, ignored for runtime resolution |
-| `FORCT_FALLBACK` | deprecated legacy typo | detected as legacy typo, ignored for runtime resolution |
-| `OPENAI_API_KEY` | `AI_OPENAI_API_KEY` | compatibility only |
-| `GEMINI_API_KEY` | `AI_GEMINI_API_KEY` | compatibility placeholder only |
-
-## Legacy aliases still accepted
-- `DB_FILE_PATH`
-- `INTERNAL_ADMIN_WHITELIST_IDS`
-- `WEBAPP_TELEGRAM_CHANNEL_LINK`
-- `AI_API_KEY` (mapped as legacy alias for `AI_OPENAI_API_KEY`)
-
-## AI runtime visibility
-- AI Status / diagnostics include three explicit lists:
-  - `legacy env detected`
-  - `legacy env ignored`
-  - `legacy env used`
-- Internal diagnostics include effective provider/model, resolution source, and ignored legacy keys.
+## Runtime visibility
+`/internal/diagnostics`, `/ai_status`, `/ai_diagnostics` показывают:
+- effective provider/model
+- configured vs runtime override
+- source of resolution
+- legacy detected/ignored/used
