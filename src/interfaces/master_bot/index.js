@@ -5,8 +5,11 @@ const { sendChannelMessage, answerChannelCallback } = require('../../infrastruct
 const { extractIncomingEvent } = require('../shared/channelAdapters');
 const { validateMaxWebhookRequest } = require('../shared/maxSecurity');
 const { REQUEST_STATUSES, REQUEST_SUBSTATUSES } = require('../../core/shared/requestValidation');
+const { resolveAiConfig } = require('../../infrastructure/ai/resolveAiConfig');
 
 const sessions = new Map();
+const NAV_BACK = 'nav:back';
+const NAV_MENU = 'nav:menu';
 const STATUS_LABELS = {
   new: 'Новая',
   in_progress: 'В работе',
@@ -52,7 +55,8 @@ function buildProcessedSubstatusKeyboard(requestId) {
       [{ text: 'Проконсультирован', callback_data: `req:${requestId}:processed:consulted` }],
       [{ text: 'Спам', callback_data: `req:${requestId}:processed:spam` }],
       [{ text: 'Ждёт решения', callback_data: `req:${requestId}:processed:waiting_decision` }],
-      [{ text: 'Отказ', callback_data: `req:${requestId}:processed:rejected` }]
+      [{ text: 'Отказ', callback_data: `req:${requestId}:processed:rejected` }],
+      [{ text: '⬅️ Назад', callback_data: `card:${requestId}` }, { text: '🏠 В меню', callback_data: NAV_MENU }]
     ]
   };
 }
@@ -71,6 +75,7 @@ function buildRequestActionsKeyboard(requestId, card = null, actor = null) {
   if (archived || completed) {
     const archivedRows = [[{ text: 'Подробнее', callback_data: `card:${requestId}` }, { text: 'История', callback_data: `history:${requestId}` }]];
     if (isAdmin(actor)) archivedRows.push([{ text: 'Логи', callback_data: `logs:${requestId}` }]);
+    archivedRows.push([{ text: '⬅️ Назад', callback_data: NAV_BACK }, { text: '🏠 В меню', callback_data: NAV_MENU }]);
     return { inline_keyboard: archivedRows };
   }
   return {
@@ -89,7 +94,8 @@ function buildRequestActionsKeyboard(requestId, card = null, actor = null) {
       ],
       [
         { text: 'Подробнее', callback_data: `card:${requestId}` }
-      ]
+      ],
+      [{ text: '⬅️ Назад', callback_data: NAV_BACK }, { text: '🏠 В меню', callback_data: NAV_MENU }]
     ]
   };
 }
@@ -357,27 +363,45 @@ function buildAiMenuKeyboard() {
       [{ text: 'AI Статус', callback_data: 'ai:status' }],
       [{ text: 'AI Диагностика', callback_data: 'ai:diagnostics' }],
       [{ text: 'AI Переключение', callback_data: 'ai:switch' }],
-      [{ text: 'AI Логи', callback_data: 'ai:logs' }]
+      [{ text: 'AI Логи', callback_data: 'ai:logs' }],
+      [{ text: '⬅️ Назад', callback_data: NAV_BACK }, { text: '🏠 В меню', callback_data: NAV_MENU }]
     ]
   };
+}
+
+function withNavigationRows(rows = [], { includeBack = true, includeMenu = true } = {}) {
+  const keyboard = Array.isArray(rows) ? [...rows] : [];
+  const navRow = [];
+  if (includeBack) navRow.push({ text: '⬅️ Назад', callback_data: NAV_BACK });
+  if (includeMenu) navRow.push({ text: '🏠 В меню', callback_data: NAV_MENU });
+  if (navRow.length) keyboard.push(navRow);
+  return { inline_keyboard: keyboard };
+}
+
+function updateSession(sessionKey, patch = {}) {
+  const current = sessions.get(sessionKey) || {};
+  sessions.set(sessionKey, { ...current, ...patch });
+  return sessions.get(sessionKey);
 }
 
 function buildAiStatusText({ aiInfrastructure, config }) {
   if (!aiInfrastructure) return 'AI infrastructure not initialized';
   const runtime = aiInfrastructure.runtimeSettings.get();
   const diagnostics = aiInfrastructure.runtimeSettings.getDiagnosticsState() || {};
-  const fallbackConfigured = Boolean(runtime.fallbackConfigured && runtime.activeFallbackProvider && runtime.activeFallbackModel);
+  const resolved = resolveAiConfig({ configAi: config.ai || {}, runtime, diagnostics });
+  const fallbackConfigured = Boolean(resolved.effectiveFallbackEnabled);
   return [
     'AI статус:',
     `AI enabled: ${runtime.aiEnabledRuntime ? 'ON' : 'OFF'} (env=${config.ai?.enabled ? 'ON' : 'OFF'})`,
     `AI business usage enabled: ${runtime.aiBusinessUsageEnabledRuntime ? 'ON' : 'OFF'} (env=${config.ai?.businessUsageEnabled ? 'ON' : 'OFF'})`,
-    `Configured provider/model: ${(config.ai?.provider || '-')}/${(config.ai?.model || '-')}`,
-    `Configured source: provider=${config.ai?.sources?.AI_PROVIDER?.source || 'default'} model=${config.ai?.sources?.AI_MODEL?.source || 'default'}`,
-    `Effective provider/model: ${runtime.activeProvider}/${runtime.activeModel}`,
-    `Fallback configured: ${fallbackConfigured ? 'yes' : 'no'}`,
-    `Fallback provider/model: ${fallbackConfigured ? `${runtime.activeFallbackProvider}/${runtime.activeFallbackModel}` : '-'}`,
-    `Fallback source: provider=${config.ai?.sources?.AI_FALLBACK_PROVIDER?.source || 'default'} model=${config.ai?.sources?.AI_FALLBACK_MODEL?.source || 'default'}`,
-    `Diagnostics target provider/model: ${(diagnostics.targetProvider || runtime.activeProvider)}/${(diagnostics.targetModel || runtime.activeModel)}`,
+    `Configured provider/model: ${resolved.configuredProvider || '-'}/${resolved.configuredModel || '-'}`,
+    `Configured source: provider=${resolved.sources.provider} model=${resolved.sources.model}`,
+    `Effective provider/model: ${resolved.effectiveProvider}/${resolved.effectiveModel}`,
+    `Configured fallback: ${resolved.configuredFallbackEnabled ? 'yes' : 'no'}`,
+    `Effective fallback: ${fallbackConfigured ? 'yes' : 'no'}`,
+    `Fallback provider/model: ${fallbackConfigured ? `${resolved.effectiveFallbackProvider}/${resolved.effectiveFallbackModel}` : '-'}`,
+    `Fallback source: provider=${resolved.sources.fallbackProvider} model=${resolved.sources.fallbackModel}`,
+    `Diagnostics target provider/model: ${resolved.diagnosticsTargetProvider}/${resolved.diagnosticsTargetModel}`,
     `Allowed providers: ${(runtime.allowedProviders || []).join(', ') || '-'}`,
     `Timeout: ${config.ai?.timeoutMs || 0}ms (source=${config.ai?.sources?.AI_TIMEOUT_MS?.source || 'default'})`,
     `Proxy configured: ${config.ai?.proxyUrl && config.ai?.proxyToken ? 'yes' : 'no'}`,
@@ -407,7 +431,8 @@ function parseAiSwitchCommand(text = '') {
   for (const part of parts.slice(1)) {
     const [key, ...rest] = part.split(':');
     if (!rest.length) continue;
-    payload[key] = rest.join(':');
+    const value = rest.join(':');
+    payload[key] = value === '-' ? '' : value;
   }
   return {
     activeProvider: payload.provider,
@@ -432,6 +457,7 @@ async function handleMenuAction({ action, actor, channel, token, recipientId, ma
   if (callbackId) await answerChannelCallback({ channel, token, callbackId, text: callbackText });
 
   if (action === 'menu:new_requests') {
+    updateSession(sessionKey, { screen: 'menu:new_requests', backAction: 'menu:root', step: null });
     const items = masterService.listRequestsByStatus('new');
     await respondWithMessage({ channel, token, recipientId, text: items.map(formatRequestLine).join('\n') || 'Нет новых заявок', extra: { reply_markup: buildMainMenuKeyboard(actor) } });
     for (const item of items.slice(0, 10)) {
@@ -441,6 +467,7 @@ async function handleMenuAction({ action, actor, channel, token, recipientId, ma
     return { ok: true, items, action };
   }
   if (action === 'menu:in_progress') {
+    updateSession(sessionKey, { screen: 'menu:in_progress', backAction: 'menu:root', step: null });
     const items = masterService.listActiveRequests();
     await respondWithMessage({ channel, token, recipientId, text: items.map(formatRequestLine).join('\n') || 'Нет заявок в работе', extra: { reply_markup: buildMainMenuKeyboard(actor) } });
     for (const item of items.slice(0, 10)) {
@@ -450,6 +477,7 @@ async function handleMenuAction({ action, actor, channel, token, recipientId, ma
     return { ok: true, items, action };
   }
   if (action === 'menu:archive') {
+    updateSession(sessionKey, { screen: 'menu:archive', backAction: 'menu:root', step: null });
     const items = masterService.listArchiveRequests();
     await respondWithMessage({ channel, token, recipientId, text: items.map(formatRequestLine).join('\n') || 'Архив пуст', extra: { reply_markup: buildMainMenuKeyboard(actor) } });
     for (const item of items.slice(0, 10)) {
@@ -459,31 +487,36 @@ async function handleMenuAction({ action, actor, channel, token, recipientId, ma
     return { ok: true, items, action };
   }
   if (action === 'menu:search') {
-    sessions.set(sessionKey, { step: 'search_query' });
-    return respondWithMessage({ channel, token, recipientId, text: 'Введите строку для поиска (ФИО, телефон, VIN или номер).', payload: { ok: true, action } });
+    updateSession(sessionKey, { screen: 'menu:search', backAction: 'menu:root', step: 'search_query' });
+    return respondWithMessage({ channel, token, recipientId, text: 'Введите строку для поиска (ФИО, телефон, VIN или номер).', payload: { ok: true, action }, extra: { reply_markup: withNavigationRows([], { includeBack: true, includeMenu: true }) } });
   }
   if (action === 'menu:quality_cases') {
+    updateSession(sessionKey, { screen: 'menu:quality_cases', backAction: 'menu:root', step: null });
     const items = masterService.listQualityCases();
-    return respondWithMessage({ channel, token, recipientId, text: qualityCasesText(items), payload: { ok: true, items, action }, extra: { reply_markup: buildMainMenuKeyboard(actor) } });
+    return respondWithMessage({ channel, token, recipientId, text: qualityCasesText(items), payload: { ok: true, items, action }, extra: { reply_markup: withNavigationRows(buildMainMenuKeyboard(actor).inline_keyboard, { includeBack: true, includeMenu: true }) } });
   }
   if (action === 'menu:instruction') {
-    return respondWithMessage({ channel, token, recipientId, text: helpText(channel), payload: { ok: true, action }, extra: { reply_markup: buildMainMenuKeyboard(actor) } });
+    updateSession(sessionKey, { screen: 'menu:instruction', backAction: 'menu:root', step: null });
+    return respondWithMessage({ channel, token, recipientId, text: helpText(channel), payload: { ok: true, action }, extra: { reply_markup: withNavigationRows([], { includeBack: true, includeMenu: true }) } });
   }
   if (action === 'menu:diagnostics') {
+    updateSession(sessionKey, { screen: 'menu:diagnostics', backAction: 'menu:root', step: null });
     if (!isAdmin(actor)) return respondWithMessage({ channel, token, recipientId, text: 'Недостаточно прав.', payload: { ok: false, error: 'ACCESS_DENIED', action } });
-    return respondWithMessage({ channel, token, recipientId, text: buildDiagnosticsText({ config, actor, channel, detailed: false, aiInfrastructure }), payload: { ok: true, action }, extra: { reply_markup: { inline_keyboard: [[{ text: 'обновить', callback_data: 'admin:diagnostics' }, { text: 'прогнать проверку', callback_data: 'admin:diagnostics' }], [{ text: 'краткий статус', callback_data: 'admin:diagnostics_short' }, { text: 'подробный статус', callback_data: 'admin:diagnostics_detailed' }]] } } });
+    return respondWithMessage({ channel, token, recipientId, text: buildDiagnosticsText({ config, actor, channel, detailed: false, aiInfrastructure }), payload: { ok: true, action }, extra: { reply_markup: withNavigationRows([[{ text: 'обновить', callback_data: 'admin:diagnostics' }, { text: 'прогнать проверку', callback_data: 'admin:diagnostics' }], [{ text: 'краткий статус', callback_data: 'admin:diagnostics_short' }, { text: 'подробный статус', callback_data: 'admin:diagnostics_detailed' }]], { includeBack: true, includeMenu: true }) } });
   }
   if (action === 'menu:logs') {
     if (!isAdmin(actor)) return respondWithMessage({ channel, token, recipientId, text: 'Недостаточно прав.', payload: { ok: false, error: 'ACCESS_DENIED', action } });
-    sessions.set(sessionKey, { step: 'logs_filter' });
-    return respondWithMessage({ channel, token, recipientId, text: 'Введите фильтр логов в формате request:<id> type:<type> bot:<bot> since:YYYY-MM-DD', payload: { ok: true, action } });
+    updateSession(sessionKey, { screen: 'menu:logs', backAction: 'menu:root', step: 'logs_filter' });
+    return respondWithMessage({ channel, token, recipientId, text: 'Введите фильтр логов в формате request:<id> type:<type> bot:<bot> since:YYYY-MM-DD', payload: { ok: true, action }, extra: { reply_markup: withNavigationRows([], { includeBack: true, includeMenu: true }) } });
   }
   if (action === 'menu:ai') {
     if (!isAdmin(actor)) return respondWithMessage({ channel, token, recipientId, text: 'Недостаточно прав.', payload: { ok: false, error: 'ACCESS_DENIED', action } });
+    updateSession(sessionKey, { screen: 'menu:ai', backAction: 'menu:root', step: null });
     return respondWithMessage({ channel, token, recipientId, text: 'AI control plane', payload: { ok: true, action }, extra: { reply_markup: buildAiMenuKeyboard() } });
   }
   if (action === 'menu:access') {
     if (!canManageAccess(actor)) return respondWithMessage({ channel, token, recipientId, text: 'Недостаточно прав.', payload: { ok: false, error: 'ACCESS_DENIED', action } });
+    updateSession(sessionKey, { screen: 'menu:access', backAction: 'menu:root', step: null });
     return respondWithMessage({ channel, token, recipientId, text: `Раздел доступов:
 /access_list
 /access_grant <${channel === 'max' ? 'maxId' : 'telegramId'}> <master|manager> [ФИО]
@@ -564,6 +597,21 @@ async function handleMasterWebhook({ body, config, headers = {}, rawHeaders = []
 
     if (event.callback?.id) {
       const data = String(event.callback.data || '');
+      if (data === NAV_MENU) {
+        sessions.delete(sessionKey);
+        await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: 'Главное меню' });
+        return respondWithMessage({ channel, token, recipientId, text: 'Главное меню', payload: { ok: true, action: 'menu:root' }, extra: { reply_markup: buildMainMenuKeyboard(actor) } });
+      }
+      if (data === NAV_BACK) {
+        const session = sessions.get(sessionKey) || {};
+        sessions.delete(sessionKey);
+        await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: 'Назад' });
+        const backAction = session.backAction || (session.screen && session.screen.startsWith('menu:ai') ? 'menu:ai' : 'menu:root');
+        if (backAction === 'menu:root') {
+          return respondWithMessage({ channel, token, recipientId, text: 'Главное меню', payload: { ok: true, action: 'menu:root' }, extra: { reply_markup: buildMainMenuKeyboard(actor) } });
+        }
+        return handleMenuAction({ action: backAction, actor, channel, token, recipientId, masterService, config, sessionKey, aiInfrastructure });
+      }
       if (data.startsWith('menu:')) {
         return handleMenuAction({ action: data, actor, channel, token, recipientId, masterService, config, sessionKey, callbackId: event.callback.id, aiInfrastructure });
       }
@@ -614,24 +662,68 @@ async function handleMasterWebhook({ body, config, headers = {}, rawHeaders = []
           return respondWithMessage({ channel, token, recipientId, text: 'AI infrastructure unavailable', payload: { ok: false, error: 'AI_INFRA_UNAVAILABLE' } });
         }
         if (data === 'ai:status') {
+          updateSession(sessionKey, { screen: 'menu:ai:status', backAction: 'menu:ai', step: null });
           await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: 'AI статус' });
           return respondWithMessage({ channel, token, recipientId, text: buildAiStatusText({ aiInfrastructure, config }), payload: { ok: true }, extra: { reply_markup: buildAiMenuKeyboard() } });
         }
         if (data === 'ai:diagnostics') {
+          updateSession(sessionKey, { screen: 'menu:ai:diagnostics', backAction: 'menu:ai', step: null });
           await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: 'AI диагностика...' });
           const result = await aiInfrastructure.runDiagnostics();
           return respondWithMessage({ channel, token, recipientId, text: `${result.ok ? '✅' : '❌'} ${result.probe.summary}
 provider=${result.probe.state.provider || '-'} model=${result.probe.state.model || '-'} fallback=${result.probe.state.fallbackUsed ? 'yes' : 'no'} duration=${result.probe.state.durationMs}ms`, payload: { ok: result.ok, diagnostics: result }, extra: { reply_markup: buildAiMenuKeyboard() } });
         }
         if (data === 'ai:switch') {
-          await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: 'Введите /ai_switch ...' });
-          sessions.set(sessionKey, { step: 'ai_switch' });
-          return respondWithMessage({ channel, token, recipientId, text: 'Формат: /ai_switch provider:<name> model:<name> fallbackProvider:<name> fallbackModel:<name>' });
+          updateSession(sessionKey, { screen: 'menu:ai:switch', backAction: 'menu:ai', step: null });
+          await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: 'AI переключение' });
+          return respondWithMessage({
+            channel,
+            token,
+            recipientId,
+            text: 'AI switch:\nИспользуйте кнопки выбора или /ai_switch provider:<name> model:<name> fallbackProvider:<name|-> fallbackModel:<name|->',
+            extra: {
+              reply_markup: withNavigationRows([
+                [{ text: 'Primary: proxy/deepseek-chat', callback_data: 'ai:switch:set:proxy:deepseek-chat' }],
+                [{ text: 'Primary: deepseek/deepseek-chat', callback_data: 'ai:switch:set:deepseek:deepseek-chat' }],
+                [{ text: 'Fallback: off', callback_data: 'ai:switch:fallback:off' }],
+                [{ text: 'Fallback: deepseek/deepseek-chat', callback_data: 'ai:switch:fallback:deepseek:deepseek-chat' }],
+                [{ text: 'Apply', callback_data: 'ai:switch:apply' }]
+              ])
+            }
+          });
         }
         if (data === 'ai:logs') {
+          updateSession(sessionKey, { screen: 'menu:ai:logs', backAction: 'menu:ai', step: 'ai_logs_filter' });
           await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: 'AI логи' });
-          sessions.set(sessionKey, { step: 'ai_logs_filter' });
-          return respondWithMessage({ channel, token, recipientId, text: 'Введите фильтр: since:YYYY-MM-DD provider:proxy status:success task:classifyIntent' });
+          return respondWithMessage({ channel, token, recipientId, text: 'Введите фильтр: since:YYYY-MM-DD provider:proxy status:success task:classifyIntent', extra: { reply_markup: withNavigationRows([]) } });
+        }
+        if (data.startsWith('ai:switch:set:')) {
+          const [, , , provider, model] = data.split(':');
+          updateSession(sessionKey, { aiSwitchDraft: { activeProvider: provider, activeModel: model }, screen: 'menu:ai:switch', backAction: 'menu:ai' });
+          await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: 'Primary обновлён' });
+          return respondWithMessage({ channel, token, recipientId, text: `Черновик AI switch:\nprovider=${provider}\nmodel=${model}`, extra: { reply_markup: buildAiMenuKeyboard() } });
+        }
+        if (data === 'ai:switch:fallback:off' || data.startsWith('ai:switch:fallback:')) {
+          const session = sessions.get(sessionKey) || {};
+          const draft = { ...(session.aiSwitchDraft || {}) };
+          if (data === 'ai:switch:fallback:off') {
+            draft.activeFallbackProvider = '';
+            draft.activeFallbackModel = '';
+          } else {
+            const [, , , provider, model] = data.split(':');
+            draft.activeFallbackProvider = provider;
+            draft.activeFallbackModel = model;
+          }
+          updateSession(sessionKey, { aiSwitchDraft: draft, screen: 'menu:ai:switch', backAction: 'menu:ai' });
+          await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: 'Fallback обновлён' });
+          return respondWithMessage({ channel, token, recipientId, text: `Черновик fallback: ${draft.activeFallbackProvider ? `${draft.activeFallbackProvider}/${draft.activeFallbackModel}` : 'OFF'}`, extra: { reply_markup: buildAiMenuKeyboard() } });
+        }
+        if (data === 'ai:switch:apply') {
+          const session = sessions.get(sessionKey) || {};
+          const updated = aiInfrastructure.runtimeSettings.update(session.aiSwitchDraft || {});
+          updateSession(sessionKey, { aiSwitchDraft: null, screen: 'menu:ai', backAction: 'menu:root' });
+          await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: updated.ok ? 'Применено' : 'Ошибка' });
+          return respondWithMessage({ channel, token, recipientId, text: updated.ok ? 'AI runtime settings updated' : `Ошибка: ${updated.error}`, payload: updated, extra: { reply_markup: buildAiMenuKeyboard() } });
         }
       }
       if (data.startsWith('req:')) {
@@ -653,12 +745,12 @@ provider=${result.probe.state.provider || '-'} model=${result.probe.state.model 
           return respondWithMessage({ channel, token, recipientId, text: `Старая кнопка отключена. Карточка обновлена.\nУкажите комментарий для отказа по заявке ${requestId}` });
         }
         if (action === 'ask_client') {
-          sessions.set(sessionKey, { step: 'ask_client', requestId });
+          updateSession(sessionKey, { screen: 'req:ask_client', backAction: 'menu:in_progress', step: 'ask_client', requestId });
           await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: 'Введите сообщение' });
           return respondWithMessage({ channel, token, recipientId, text: `Введите сообщение клиенту по заявке ${requestId}` });
         }
         if (action === 'comment') {
-          sessions.set(sessionKey, { step: 'comment', requestId });
+          updateSession(sessionKey, { screen: 'req:comment', backAction: 'menu:in_progress', step: 'comment', requestId });
           await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: 'Введите комментарий' });
           return respondWithMessage({ channel, token, recipientId, text: `Введите внутренний комментарий по заявке ${requestId}` });
         }
@@ -668,7 +760,7 @@ provider=${result.probe.state.provider || '-'} model=${result.probe.state.model 
         }
         if (action === 'processed') {
           if (maybeSubstatus === 'rejected') {
-            sessions.set(sessionKey, { step: 'rejected_comment', requestId, substatus: maybeSubstatus });
+            updateSession(sessionKey, { screen: 'req:rejected_comment', backAction: 'menu:in_progress', step: 'rejected_comment', requestId, substatus: maybeSubstatus });
             await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: 'Нужен комментарий' });
             return respondWithMessage({ channel, token, recipientId, text: `Укажите комментарий для отказа по заявке ${requestId}` });
           }
@@ -698,6 +790,7 @@ provider=${result.probe.state.provider || '-'} model=${result.probe.state.model 
     }
 
     if (text === '/start') {
+      sessions.delete(sessionKey);
       db.recordMasterAction({ actorId: actor.id, role: actor.role, action: 'master_start', payload: { channel } });
       return respondWithMessage({ channel, token, recipientId, text: `Master Bot запущен. Роль: ${actor.role}.`, payload: { ok: true, action: 'start' }, extra: { reply_markup: buildMainMenuKeyboard(actor) } });
     }
@@ -725,22 +818,25 @@ provider=${result.probe.state.provider || '-'} model=${result.probe.state.model 
 
     if (text === '/ai_status') {
       if (!isAdmin(actor)) return respondWithMessage({ channel, token, recipientId, text: 'Недостаточно прав.', payload: { ok: false, error: 'ACCESS_DENIED' } });
+      updateSession(sessionKey, { screen: 'menu:ai:status', backAction: 'menu:ai', step: null });
       return respondWithMessage({ channel, token, recipientId, text: buildAiStatusText({ aiInfrastructure, config }), payload: { ok: true }, extra: { reply_markup: buildAiMenuKeyboard() } });
     }
     if (text === '/ai_diagnostics') {
       if (!isAdmin(actor)) return respondWithMessage({ channel, token, recipientId, text: 'Недостаточно прав.', payload: { ok: false, error: 'ACCESS_DENIED' } });
+      updateSession(sessionKey, { screen: 'menu:ai:diagnostics', backAction: 'menu:ai', step: null });
       const result = await aiInfrastructure.runDiagnostics();
       return respondWithMessage({ channel, token, recipientId, text: `${result.ok ? '✅' : '❌'} ${result.probe.summary}` , payload: { ok: result.ok, diagnostics: result }, extra: { reply_markup: buildAiMenuKeyboard() } });
     }
     if (text.startsWith('/ai_logs')) {
       if (!isAdmin(actor)) return respondWithMessage({ channel, token, recipientId, text: 'Недостаточно прав.', payload: { ok: false, error: 'ACCESS_DENIED' } });
       const filters = parseLogsFilter(text.replace('/ai_logs', '').trim());
+      updateSession(sessionKey, { screen: 'menu:ai:logs', backAction: 'menu:ai', step: null });
       return respondWithMessage({ channel, token, recipientId, text: buildAiLogsText(aiInfrastructure, filters), payload: { ok: true, filters }, extra: { reply_markup: buildAiMenuKeyboard() } });
     }
     if (text.startsWith('/ai_switch')) {
       if (!isAdmin(actor)) return respondWithMessage({ channel, token, recipientId, text: 'Недостаточно прав.', payload: { ok: false, error: 'ACCESS_DENIED' } });
       const payload = parseAiSwitchCommand(text) || {};
-      const patch = Object.fromEntries(Object.entries(payload).filter(([, v]) => Boolean(v)));
+      const patch = Object.fromEntries(Object.entries(payload).filter(([, v]) => v !== undefined));
       const updated = aiInfrastructure.runtimeSettings.update(patch);
       return respondWithMessage({ channel, token, recipientId, text: updated.ok ? 'AI runtime settings updated' : `Ошибка: ${updated.error}`, payload: updated, extra: { reply_markup: buildAiMenuKeyboard() } });
     }

@@ -1,5 +1,6 @@
 const { resolveTaskPolicy } = require('./taskRouter');
-const { validateProviderModelPair, isFallbackConfigured } = require('./providerModelRules');
+const { validateProviderModelPair } = require('./providerModelRules');
+const { resolveAiConfig } = require('./resolveAiConfig');
 
 function buildBusinessDisabled(taskType) {
   return {
@@ -38,18 +39,21 @@ function createAiService({ configAi, runtimeSettings, providerRegistry, db, logg
     }
 
     const policy = resolveTaskPolicy(taskType, options);
-    const providerName = options.provider || runtime.activeProvider;
-    const model = options.model || runtime.activeModel;
-    const fallbackProviderName = runtime.activeFallbackProvider;
-    const fallbackModel = runtime.activeFallbackModel;
-    const fallbackConfigured = isFallbackConfigured(fallbackProviderName, fallbackModel);
+    const resolved = resolveAiConfig({ configAi, runtime, diagnostics: runtimeSettings.getDiagnosticsState() });
+    const providerName = options.provider || resolved.effectiveProvider;
+    const model = options.model || resolved.effectiveModel;
+    const fallbackProviderName = resolved.effectiveFallbackProvider;
+    const fallbackModel = resolved.effectiveFallbackModel;
+    const fallbackConfigured = resolved.effectiveFallbackEnabled;
 
-    const primaryPairCheck = validateProviderModelPair(providerName, model, { context: 'PRIMARY' });
+    const primaryPairCheck = (options.provider || options.model)
+      ? validateProviderModelPair(providerName, model, { context: 'PRIMARY' })
+      : resolved.pairChecks.primary;
     if (!primaryPairCheck.ok) {
       return { ok: false, error: primaryPairCheck.error, taskType, provider: providerName, model, fallbackUsed: false, fallbackConfigured };
     }
     if (fallbackConfigured) {
-      const fallbackPairCheck = validateProviderModelPair(fallbackProviderName, fallbackModel, { context: 'FALLBACK' });
+      const fallbackPairCheck = resolved.pairChecks.fallback;
       if (!fallbackPairCheck.ok) {
         return { ok: false, error: fallbackPairCheck.error, taskType, provider: fallbackProviderName, model: fallbackModel, fallbackUsed: false, fallbackConfigured };
       }

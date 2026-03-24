@@ -336,6 +336,7 @@ test('master bot AI control plane commands are admin-only and usable', async () 
 
   const aiInfrastructure = {
     runtimeSettings: {
+      lastPatch: null,
       get() {
         return {
           activeProvider: 'proxy',
@@ -351,7 +352,7 @@ test('master bot AI control plane commands are admin-only and usable', async () 
         };
       },
       getDiagnosticsState() { return null; },
-      update() { return { ok: true, runtime: this.get() }; }
+      update(patch) { this.lastPatch = patch; return { ok: true, runtime: this.get() }; }
     },
     async runDiagnostics() {
       return { ok: true, probe: { summary: 'AI diagnostics OK', state: { provider: 'proxy', model: 'deepseek-chat', fallbackUsed: false, durationMs: 10 } } };
@@ -383,6 +384,23 @@ test('master bot AI control plane commands are admin-only and usable', async () 
   });
   assert.equal(logs.ok, true);
   assert.match(logs.text, /AI логи/i);
+
+  const clearFallback = await handleMasterWebhook({
+    body: { message: { text: '/ai_switch provider:proxy model:deepseek-chat fallbackProvider:- fallbackModel:-', chat: { id: 8001 }, from: { id: 8001, first_name: 'Admin' } } },
+    config,
+    aiInfrastructure
+  });
+  assert.equal(clearFallback.ok, true);
+  assert.equal(aiInfrastructure.runtimeSettings.lastPatch.activeFallbackProvider, '');
+  assert.equal(aiInfrastructure.runtimeSettings.lastPatch.activeFallbackModel, '');
+
+  const navMenu = await handleMasterWebhook({
+    body: { callback_query: { id: 'cb-nav', from: { id: 8001, first_name: 'Admin' }, message: { chat: { id: 8001 } }, data: 'nav:menu' } },
+    config,
+    aiInfrastructure
+  });
+  assert.equal(navMenu.ok, true);
+  assert.match(navMenu.text, /Главное меню/i);
 
   delete process.env.MASTER_BOT_ADMIN_IDS;
 });
