@@ -16,6 +16,10 @@ function parseList(value) {
     .filter(Boolean);
 }
 
+function hasExplicitEnv(key) {
+  return process.env[key] !== undefined && process.env[key] !== null && String(process.env[key]).trim() !== '';
+}
+
 function resolveEnv({ canonical = null, sharedLegacy = [], clientLegacy = [], transform = (value) => value, defaultValue = '' }) {
   if (canonical && process.env[canonical] !== undefined && process.env[canonical] !== '') {
     return { value: transform(process.env[canonical]), source: canonical, tier: 'canonical' };
@@ -90,8 +94,9 @@ function resolveAiEnv() {
   const fallbackFlags = ['DEEPSEEK_ALLOW_REQUESTS_FALLBACK', 'CLIENT_FORCE_FALLBACK', 'FORCT_FALLBACK'];
   const enabledFallbackFlags = fallbackFlags.filter((key) => parseBoolean(process.env[key], false));
 
-  const fallbackProvider = resolveEnv({ canonical: 'AI_FALLBACK_PROVIDER', defaultValue: 'deepseek', transform: (value) => String(value || '').trim().toLowerCase() || 'deepseek' });
-  const fallbackModel = resolveEnv({ canonical: 'AI_FALLBACK_MODEL', defaultValue: 'deepseek-chat' });
+  const fallbackProvider = resolveEnv({ canonical: 'AI_FALLBACK_PROVIDER', defaultValue: '', transform: (value) => String(value || '').trim().toLowerCase() });
+  const fallbackModel = resolveEnv({ canonical: 'AI_FALLBACK_MODEL', defaultValue: '' });
+  const fallbackConfigured = hasExplicitEnv('AI_FALLBACK_PROVIDER') && hasExplicitEnv('AI_FALLBACK_MODEL');
 
   const openaiApiKey = resolveEnv({ canonical: 'AI_OPENAI_API_KEY', sharedLegacy: ['OPENAI_API_KEY', 'AI_API_KEY'], defaultValue: '' });
   const deepseekApiKey = resolveEnv({ canonical: 'AI_DEEPSEEK_API_KEY', sharedLegacy: ['DEEPSEEK_API_KEY'], clientLegacy: ['CLIENT_DEEPSEEK_API_KEY'], defaultValue: '' });
@@ -129,6 +134,7 @@ function resolveAiEnv() {
     model: model.value,
     fallbackProvider: fallbackProvider.value,
     fallbackModel: fallbackModel.value,
+    fallbackConfigured,
     proxyUrl: proxyUrl.value,
     proxyToken: proxyToken.value,
     openaiApiKey: openaiApiKey.value,

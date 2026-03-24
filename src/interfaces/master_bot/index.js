@@ -366,13 +366,18 @@ function buildAiStatusText({ aiInfrastructure, config }) {
   if (!aiInfrastructure) return 'AI infrastructure not initialized';
   const runtime = aiInfrastructure.runtimeSettings.get();
   const diagnostics = aiInfrastructure.runtimeSettings.getDiagnosticsState() || {};
+  const fallbackConfigured = Boolean(runtime.fallbackConfigured && runtime.activeFallbackProvider && runtime.activeFallbackModel);
   return [
     'AI статус:',
     `AI enabled: ${runtime.aiEnabledRuntime ? 'ON' : 'OFF'} (env=${config.ai?.enabled ? 'ON' : 'OFF'})`,
     `AI business usage enabled: ${runtime.aiBusinessUsageEnabledRuntime ? 'ON' : 'OFF'} (env=${config.ai?.businessUsageEnabled ? 'ON' : 'OFF'})`,
-    `Active provider/model: ${runtime.activeProvider}/${runtime.activeModel}`,
-    `Active source: provider=${config.ai?.sources?.AI_PROVIDER?.source || 'default'} model=${config.ai?.sources?.AI_MODEL?.source || 'default'}`,
-    `Fallback provider/model: ${runtime.activeFallbackProvider}/${runtime.activeFallbackModel}`,
+    `Configured provider/model: ${(config.ai?.provider || '-')}/${(config.ai?.model || '-')}`,
+    `Configured source: provider=${config.ai?.sources?.AI_PROVIDER?.source || 'default'} model=${config.ai?.sources?.AI_MODEL?.source || 'default'}`,
+    `Effective provider/model: ${runtime.activeProvider}/${runtime.activeModel}`,
+    `Fallback configured: ${fallbackConfigured ? 'yes' : 'no'}`,
+    `Fallback provider/model: ${fallbackConfigured ? `${runtime.activeFallbackProvider}/${runtime.activeFallbackModel}` : '-'}`,
+    `Fallback source: provider=${config.ai?.sources?.AI_FALLBACK_PROVIDER?.source || 'default'} model=${config.ai?.sources?.AI_FALLBACK_MODEL?.source || 'default'}`,
+    `Diagnostics target provider/model: ${(diagnostics.targetProvider || runtime.activeProvider)}/${(diagnostics.targetModel || runtime.activeModel)}`,
     `Allowed providers: ${(runtime.allowedProviders || []).join(', ') || '-'}`,
     `Timeout: ${config.ai?.timeoutMs || 0}ms (source=${config.ai?.sources?.AI_TIMEOUT_MS?.source || 'default'})`,
     `Proxy configured: ${config.ai?.proxyUrl && config.ai?.proxyToken ? 'yes' : 'no'}`,
