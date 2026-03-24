@@ -72,11 +72,13 @@ test('ai config does not auto-enable fallback when fallback env is empty', () =>
 
 
 
-test('ai config supports legacy railway mapping with canonical priority', () => {
+test('ai config supports legacy railway mapping with canonical priority and explicit legacy ignore list', () => {
   const snapshot = {
     AI_PROVIDER: process.env.AI_PROVIDER,
     AI_ENGINE: process.env.AI_ENGINE,
     AI_MODEL: process.env.AI_MODEL,
+    AI_PROXY_URL: process.env.AI_PROXY_URL,
+    AI_PROXY_TOKEN: process.env.AI_PROXY_TOKEN,
     DEEPSEEK_MODEL: process.env.DEEPSEEK_MODEL,
     CLIENT_DEEPSEEK_MODEL: process.env.CLIENT_DEEPSEEK_MODEL,
     AI_TIMEOUT_MS: process.env.AI_TIMEOUT_MS,
@@ -86,6 +88,7 @@ test('ai config supports legacy railway mapping with canonical priority', () => 
     DEEPSEEK_BASE_URL: process.env.DEEPSEEK_BASE_URL,
     OPENAI_API_KEY: process.env.OPENAI_API_KEY,
     GEMINI_API_KEY: process.env.GEMINI_API_KEY,
+    CLIENT_FORCE_FALLBACK: process.env.CLIENT_FORCE_FALLBACK,
     FORCT_FALLBACK: process.env.FORCT_FALLBACK
   };
 
@@ -98,6 +101,7 @@ test('ai config supports legacy railway mapping with canonical priority', () => 
   process.env.DEEPSEEK_BASE_URL = 'https://legacy.deepseek.local/chat/completions';
   process.env.OPENAI_API_KEY = 'legacy-openai-key';
   process.env.GEMINI_API_KEY = 'legacy-gemini-key';
+  process.env.CLIENT_FORCE_FALLBACK = 'true';
   process.env.FORCT_FALLBACK = 'true';
 
   delete process.env.AI_PROVIDER;
@@ -112,22 +116,36 @@ test('ai config supports legacy railway mapping with canonical priority', () => 
   assert.equal(config.ai.proxyUrl, 'https://legacy.deepseek.local/chat/completions');
   assert.equal(config.ai.openaiApiKey, 'legacy-openai-key');
   assert.equal(config.ai.geminiApiKey, 'legacy-gemini-key');
-  assert.equal(config.ai.legacyForceFallbackRequested, true);
+  assert.equal(config.ai.legacyForceFallbackRequested, false);
   assert.equal(config.ai.sources.AI_PROVIDER.source, 'AI_ENGINE');
   assert.equal(config.ai.sources.AI_MODEL.source, 'DEEPSEEK_MODEL');
   assert.equal(config.ai.sources.AI_TIMEOUT_MS.source, 'AI_TIMEOUT_SECONDS');
+  assert.equal(config.ai.legacyUsed.includes('AI_ENGINE'), true);
+  assert.equal(config.ai.legacyIgnored.includes('CLIENT_DEEPSEEK_MODEL'), true);
+  assert.equal(config.ai.legacyIgnored.includes('CLIENT_FORCE_FALLBACK'), true);
 
   process.env.AI_PROVIDER = 'proxy';
   process.env.AI_MODEL = 'deepseek-chat';
   process.env.AI_TIMEOUT_MS = '7000';
+  process.env.AI_PROXY_URL = 'https://proxy.canonical.local';
+  process.env.AI_PROXY_TOKEN = 'proxy-canonical-token';
 
   config = loadConfig();
   assert.equal(config.ai.provider, 'proxy');
   assert.equal(config.ai.model, 'deepseek-chat');
   assert.equal(config.ai.timeoutMs, 7000);
+  assert.equal(config.ai.proxyUrl, 'https://proxy.canonical.local');
+  assert.equal(config.ai.proxyToken, 'proxy-canonical-token');
   assert.equal(config.ai.sources.AI_PROVIDER.source, 'AI_PROVIDER');
   assert.equal(config.ai.sources.AI_MODEL.source, 'AI_MODEL');
   assert.equal(config.ai.sources.AI_TIMEOUT_MS.source, 'AI_TIMEOUT_MS');
+  assert.equal(config.ai.legacyUsed.includes('AI_ENGINE'), false);
+  assert.equal(config.ai.legacyIgnored.includes('AI_ENGINE'), true);
+  assert.equal(config.ai.legacyIgnored.includes('DEEPSEEK_MODEL'), true);
+  assert.equal(config.ai.legacyIgnored.includes('DEEPSEEK_BASE_URL'), true);
+  assert.equal(config.ai.legacyIgnored.includes('DEEPSEEK_API_KEY'), true);
+  assert.equal(config.ai.legacyIgnored.includes('CLIENT_FORCE_FALLBACK'), true);
+  assert.equal(config.ai.legacyIgnored.includes('FORCT_FALLBACK'), true);
 
   restoreEnv(snapshot);
 });

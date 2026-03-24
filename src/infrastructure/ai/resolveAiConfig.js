@@ -51,6 +51,8 @@ function resolveAiConfig({ configAi = {}, runtime = {}, diagnostics = null }) {
       fallbackProvider: detectResolutionSource(configAi.sources?.AI_FALLBACK_PROVIDER),
       fallbackModel: detectResolutionSource(configAi.sources?.AI_FALLBACK_MODEL)
     },
+    legacyDetected: configAi.legacyDetected || [],
+    legacyIgnored: configAi.legacyIgnored || [],
     legacyUsed: configAi.legacyUsed || []
   };
 }

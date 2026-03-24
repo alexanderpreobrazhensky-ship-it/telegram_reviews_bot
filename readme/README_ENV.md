@@ -55,7 +55,8 @@ Additional compatibility env (non-canonical but supported):
 - `AI_GEMINI_API_KEY=`
 
 ## Legacy Railway compatibility (old -> new)
-Priority order: canonical `AI_*` -> shared legacy -> `CLIENT_*` legacy -> defaults.
+Priority order (hard): canonical `AI_*` -> shared legacy -> `CLIENT_*` legacy -> defaults.
+If canonical env is configured for a key, corresponding legacy aliases are detected and ignored (they are no longer source of truth).
 
 | Legacy env | Canonical/internal target | Notes |
 |---|---|---|
@@ -68,9 +69,9 @@ Priority order: canonical `AI_*` -> shared legacy -> `CLIENT_*` legacy -> defaul
 | `CLIENT_DEEPSEEK_BASE_URL` | `AI_PROXY_URL` + `AI_DEEPSEEK_BASE_URL` | fallback alias |
 | `DEEPSEEK_API_KEY` | `AI_PROXY_TOKEN` + `AI_DEEPSEEK_API_KEY` | proxy token compatibility + deepseek direct compatibility |
 | `CLIENT_DEEPSEEK_API_KEY` | `AI_PROXY_TOKEN` + `AI_DEEPSEEK_API_KEY` | fallback alias |
-| `DEEPSEEK_ALLOW_REQUESTS_FALLBACK` | internal legacy flag only | not a canonical source of truth |
-| `CLIENT_FORCE_FALLBACK` | internal legacy flag only | not a canonical source of truth |
-| `FORCT_FALLBACK` | internal legacy flag only | legacy typo, deprecated |
+| `DEEPSEEK_ALLOW_REQUESTS_FALLBACK` | diagnostics-only legacy signal | detected as legacy, ignored for runtime resolution |
+| `CLIENT_FORCE_FALLBACK` | deprecated legacy flag | detected as legacy, ignored for runtime resolution |
+| `FORCT_FALLBACK` | deprecated legacy typo | detected as legacy typo, ignored for runtime resolution |
 | `OPENAI_API_KEY` | `AI_OPENAI_API_KEY` | compatibility only |
 | `GEMINI_API_KEY` | `AI_GEMINI_API_KEY` | compatibility placeholder only |
 
@@ -79,3 +80,10 @@ Priority order: canonical `AI_*` -> shared legacy -> `CLIENT_*` legacy -> defaul
 - `INTERNAL_ADMIN_WHITELIST_IDS`
 - `WEBAPP_TELEGRAM_CHANNEL_LINK`
 - `AI_API_KEY` (mapped as legacy alias for `AI_OPENAI_API_KEY`)
+
+## AI runtime visibility
+- AI Status / diagnostics include three explicit lists:
+  - `legacy env detected`
+  - `legacy env ignored`
+  - `legacy env used`
+- Internal diagnostics include effective provider/model, resolution source, and ignored legacy keys.

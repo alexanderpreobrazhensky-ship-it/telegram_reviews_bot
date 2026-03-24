@@ -50,6 +50,8 @@ async function runAiDiagnostics({ aiService, runtimeSettings, configAi, provider
         sourceFallbackProvider: resolved.sources.fallbackProvider,
         sourceFallbackModel: resolved.sources.fallbackModel,
         sourceTimeoutMs: configAi.sources?.AI_TIMEOUT_MS?.source || 'default',
+        legacyDetected: configAi.legacyDetected || [],
+        legacyIgnored: configAi.legacyIgnored || [],
         legacyUsed: resolved.legacyUsed || []
       }
     },
