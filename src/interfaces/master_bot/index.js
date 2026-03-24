@@ -102,10 +102,13 @@ function buildRequestActionsKeyboard(requestId, card = null, actor = null) {
 
 function buildRequestCardText(card) {
   const r = card.request;
+  const payload = r.payload || {};
   const client = card.client || {};
   const vehicle = card.vehicle || {};
   const executor = card.assignedMaster?.fullName || r.assignedTo || r.assignedMasterId || '-';
   const history = buildHistoryLines(card);
+  const existingClient = payload.existing_client === true;
+  const needsReview = payload.needs_review === true;
   return [
     `ID: ${r.id}`,
     `Тип: ${r.requestType}`,
@@ -120,6 +123,11 @@ function buildRequestCardText(card) {
     `Марка/модель: ${vehicle.brand || '-'} / ${vehicle.model || '-'}`,
     `Описание: ${r.description || '-'}`,
     `Источник: ${r.sourceChannel || '-'}`,
+    `Действующий клиент: ${existingClient ? 'Да' : 'Нет'}`,
+    `Основание проверки: ${payload.client_match_basis || '-'}`,
+    `ID в reference-базе: ${payload.matched_reference_client_id || '-'}`,
+    `Источник reference: ${payload.matched_reference_source || '-'}`,
+    `Требуется проверка: ${needsReview ? 'Да' : 'Нет'}`,
     `Исполнитель: ${executor}`,
     `Назначил: ${r.assignedBy || '-'}`,
     `Когда назначено: ${r.assignedAt || '-'}`,
