@@ -16,6 +16,7 @@ async function runAiDiagnostics({ aiService, runtimeSettings, configAi, provider
 
   return {
     ok: result.ok,
+    status: result.state?.finalDiagnosticsStatus || result.state?.status || (result.ok ? 'DIAGNOSTICS_OK' : 'UNKNOWN'),
     checks: {
       infraEnabled: Boolean(configAi.enabled),
       runtimeEnabled: Boolean(runtime.aiEnabledRuntime),
@@ -39,6 +40,8 @@ async function runAiDiagnostics({ aiService, runtimeSettings, configAi, provider
         configuredModel: configAi.model,
         effectiveProvider: resolved.effectiveProvider,
         effectiveModel: resolved.effectiveModel,
+        runtimeOverridePresent: resolved.runtimeOverridePresent,
+        runtimeOverrideValid: resolved.runtimeOverrideValid,
         diagnosticsTargetProvider: result.probe?.targetProvider || resolved.diagnosticsTargetProvider,
         diagnosticsTargetModel: result.probe?.targetModel || resolved.diagnosticsTargetModel,
         fallbackConfigured: resolved.effectiveFallbackEnabled,
@@ -53,7 +56,11 @@ async function runAiDiagnostics({ aiService, runtimeSettings, configAi, provider
         legacyDetected: configAi.legacyDetected || [],
         legacyIgnored: configAi.legacyIgnored || [],
         legacyUsed: resolved.legacyUsed || []
-      }
+      },
+      primaryTestAttempted: Boolean(result.probe?.primaryTestAttempted),
+      primaryTestResult: result.probe?.primaryTestResult || 'NOT_TESTED',
+      fallbackTestAttempted: Boolean(result.probe?.fallbackTestAttempted),
+      fallbackTestResult: result.probe?.fallbackTestResult || (resolved.effectiveFallbackEnabled ? 'NOT_TESTED' : 'FALLBACK_NOT_CONFIGURED')
     },
     last: diagnosticsState,
     probe: result

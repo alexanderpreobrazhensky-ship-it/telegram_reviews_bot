@@ -2573,7 +2573,9 @@ function listAiEvents({ since = null, provider = null, status = null, taskType =
       fallbackUsed: Boolean(item.metaJson?.fallbackUsed),
       errorCode: item.metaJson?.errorCode || '',
       errorSummary: item.metaJson?.errorSummary || '',
-      timestamp: item.createdAt
+      timestamp: item.createdAt,
+      status: item.status || '',
+      metaJson: item.metaJson || {}
     }));
 }
 function createIntegrationEvent({ sourceSystem, eventType, rawPayload, dedupeKey = null }) {

@@ -27,6 +27,18 @@ function resolveAiConfig({ configAi = {}, runtime = {}, diagnostics = null }) {
 
   const diagnosticsTargetProvider = normalizeProvider(diagnostics?.targetProvider || effectiveProvider);
   const diagnosticsTargetModel = normalizeModel(diagnostics?.targetModel || effectiveModel);
+  const runtimeOverridePresent = Boolean(
+    normalizeProvider(runtime.activeProvider) && normalizeProvider(runtime.activeProvider) !== configuredProvider
+    || normalizeModel(runtime.activeModel) && normalizeModel(runtime.activeModel) !== configuredModel
+    || normalizeProvider(runtime.activeFallbackProvider) && normalizeProvider(runtime.activeFallbackProvider) !== configuredFallbackProvider
+    || normalizeModel(runtime.activeFallbackModel) && normalizeModel(runtime.activeFallbackModel) !== configuredFallbackModel
+  );
+  const runtimeOverrideValid = pairChecksValid({
+    primary: validateProviderModelPair(effectiveProvider, effectiveModel, { context: 'PRIMARY' }),
+    fallbackEnabled: effectiveFallbackEnabled,
+    fallbackProvider: effectiveFallbackProvider,
+    fallbackModel: effectiveFallbackModel
+  });
 
   return {
     configuredProvider,
@@ -41,6 +53,8 @@ function resolveAiConfig({ configAi = {}, runtime = {}, diagnostics = null }) {
     effectiveFallbackEnabled,
     diagnosticsTargetProvider,
     diagnosticsTargetModel,
+    runtimeOverridePresent,
+    runtimeOverrideValid,
     pairChecks: {
       primary: primaryPair,
       fallback: fallbackPair
@@ -55,6 +69,12 @@ function resolveAiConfig({ configAi = {}, runtime = {}, diagnostics = null }) {
     legacyIgnored: configAi.legacyIgnored || [],
     legacyUsed: configAi.legacyUsed || []
   };
+}
+
+function pairChecksValid({ primary, fallbackEnabled, fallbackProvider, fallbackModel }) {
+  if (!primary.ok) return false;
+  if (!fallbackEnabled) return true;
+  return validateProviderModelPair(fallbackProvider, fallbackModel, { context: 'FALLBACK' }).ok;
 }
 
 module.exports = { resolveAiConfig };

@@ -204,6 +204,9 @@ test('ai service supports business-disabled mode and fallback', async () => {
   };
 
   const providerRegistry = {
+    has(name) {
+      return ['proxy', 'openai', 'deepseek'].includes(name);
+    },
     get(name) {
       if (name === 'proxy') {
         return {
@@ -226,7 +229,7 @@ test('ai service supports business-disabled mode and fallback', async () => {
   };
 
   const aiService = createAiService({
-    configAi: { enabled: true, timeoutMs: 1000 },
+    configAi: { enabled: true, timeoutMs: 1000, proxyUrl: 'https://proxy.local', proxyToken: 'token' },
     runtimeSettings,
     providerRegistry,
     db,
@@ -345,6 +348,259 @@ test('ai service rejects invalid provider/model pair and skips implicit fallback
   assert.equal(result.ok, false);
   assert.equal(result.error, 'AI_PRIMARY_PROVIDER_MODEL_MISMATCH');
   assert.equal(result.fallbackConfigured, false);
+});
+
+test('ai diagnostics stages: proxy-only valid config', async () => {
+  db.resetStore();
+  const runtimeSettings = {
+    get() {
+      return {
+        activeProvider: 'proxy',
+        activeModel: 'deepseek-chat',
+        activeFallbackProvider: '',
+        activeFallbackModel: '',
+        fallbackConfigured: false,
+        aiEnabledRuntime: true,
+        aiBusinessUsageEnabledRuntime: true
+      };
+    },
+    setDiagnosticsState(state) { return state; },
+    getDiagnosticsState() { return null; }
+  };
+  const aiService = createAiService({
+    configAi: { enabled: true, timeoutMs: 1000, proxyUrl: 'https://proxy.local', proxyToken: 'token' },
+    runtimeSettings,
+    providerRegistry: {
+      has(name) { return ['proxy', 'openai', 'deepseek'].includes(name); },
+      get() { return { async invoke() { return { provider: 'proxy', model: 'deepseek-chat', output: 'OK' }; } }; }
+    },
+    db,
+    logger: { info() {}, warn() {}, error() {} }
+  });
+  const result = await aiService.runHealthCheck();
+  assert.equal(result.ok, true);
+  assert.equal(result.state.finalDiagnosticsStatus, 'DIAGNOSTICS_OK');
+  assert.equal(result.state.fallbackConfigured, false);
+  assert.equal(result.state.fallbackStatus, 'not configured');
+  assert.equal(result.state.primaryTestAttempted, true);
+});
+
+test('ai diagnostics stages: invalid provider/model pair is CONFIG_INVALID and primary not tested', async () => {
+  db.resetStore();
+  const runtimeSettings = {
+    get() {
+      return {
+        activeProvider: 'deepseek',
+        activeModel: 'gpt-4o-mini',
+        activeFallbackProvider: '',
+        activeFallbackModel: '',
+        fallbackConfigured: false,
+        aiEnabledRuntime: true,
+        aiBusinessUsageEnabledRuntime: true
+      };
+    },
+    setDiagnosticsState(state) { return state; },
+    getDiagnosticsState() { return null; }
+  };
+  const aiService = createAiService({
+    configAi: { enabled: true, timeoutMs: 1000, deepseekApiKey: 'x' },
+    runtimeSettings,
+    providerRegistry: { has() { return true; }, get() { return { async invoke() { return { provider: 'deepseek', model: 'deepseek-chat', output: 'OK' }; } }; } },
+    db,
+    logger: { info() {}, warn() {}, error() {} }
+  });
+  const result = await aiService.runHealthCheck();
+  assert.equal(result.ok, false);
+  assert.equal(result.state.finalDiagnosticsStatus, 'CONFIG_INVALID');
+  assert.equal(result.state.primaryTestAttempted, false);
+  assert.equal(result.state.primaryStatus, 'not tested');
+});
+
+test('ai diagnostics stages: invalid runtime override reports CONFIG_INVALID', async () => {
+  db.resetStore();
+  const runtimeSettings = {
+    get() {
+      return {
+        activeProvider: 'openai',
+        activeModel: 'deepseek-chat',
+        activeFallbackProvider: '',
+        activeFallbackModel: '',
+        fallbackConfigured: false,
+        aiEnabledRuntime: true,
+        aiBusinessUsageEnabledRuntime: true
+      };
+    },
+    setDiagnosticsState(state) { return state; },
+    getDiagnosticsState() { return null; }
+  };
+  const aiService = createAiService({
+    configAi: { enabled: true, provider: 'proxy', model: 'deepseek-chat', timeoutMs: 1000, proxyUrl: 'https://proxy.local', proxyToken: 'token' },
+    runtimeSettings,
+    providerRegistry: { has() { return true; }, get() { return { async invoke() { return { provider: 'openai', model: 'gpt-4o-mini', output: 'OK' }; } }; } },
+    db,
+    logger: { info() {}, warn() {}, error() {} }
+  });
+  const result = await aiService.runHealthCheck();
+  assert.equal(result.ok, false);
+  assert.equal(result.state.finalDiagnosticsStatus, 'CONFIG_INVALID');
+  assert.equal(result.state.runtimeOverridePresent, true);
+  assert.equal(result.state.runtimeOverrideValid, false);
+});
+
+test('ai diagnostics stages: primary timeout/auth/network errors are PRIMARY_PROVIDER_FAILED', async () => {
+  db.resetStore();
+  const scenarios = [
+    { code: 'AI_TIMEOUT', expected: 'PRIMARY_TIMEOUT' },
+    { code: 'AI_AUTH_ERROR', expected: 'PRIMARY_AUTH_ERROR' },
+    { code: 'AI_NETWORK_ERROR', expected: 'PRIMARY_NETWORK_ERROR' }
+  ];
+  for (const scenario of scenarios) {
+    const runtimeSettings = {
+      get() {
+        return {
+          activeProvider: 'proxy',
+          activeModel: 'deepseek-chat',
+          activeFallbackProvider: '',
+          activeFallbackModel: '',
+          fallbackConfigured: false,
+          aiEnabledRuntime: true,
+          aiBusinessUsageEnabledRuntime: true
+        };
+      },
+      setDiagnosticsState(state) { return state; },
+      getDiagnosticsState() { return null; }
+    };
+    const aiService = createAiService({
+      configAi: { enabled: true, timeoutMs: 1000, proxyUrl: 'https://proxy.local', proxyToken: 'token' },
+      runtimeSettings,
+      providerRegistry: {
+        has() { return true; },
+        get() {
+          return {
+            async invoke() {
+              const error = new Error('primary error');
+              error.code = scenario.code;
+              throw error;
+            }
+          };
+        }
+      },
+      db,
+      logger: { info() {}, warn() {}, error() {} }
+    });
+    const result = await aiService.runHealthCheck();
+    assert.equal(result.ok, false);
+    assert.equal(result.state.finalDiagnosticsStatus, 'PRIMARY_PROVIDER_FAILED');
+    assert.equal(result.state.primaryTestResult, scenario.expected);
+  }
+});
+
+test('ai diagnostics stages: primary failed + fallback success', async () => {
+  db.resetStore();
+  const runtimeSettings = {
+    get() {
+      return {
+        activeProvider: 'proxy',
+        activeModel: 'deepseek-chat',
+        activeFallbackProvider: 'openai',
+        activeFallbackModel: 'gpt-4o-mini',
+        fallbackConfigured: true,
+        aiEnabledRuntime: true,
+        aiBusinessUsageEnabledRuntime: true
+      };
+    },
+    setDiagnosticsState(state) { return state; },
+    getDiagnosticsState() { return null; }
+  };
+  const aiService = createAiService({
+    configAi: { enabled: true, timeoutMs: 1000, proxyUrl: 'https://proxy.local', proxyToken: 'token' },
+    runtimeSettings,
+    providerRegistry: {
+      has() { return true; },
+      get(name) {
+        if (name === 'proxy') return { async invoke() { const error = new Error('down'); error.code = 'AI_TIMEOUT'; throw error; } };
+        return { async invoke() { return { provider: 'openai', model: 'gpt-4o-mini', output: 'OK' }; } };
+      }
+    },
+    db,
+    logger: { info() {}, warn() {}, error() {} }
+  });
+  const result = await aiService.runHealthCheck();
+  assert.equal(result.ok, true);
+  assert.equal(result.state.finalDiagnosticsStatus, 'DIAGNOSTICS_OK');
+  assert.equal(result.state.primaryTestResult, 'PRIMARY_TIMEOUT');
+  assert.equal(result.state.fallbackTestResult, 'DIAGNOSTICS_OK');
+});
+
+test('ai diagnostics stages: primary failed + fallback failed', async () => {
+  db.resetStore();
+  const runtimeSettings = {
+    get() {
+      return {
+        activeProvider: 'proxy',
+        activeModel: 'deepseek-chat',
+        activeFallbackProvider: 'openai',
+        activeFallbackModel: 'gpt-4o-mini',
+        fallbackConfigured: true,
+        aiEnabledRuntime: true,
+        aiBusinessUsageEnabledRuntime: true
+      };
+    },
+    setDiagnosticsState(state) { return state; },
+    getDiagnosticsState() { return null; }
+  };
+  const aiService = createAiService({
+    configAi: { enabled: true, timeoutMs: 1000, proxyUrl: 'https://proxy.local', proxyToken: 'token' },
+    runtimeSettings,
+    providerRegistry: {
+      has() { return true; },
+      get(name) {
+        if (name === 'proxy') return { async invoke() { const error = new Error('down'); error.code = 'AI_AUTH_ERROR'; throw error; } };
+        return { async invoke() { const error = new Error('down2'); error.code = 'AI_NETWORK_ERROR'; throw error; } };
+      }
+    },
+    db,
+    logger: { info() {}, warn() {}, error() {} }
+  });
+  const result = await aiService.runHealthCheck();
+  assert.equal(result.ok, false);
+  assert.equal(result.state.finalDiagnosticsStatus, 'FALLBACK_PROVIDER_FAILED');
+  assert.equal(result.state.primaryTestResult, 'PRIMARY_AUTH_ERROR');
+  assert.equal(result.state.fallbackTestResult, 'FALLBACK_NETWORK_ERROR');
+});
+
+test('ai diagnostics stages: no fallback configured keeps fallback status not configured', async () => {
+  db.resetStore();
+  const runtimeSettings = {
+    get() {
+      return {
+        activeProvider: 'proxy',
+        activeModel: 'deepseek-chat',
+        activeFallbackProvider: '',
+        activeFallbackModel: '',
+        fallbackConfigured: false,
+        aiEnabledRuntime: true,
+        aiBusinessUsageEnabledRuntime: true
+      };
+    },
+    setDiagnosticsState(state) { return state; },
+    getDiagnosticsState() { return null; }
+  };
+  const aiService = createAiService({
+    configAi: { enabled: true, timeoutMs: 1000, proxyUrl: 'https://proxy.local', proxyToken: 'token' },
+    runtimeSettings,
+    providerRegistry: {
+      has() { return true; },
+      get() { return { async invoke() { const error = new Error('down'); error.code = 'AI_TIMEOUT'; throw error; } }; }
+    },
+    db,
+    logger: { info() {}, warn() {}, error() {} }
+  });
+  const result = await aiService.runHealthCheck();
+  assert.equal(result.ok, false);
+  assert.equal(result.state.finalDiagnosticsStatus, 'PRIMARY_PROVIDER_FAILED');
+  assert.equal(result.state.fallbackConfigured, false);
+  assert.equal(result.state.fallbackStatus, 'not configured');
 });
 
 test('master bot AI control plane commands are admin-only and usable', async () => {
