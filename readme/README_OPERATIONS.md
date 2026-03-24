@@ -36,3 +36,22 @@
 1. Bridge dataset лежит в `data/reference/client_vehicle_bridge/`.
 2. Файлы отсутствуют в корне репозитория.
 3. Runtime конфиг (`DB_SQLITE_PATH`) не указывает на bridge SQLite.
+
+## Existing client lookup checks (WebApp/site)
+После релиза проверять дополнительно:
+1. `GET /internal/diagnostics` содержит блок `existingClientLookup`:
+   - `enabled`
+   - `available`
+   - `datasetPath`
+   - `lastLookupStatus`
+2. Создать WebApp заявку с known `phone+fio` из reference dataset:
+   - в payload заявки есть `existing_client=true`, `client_match_basis=phone_fio`.
+3. Создать заявку без совпадения:
+   - `existing_client=false`.
+4. Для конфликтного кейса (multiple matches):
+   - `existing_client=false`, `needs_review=true`, `client_match_basis=conflict_multiple_matches`.
+5. В карточке master-бота проверить видимость полей:
+   - `Действующий клиент`
+   - `Основание проверки`
+   - `ID в reference-базе`
+   - `Требуется проверка`
