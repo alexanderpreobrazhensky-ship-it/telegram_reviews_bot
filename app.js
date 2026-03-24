@@ -5,6 +5,8 @@ const db = require('./src/infrastructure/db');
 const { createScheduler } = require('./src/infrastructure/scheduler');
 const { sendChannelMessage } = require('./src/infrastructure/messaging');
 const { reconcileMaxWebhookSubscriptions } = require('./src/infrastructure/max/subscriptions');
+const { createEmailIntakePoller } = require('./src/integrations/email/intakePoller');
+const { integrationService } = require('./src/core/application');
 
 function bootstrap() {
   const config = loadConfig();
@@ -25,6 +27,40 @@ function bootstrap() {
     migration: initializedDb.migration
   });
   const server = createServer({ config, logger });
+  const aiInfrastructure = require('./src/infrastructure/ai').initializeAiInfrastructure({ config, db, logger });
+  integrationService.configureIntegrationRuntime({
+    aiService: aiInfrastructure.aiService,
+    logger,
+    masterNotifier: async ({ requestId, requestPayload }) => {
+      if (!config.telegramMasterBotToken || !config.telegramMastersChatId) return { ok: false, reason: 'MASTER_CHAT_NOT_CONFIGURED' };
+      const text = [
+        '🔥 T-Бизнес заявка (high)',
+        `ID: ${requestId}`,
+        `Источник: ${requestPayload?.source_provider || 'email'}`,
+        `Клиент: ${requestPayload?.existing_client ? 'действующий' : (requestPayload?.needs_review ? 'needs_review' : 'новый')}`,
+        `Основание матча: ${requestPayload?.match_basis || 'none'} (${requestPayload?.match_confidence || 0})`,
+        `ФИО: ${requestPayload?.parsed_fields?.fullName || '-'}`,
+        `Телефон: ${requestPayload?.parsed_fields?.phone || '-'}`,
+        `Марка/модель: ${requestPayload?.parsed_fields?.brandModel || '-'}`,
+        `Госномер: ${requestPayload?.parsed_fields?.plateNumber || '-'}`,
+        `VIN: ${requestPayload?.parsed_fields?.vin || '-'}`,
+        `Направление: ${requestPayload?.direction_number || '-'}`,
+        `Убыток: ${requestPayload?.claim_number || '-'}`,
+        `Email клиента: ${requestPayload?.parsed_fields?.email || '-'}`,
+        `Год выпуска: ${requestPayload?.parsed_fields?.year || '-'}`,
+        `AI summary: ${String(requestPayload?.ai_summary || '-').slice(0, 600)}`,
+        `Спецусловия: ${requestPayload?.parsed_fields?.specialConditions || '-'}`
+      ].join('\n');
+      const ok = await sendChannelMessage({
+        channel: 'telegram',
+        token: config.telegramMasterBotToken,
+        recipientId: Number(config.telegramMastersChatId),
+        text
+      });
+      return { ok };
+    }
+  });
+  const emailIntakePoller = createEmailIntakePoller({ config, logger });
 
   if (!config.telegramClientBotToken) {
     logger.warn('TELEGRAM_CLIENT_BOT_TOKEN is missing: outgoing bot notifications are disabled');
@@ -130,6 +166,8 @@ function bootstrap() {
       `Platform skeleton server listening on port ${runtimePort} (env PORT=${process.env.PORT || 'not-set'}, fallback=3000)`
     );
     scheduler.start();
+    emailIntakePoller.start();
+    emailIntakePoller.runOnce().catch((error) => logger.error('email intake initial poll failed', { error: String(error?.message || error) }));
     reconcileMaxWebhookSubscriptions({ config, logger })
       .then((result) => {
         logger.info('MAX subscription reconciliation finished', result);
@@ -141,6 +179,7 @@ function bootstrap() {
 
   server.on('close', () => {
     scheduler.stop();
+    emailIntakePoller.stop();
   });
 
   return server;

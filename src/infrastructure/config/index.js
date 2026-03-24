@@ -267,7 +267,34 @@ function loadConfig() {
     'AI_GEMINI_API_KEY',
     'AI_ALLOWED_PROVIDERS',
     'AI_DIAGNOSTICS_ENABLED',
-    'AI_TIMEOUT_MS'
+    'AI_TIMEOUT_MS',
+    'EMAIL_INTAKE_ENABLED',
+    'EMAIL_INTAKE_PROVIDER',
+    'EMAIL_IMAP_HOST',
+    'EMAIL_IMAP_PORT',
+    'EMAIL_IMAP_SECURE',
+    'EMAIL_IMAP_USER',
+    'EMAIL_IMAP_PASSWORD',
+    'EMAIL_IMAP_FOLDER',
+    'EMAIL_POLL_INTERVAL_SECONDS',
+    'EMAIL_SOURCE_TBUSINESS_ENABLED',
+    'EMAIL_SOURCE_TBUSINESS_PRIORITY',
+    'EMAIL_ALLOW_ATTACHMENTS',
+    'EMAIL_PDF_PARSE_ENABLED',
+    'EMAIL_IDEMPOTENCY_ENABLED',
+    'EMAIL_MATCH_PHONE_ENABLED',
+    'EMAIL_MATCH_FIO_ENABLED',
+    'EMAIL_MATCH_VIN_ENABLED',
+    'EMAIL_MATCH_EMAIL_ENABLED',
+    'EMAIL_NEEDS_REVIEW_ON_UNCERTAIN_MATCH',
+    'EMAIL_AUTO_CREATE_CLIENT_IF_NO_MATCH',
+    'EMAIL_SAVE_RAW_MESSAGE',
+    'EMAIL_SAVE_ATTACHMENTS_METADATA',
+    'EMAIL_SAVE_PARSED_TEXT',
+    'EMAIL_AI_ENRICHMENT_ENABLED',
+    'EMAIL_AI_SUMMARY_ENABLED',
+    'EMAIL_AI_CLASSIFICATION_ENABLED',
+    'EMAIL_AI_BUSINESS_USAGE_SCOPE'
   ];
   const legacyEnv = [
     'DB_FILE_PATH',
@@ -317,6 +344,37 @@ function loadConfig() {
     integrationRetryDelaySeconds,
     oneCSyncEnabled: parseBoolean(process.env.ONE_C_SYNC_ENABLED, false),
     emailImportEnabled: parseBoolean(process.env.EMAIL_IMPORT_ENABLED, true),
+    emailIntake: {
+      enabled: parseBoolean(process.env.EMAIL_INTAKE_ENABLED, false),
+      provider: process.env.EMAIL_INTAKE_PROVIDER || 'imap',
+      pollIntervalSeconds: parseNumber(process.env.EMAIL_POLL_INTERVAL_SECONDS, 60, { min: 5, max: 3600 }),
+      sourceTBusinessEnabled: parseBoolean(process.env.EMAIL_SOURCE_TBUSINESS_ENABLED, true),
+      sourceTBusinessPriority: process.env.EMAIL_SOURCE_TBUSINESS_PRIORITY || 'high',
+      allowAttachments: parseBoolean(process.env.EMAIL_ALLOW_ATTACHMENTS, true),
+      pdfParseEnabled: parseBoolean(process.env.EMAIL_PDF_PARSE_ENABLED, true),
+      idempotencyEnabled: parseBoolean(process.env.EMAIL_IDEMPOTENCY_ENABLED, true),
+      matchPhoneEnabled: parseBoolean(process.env.EMAIL_MATCH_PHONE_ENABLED, true),
+      matchFioEnabled: parseBoolean(process.env.EMAIL_MATCH_FIO_ENABLED, true),
+      matchVinEnabled: parseBoolean(process.env.EMAIL_MATCH_VIN_ENABLED, true),
+      matchEmailEnabled: parseBoolean(process.env.EMAIL_MATCH_EMAIL_ENABLED, false),
+      needsReviewOnUncertainMatch: parseBoolean(process.env.EMAIL_NEEDS_REVIEW_ON_UNCERTAIN_MATCH, true),
+      autoCreateClientIfNoMatch: parseBoolean(process.env.EMAIL_AUTO_CREATE_CLIENT_IF_NO_MATCH, true),
+      saveRawMessage: parseBoolean(process.env.EMAIL_SAVE_RAW_MESSAGE, true),
+      saveAttachmentsMetadata: parseBoolean(process.env.EMAIL_SAVE_ATTACHMENTS_METADATA, true),
+      saveParsedText: parseBoolean(process.env.EMAIL_SAVE_PARSED_TEXT, true),
+      aiEnrichmentEnabled: parseBoolean(process.env.EMAIL_AI_ENRICHMENT_ENABLED, false),
+      aiSummaryEnabled: parseBoolean(process.env.EMAIL_AI_SUMMARY_ENABLED, true),
+      aiClassificationEnabled: parseBoolean(process.env.EMAIL_AI_CLASSIFICATION_ENABLED, true),
+      aiBusinessUsageScope: process.env.EMAIL_AI_BUSINESS_USAGE_SCOPE || '',
+      imap: {
+        host: process.env.EMAIL_IMAP_HOST || '',
+        port: parseNumber(process.env.EMAIL_IMAP_PORT, 993, { min: 1, max: 65535 }),
+        secure: parseBoolean(process.env.EMAIL_IMAP_SECURE, true),
+        user: process.env.EMAIL_IMAP_USER || '',
+        password: process.env.EMAIL_IMAP_PASSWORD || '',
+        folder: process.env.EMAIL_IMAP_FOLDER || 'INBOX'
+      }
+    },
     webAppUrl: process.env.WEBAPP_URL || 'https://example.com',
     feedbackRequestDelayMinutes,
     schedulerIntervalMs,
@@ -359,7 +417,7 @@ function loadConfig() {
       legacyAiDetected: resolvedAiConfig.legacyDetected || [],
       legacyAiIgnored: resolvedAiConfig.legacyIgnored || [],
       legacyAiConfigured: resolvedAiConfig.legacyUsed,
-      unknownConfigured: Object.keys(process.env).filter((key) => /^(TELEGRAM|MAX|WEBAPP|DB_|QUEUE_|ONE_C_|INTEGRATION_|MASTER_BOT_|INTERNAL_ADMIN_|SCHEDULER_|FEEDBACK_|PORT|NODE_ENV|AI_|DEEPSEEK_|CLIENT_|OPENAI_|GEMINI_|FORCT_)/.test(key) && !knownEnv.has(key)).sort()
+      unknownConfigured: Object.keys(process.env).filter((key) => /^(TELEGRAM|MAX|WEBAPP|DB_|QUEUE_|ONE_C_|INTEGRATION_|MASTER_BOT_|INTERNAL_ADMIN_|SCHEDULER_|FEEDBACK_|PORT|NODE_ENV|AI_|DEEPSEEK_|CLIENT_|OPENAI_|GEMINI_|FORCT_|EMAIL_)/.test(key) && !knownEnv.has(key)).sort()
     }
   };
 

@@ -373,7 +373,7 @@ async function retryEvent({ config, body, id }) {
     return { ok: false, action: 'retry', error: 'EVENT_ID_REQUIRED', text: message };
   }
   try {
-    const event = integrationService.retryIntegrationEvent(id);
+    const event = await integrationService.retryIntegrationEvent(id);
     const message = `Повторная обработка запущена для ${id}. Текущий статус: ${event.processingStatus}.`;
     await replyToIntegrationChat({ config, body, text: message, extra: { reply_markup: eventInlineKeyboard(id, { canRetry: event.processingStatus === 'failed' || PENDING_STATUSES.has(event.processingStatus), canIgnore: event.processingStatus !== 'ignored' }) } });
     return { ok: true, action: 'retry', event: compact(event), text: message };
