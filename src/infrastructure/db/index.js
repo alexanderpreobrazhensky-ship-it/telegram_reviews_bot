@@ -2645,6 +2645,13 @@ function getIntegrationEventById(eventId) {
   return row ? analyticsEventRowToEntity(row) : null;
 }
 
+function findIntegrationEventByDedupeKey(dedupeKey) {
+  initializeStore();
+  if (!dedupeKey) return null;
+  const row = getDb().prepare(`SELECT * FROM analytics_events WHERE event_type = 'integration_event' AND dedupe_key = ? ORDER BY created_at DESC LIMIT 1`).get(String(dedupeKey));
+  return row ? analyticsEventRowToEntity(row) : null;
+}
+
 function listIntegrationEvents({ status, sourceSystem, limit = 20 } = {}) {
   initializeStore();
   let sql = `SELECT * FROM analytics_events WHERE event_type = 'integration_event'`;
@@ -2818,6 +2825,7 @@ const api = {
   createIntegrationEvent,
   updateIntegrationEvent,
   getIntegrationEventById,
+  findIntegrationEventByDedupeKey,
   listIntegrationEvents,
   getIntegrationEventCard,
   listRequestEvents,

@@ -288,6 +288,7 @@ function maskConfigValue(value) {
 function buildDiagnosticsText({ config, actor, channel, detailed = false, aiInfrastructure = null }) {
   const runtime = db.getDbRuntimeInfo();
   const followupTasks = db.listTasks(['scheduled', 'processing', 'failed']).filter((item) => ['waiting_decision_followup', 'consulted_followup'].includes(item.taskType));
+  const emailIntake = db.getMetaValue('email_intake:diagnostics', {});
   const writable = require('node:fs').existsSync(runtime.dir || '.');
   const ai = config.ai || {};
   const aiRuntime = aiInfrastructure?.runtimeSettings?.get ? aiInfrastructure.runtimeSettings.get() : null;
@@ -303,6 +304,11 @@ function buildDiagnosticsText({ config, actor, channel, detailed = false, aiInfr
     `Master admins: ${(config.masterBotAdminIds || []).length}`,
     `MAX master admins: ${(config.maxMasterBotAdminIds || []).length}`,
     `Scheduler follow-up tasks: ${followupTasks.length}`,
+    `Email intake enabled: ${config.emailIntake?.enabled ? 'ON' : 'OFF'}`,
+    `Email IMAP: ${emailIntake.connectionStatus || 'idle'} / folder=${emailIntake.folderStatus || 'unknown'}`,
+    `Email intake last poll: ${emailIntake.lastPollAt || '-'}`,
+    `Email intake result: ${emailIntake.lastPollResult || '-'}`,
+    `Email intake processed/dup/failedParse: ${emailIntake.processedCount || 0}/${emailIntake.duplicateCount || 0}/${emailIntake.failedParseCount || 0}`,
     `AI ready: ${ai.enabled ? 'ON' : 'OFF'} (${(aiRuntime?.activeProvider || ai.provider || 'proxy')}${(aiRuntime?.activeModel || ai.model) ? `/${aiRuntime?.activeModel || ai.model}` : ''})`,
     `Webhook routes: /${channel}/master_bot/webhook, /telegram/client_bot/webhook, /max/client_bot/webhook, /telegram/integration_bot/webhook`,
     `Internal routes: /internal/requests, /internal/export, /internal/diagnostics, /internal/logs`,

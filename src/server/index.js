@@ -786,14 +786,14 @@ function createServer({ config, logger }) {
     if (req.method === 'POST' && pathname === '/api/integrations/email') {
       const { body, invalidJson } = await readBody(req);
       if (invalidJson) return sendJson(res, 400, { error: 'Invalid JSON payload' });
-      const event = ingestEmail(body);
+      const event = await ingestEmail(body);
       return sendJson(res, 201, event);
     }
 
     if (req.method === 'POST' && pathname === '/api/integrations/manual') {
       const { body, invalidJson } = await readBody(req);
       if (invalidJson) return sendJson(res, 400, { error: 'Invalid JSON payload' });
-      const event = integrationService.receiveIntegrationEvent({
+      const event = await integrationService.receiveIntegrationEvent({
         sourceSystem: body.sourceSystem || integrationService.INTEGRATION_SOURCES.MANUAL_IMPORT,
         eventType: body.eventType || integrationService.INTEGRATION_EVENT_TYPES.MANUAL_REQUEST_IMPORT,
         rawPayload: body.rawPayload || body,
@@ -814,7 +814,7 @@ function createServer({ config, logger }) {
       };
       const eventType = eventTypeMap[entityType];
       if (!eventType) return sendJson(res, 400, { error: 'Unsupported one-c entity type' });
-      return sendJson(res, 201, oneCSyncPlaceholder(eventType, body));
+      return sendJson(res, 201, await oneCSyncPlaceholder(eventType, body));
     }
 
     if (req.method === 'GET' && pathname === '/api/integrations/events') {
@@ -836,7 +836,7 @@ function createServer({ config, logger }) {
     if (req.method === 'POST' && pathname.startsWith('/api/integrations/events/') && pathname.endsWith('/retry')) {
       const id = pathname.split('/')[4];
       try {
-        return sendJson(res, 200, integrationService.retryIntegrationEvent(id));
+        return sendJson(res, 200, await integrationService.retryIntegrationEvent(id));
       } catch (error) {
         return sendJson(res, 404, { error: String(error.message || error) });
       }
