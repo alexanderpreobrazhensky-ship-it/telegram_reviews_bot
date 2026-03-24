@@ -1,4 +1,4 @@
-const { validateProviderModelPair, isFallbackConfigured } = require('./providerModelRules');
+const { resolveAiConfig } = require('./resolveAiConfig');
 
 function maskSecret(value) {
   if (!value) return 'missing';
@@ -10,11 +10,8 @@ function maskSecret(value) {
 async function runAiDiagnostics({ aiService, runtimeSettings, configAi, providerRegistry }) {
   const runtime = runtimeSettings.get();
   const providers = providerRegistry.list();
-  const fallbackConfigured = isFallbackConfigured(runtime.activeFallbackProvider, runtime.activeFallbackModel);
-  const primaryPair = validateProviderModelPair(runtime.activeProvider, runtime.activeModel, { context: 'PRIMARY' });
-  const fallbackPair = fallbackConfigured
-    ? validateProviderModelPair(runtime.activeFallbackProvider, runtime.activeFallbackModel, { context: 'FALLBACK' })
-    : { ok: true };
+  const diagnosticsState = runtimeSettings.getDiagnosticsState();
+  const resolved = resolveAiConfig({ configAi, runtime, diagnostics: diagnosticsState });
   const result = await aiService.runHealthCheck({ diagnosticsMode: true });
 
   return {
@@ -22,14 +19,14 @@ async function runAiDiagnostics({ aiService, runtimeSettings, configAi, provider
     checks: {
       infraEnabled: Boolean(configAi.enabled),
       runtimeEnabled: Boolean(runtime.aiEnabledRuntime),
-      runtimeConfigValid: providers.includes(runtime.activeProvider)
-        && primaryPair.ok
-        && (!fallbackConfigured || (providers.includes(runtime.activeFallbackProvider) && fallbackPair.ok)),
-      activeProviderAvailable: providerRegistry.has(runtime.activeProvider),
-      fallbackProviderAvailable: fallbackConfigured ? providerRegistry.has(runtime.activeFallbackProvider) : true,
-      fallbackConfigured,
-      providerModelPairValid: primaryPair.ok,
-      fallbackProviderModelPairValid: fallbackPair.ok,
+      runtimeConfigValid: providers.includes(resolved.effectiveProvider)
+        && resolved.pairChecks.primary.ok
+        && (!resolved.effectiveFallbackEnabled || (providers.includes(resolved.effectiveFallbackProvider) && resolved.pairChecks.fallback.ok)),
+      activeProviderAvailable: providerRegistry.has(resolved.effectiveProvider),
+      fallbackProviderAvailable: resolved.effectiveFallbackEnabled ? providerRegistry.has(resolved.effectiveFallbackProvider) : true,
+      fallbackConfigured: resolved.effectiveFallbackEnabled,
+      providerModelPairValid: resolved.pairChecks.primary.ok,
+      fallbackProviderModelPairValid: resolved.pairChecks.fallback.ok,
       proxyConfigured: Boolean(configAi.proxyUrl && configAi.proxyToken),
       authConfigured: {
         proxyToken: maskSecret(configAi.proxyToken),
@@ -40,23 +37,23 @@ async function runAiDiagnostics({ aiService, runtimeSettings, configAi, provider
       resolvedConfig: {
         configuredProvider: configAi.provider,
         configuredModel: configAi.model,
-        effectiveProvider: runtime.activeProvider,
-        effectiveModel: runtime.activeModel,
-        diagnosticsTargetProvider: result.probe?.targetProvider || runtime.activeProvider,
-        diagnosticsTargetModel: result.probe?.targetModel || runtime.activeModel,
-        fallbackConfigured,
-        fallbackProvider: fallbackConfigured ? runtime.activeFallbackProvider : '',
-        fallbackModel: fallbackConfigured ? runtime.activeFallbackModel : '',
+        effectiveProvider: resolved.effectiveProvider,
+        effectiveModel: resolved.effectiveModel,
+        diagnosticsTargetProvider: result.probe?.targetProvider || resolved.diagnosticsTargetProvider,
+        diagnosticsTargetModel: result.probe?.targetModel || resolved.diagnosticsTargetModel,
+        fallbackConfigured: resolved.effectiveFallbackEnabled,
+        fallbackProvider: resolved.effectiveFallbackEnabled ? resolved.effectiveFallbackProvider : '',
+        fallbackModel: resolved.effectiveFallbackEnabled ? resolved.effectiveFallbackModel : '',
         timeoutMs: configAi.timeoutMs,
-        sourceProvider: configAi.sources?.AI_PROVIDER?.source || 'default',
-        sourceModel: configAi.sources?.AI_MODEL?.source || 'default',
-        sourceFallbackProvider: configAi.sources?.AI_FALLBACK_PROVIDER?.source || 'default',
-        sourceFallbackModel: configAi.sources?.AI_FALLBACK_MODEL?.source || 'default',
+        sourceProvider: resolved.sources.provider,
+        sourceModel: resolved.sources.model,
+        sourceFallbackProvider: resolved.sources.fallbackProvider,
+        sourceFallbackModel: resolved.sources.fallbackModel,
         sourceTimeoutMs: configAi.sources?.AI_TIMEOUT_MS?.source || 'default',
-        legacyUsed: configAi.legacyUsed || []
+        legacyUsed: resolved.legacyUsed || []
       }
     },
-    last: runtimeSettings.getDiagnosticsState(),
+    last: diagnosticsState,
     probe: result
   };
 }
