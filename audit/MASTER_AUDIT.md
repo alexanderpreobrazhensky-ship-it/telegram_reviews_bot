@@ -62,3 +62,10 @@ Do not recreate split audit files.
 - AI is infrastructure-only right now.
 - Runtime request handling does not invoke AI providers.
 - Before enabling AI in production, add provider-specific rate limiting, audit logging, and user-facing fallback messaging.
+
+## AI Stage 1 (Infrastructure Only)
+- Added multi-provider AI infrastructure layer under `src/infrastructure/ai` with `proxy` as primary default, `openai` fallback, and direct `deepseek` adapter.
+- Added runtime AI settings storage via DB `meta` keys with admin runtime switching support (provider/model + fallback).
+- Added forced AI diagnostics path and AI event logging (task/provider/model/duration/success/fallback/error).
+- Added admin-only Master Bot AI control plane: AI status, diagnostics, switching, and logs.
+- AI business usage remains disabled by default (`AI_BUSINESS_USAGE_ENABLED=false`) and not connected to client/master business flows.

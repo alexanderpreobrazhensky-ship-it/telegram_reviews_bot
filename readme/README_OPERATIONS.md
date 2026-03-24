@@ -16,3 +16,11 @@
 - Archived requests are read-only from the bot UI.
 - `error` indicates outbound clarification failure and should be investigated through logs.
 - Diagnostics and logs are admin-only.
+
+
+## AI operations (admin)
+Master bot has admin-only AI control plane:
+- `AI Статус` (`/ai_status`)
+- `AI Диагностика` (`/ai_diagnostics`)
+- `AI Переключение` (`/ai_switch provider:<...> model:<...> fallbackProvider:<...> fallbackModel:<...>`)
+- `AI Логи` (`/ai_logs ...`)

@@ -12,6 +12,7 @@ const { createRepositories } = require('../infrastructure/repositories');
 const { ingestEmail } = require('../integrations/email');
 const { oneCSyncPlaceholder } = require('../integrations/one_c');
 const { integrationService, createReportingService } = require('../core/application');
+const { initializeAiInfrastructure } = require('../infrastructure/ai');
 
 function readBody(req) {
   return new Promise((resolve) => {
@@ -388,6 +389,7 @@ function buildMaxHealthPayload(config) {
 function createServer({ config, logger }) {
   const router = [];
   const repositories = createRepositories({ db });
+  const aiInfrastructure = initializeAiInfrastructure({ config, db, logger });
   const reportingService = createReportingService({ db });
   const webappLimiter = createRateLimiter({ windowMs: config.webappRateLimitWindowMs, limit: config.webappRateLimitMax });
   const webhookLimiter = createRateLimiter({ windowMs: config.webhookRateLimitWindowMs, limit: config.webhookRateLimitMax });
@@ -463,8 +465,12 @@ function createServer({ config, logger }) {
           MAX_WEBAPP_URL: config.maxWebAppUrl || '',
           INTERNAL_ADMIN_WHITELIST: (config.internalAdminWhitelist || []).length,
           AI_ENABLED: Boolean(config.ai?.enabled),
+          AI_BUSINESS_USAGE_ENABLED: Boolean(config.ai?.businessUsageEnabled),
           AI_PROVIDER: config.ai?.provider || '',
           AI_MODEL: config.ai?.model || '',
+          AI_FALLBACK_PROVIDER: config.ai?.fallbackProvider || '',
+          AI_FALLBACK_MODEL: config.ai?.fallbackModel || '',
+          AI_ALLOWED_PROVIDERS: config.ai?.allowedProviders || [],
           AI_TIMEOUT_MS: config.ai?.timeoutMs || 0
         },
         healthEndpoints: ['/health', '/health/db', '/health/max'],
@@ -472,7 +478,12 @@ function createServer({ config, logger }) {
           waitingDecisionScheduled: db.listTasks(['scheduled', 'processing']).filter((item) => item.taskType === 'waiting_decision_followup').length,
           consultedScheduled: db.listTasks(['scheduled', 'processing']).filter((item) => item.taskType === 'consulted_followup').length
         },
-        webhooks: router.filter((item) => item.path.includes('/webhook')).map((item) => `${item.method} ${item.path}`)
+        webhooks: router.filter((item) => item.path.includes('/webhook')).map((item) => `${item.method} ${item.path}`),
+        ai: {
+          ...(aiInfrastructure.runtimeSettings.get() || {}),
+          proxyConfigured: Boolean(config.ai?.proxyUrl && config.ai?.proxyToken),
+          configValid: Boolean(config.ai?.provider && config.ai?.model)
+        }
       });
     }
 
@@ -865,7 +876,7 @@ function createServer({ config, logger }) {
       const { body, invalidJson } = await readBody(req);
       if (invalidJson) return sendJson(res, 400, { error: 'Invalid JSON payload' });
       const payload = matched.handler
-        ? await matched.handler({ body, config, headers: req.headers, pathname, method: req.method, rawHeaders: req.rawHeaders || [] })
+        ? await matched.handler({ body, config, headers: req.headers, pathname, method: req.method, rawHeaders: req.rawHeaders || [], aiInfrastructure })
         : { accepted: true };
       logger.info(`Accepted route: ${req.method} ${pathname}`);
       return sendJson(res, payload?.statusCode || 200, payload);

@@ -66,12 +66,20 @@ function loadConfig() {
     'SCHEDULER_STUCK_TIMEOUT_MS',
     'FEEDBACK_REQUEST_DELAY_MINUTES',
     'AI_ENABLED',
+    'AI_BUSINESS_USAGE_ENABLED',
     'AI_PROVIDER',
     'AI_MODEL',
-    'AI_API_KEY',
+    'AI_FALLBACK_PROVIDER',
+    'AI_FALLBACK_MODEL',
+    'AI_PROXY_URL',
+    'AI_PROXY_TOKEN',
+    'AI_OPENAI_API_KEY',
+    'AI_DEEPSEEK_API_KEY',
+    'AI_ALLOWED_PROVIDERS',
+    'AI_DIAGNOSTICS_ENABLED',
     'AI_TIMEOUT_MS'
   ];
-  const legacyEnv = ['DB_FILE_PATH', 'INTERNAL_ADMIN_WHITELIST_IDS', 'WEBAPP_TELEGRAM_CHANNEL_LINK'];
+  const legacyEnv = ['DB_FILE_PATH', 'INTERNAL_ADMIN_WHITELIST_IDS', 'WEBAPP_TELEGRAM_CHANNEL_LINK', 'AI_API_KEY'];
   const knownEnv = new Set([...requiredEnv, ...optionalEnv, ...legacyEnv, 'PORT', 'NODE_ENV', 'DB_DRIVER', 'DB_URL', 'QUEUE_DRIVER', 'ONE_C_WEBHOOK_SECRET', 'ENABLE_INTEGRATION_WORKER', 'INTEGRATION_RETRY_MAX', 'INTEGRATION_RETRY_DELAY_SECONDS', 'ONE_C_SYNC_ENABLED', 'EMAIL_IMPORT_ENABLED', 'MAX_DIAGNOSTICS_ENABLED']);
 
   const config = {
@@ -117,11 +125,19 @@ function loadConfig() {
     internalAdminWhitelist,
     maxDiagnosticsEnabled: parseBoolean(process.env.MAX_DIAGNOSTICS_ENABLED, true),
     ai: {
-      enabled: parseBoolean(process.env.AI_ENABLED, false),
-      provider: process.env.AI_PROVIDER || 'openai',
-      model: process.env.AI_MODEL || '',
-      apiKey: process.env.AI_API_KEY || '',
-      timeoutMs: parseNumber(process.env.AI_TIMEOUT_MS, 5000, { min: 1000, max: 60000 })
+      enabled: parseBoolean(process.env.AI_ENABLED, true),
+      businessUsageEnabled: parseBoolean(process.env.AI_BUSINESS_USAGE_ENABLED, false),
+      provider: process.env.AI_PROVIDER || 'proxy',
+      model: process.env.AI_MODEL || 'deepseek-chat',
+      fallbackProvider: process.env.AI_FALLBACK_PROVIDER || 'openai',
+      fallbackModel: process.env.AI_FALLBACK_MODEL || 'gpt-4o-mini',
+      proxyUrl: process.env.AI_PROXY_URL || '',
+      proxyToken: process.env.AI_PROXY_TOKEN || '',
+      openaiApiKey: process.env.AI_OPENAI_API_KEY || process.env.AI_API_KEY || '',
+      deepseekApiKey: process.env.AI_DEEPSEEK_API_KEY || '',
+      allowedProviders: parseList(process.env.AI_ALLOWED_PROVIDERS || 'proxy,openai,deepseek'),
+      diagnosticsEnabled: parseBoolean(process.env.AI_DIAGNOSTICS_ENABLED, true),
+      timeoutMs: parseNumber(process.env.AI_TIMEOUT_MS, 8000, { min: 1000, max: 60000 })
     },
     envAudit: {
       required: requiredEnv,
@@ -134,9 +150,10 @@ function loadConfig() {
       deprecatedConfigured: [
         process.env.DB_FILE_PATH ? 'DB_FILE_PATH' : null,
         process.env.INTERNAL_ADMIN_WHITELIST_IDS ? 'INTERNAL_ADMIN_WHITELIST_IDS' : null,
-        process.env.WEBAPP_TELEGRAM_CHANNEL_LINK ? 'WEBAPP_TELEGRAM_CHANNEL_LINK' : null
+        process.env.WEBAPP_TELEGRAM_CHANNEL_LINK ? 'WEBAPP_TELEGRAM_CHANNEL_LINK' : null,
+        process.env.AI_API_KEY ? 'AI_API_KEY' : null
       ].filter(Boolean),
-      unknownConfigured: Object.keys(process.env).filter((key) => /^(TELEGRAM|MAX|WEBAPP|DB_|QUEUE_|ONE_C_|INTEGRATION_|MASTER_BOT_|INTERNAL_ADMIN_|SCHEDULER_|FEEDBACK_|PORT|NODE_ENV)/.test(key) && !knownEnv.has(key)).sort()
+      unknownConfigured: Object.keys(process.env).filter((key) => /^(TELEGRAM|MAX|WEBAPP|DB_|QUEUE_|ONE_C_|INTEGRATION_|MASTER_BOT_|INTERNAL_ADMIN_|SCHEDULER_|FEEDBACK_|PORT|NODE_ENV|AI_)/.test(key) && !knownEnv.has(key)).sort()
     }
   };
 

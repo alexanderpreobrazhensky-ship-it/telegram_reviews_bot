@@ -52,3 +52,7 @@ Processed substatuses:
 - `rejected`
 
 Archive is modeled by `archived=true`, not by a separate operational queue status.
+
+
+## AI contour status
+Project now contains Stage 1 AI infrastructure/control-plane only. Business flows remain non-AI by default.

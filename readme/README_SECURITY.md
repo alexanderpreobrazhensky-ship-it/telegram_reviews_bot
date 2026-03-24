@@ -19,3 +19,9 @@
 - Internal routes are still simple env-allowlist endpoints.
 - Bot identity is provider payload-based, not a full IAM system.
 - SQLite file access should be restricted by deployment filesystem permissions.
+
+
+## AI security notes
+- AI secrets are never printed raw in diagnostics/logs.
+- Proxy/OpenAI/DeepSeek secrets are masked in admin diagnostics.
+- AI admin surfaces are restricted to admin-only in Master bot.
