@@ -22,7 +22,17 @@ async function runAiDiagnostics({ aiService, runtimeSettings, configAi, provider
       authConfigured: {
         proxyToken: maskSecret(configAi.proxyToken),
         openaiApiKey: maskSecret(configAi.openaiApiKey),
-        deepseekApiKey: maskSecret(configAi.deepseekApiKey)
+        deepseekApiKey: maskSecret(configAi.deepseekApiKey),
+        geminiApiKey: maskSecret(configAi.geminiApiKey)
+      },
+      resolvedConfig: {
+        provider: configAi.provider,
+        model: configAi.model,
+        timeoutMs: configAi.timeoutMs,
+        sourceProvider: configAi.sources?.AI_PROVIDER?.source || 'default',
+        sourceModel: configAi.sources?.AI_MODEL?.source || 'default',
+        sourceTimeoutMs: configAi.sources?.AI_TIMEOUT_MS?.source || 'default',
+        legacyUsed: configAi.legacyUsed || []
       }
     },
     last: runtimeSettings.getDiagnosticsState(),

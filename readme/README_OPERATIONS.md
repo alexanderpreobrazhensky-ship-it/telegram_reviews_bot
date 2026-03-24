@@ -11,12 +11,13 @@
 8. Trigger `/diagnostics` and `/logs` as admin
 9. Verify one `waiting_decision` and one `consulted` task exist in scheduler persistence
 10. Confirm archive contains `spam`, `rejected`, and `completed`
+11. Trigger `/ai_status` and verify resolved provider/model and env-source lines are present
+12. Trigger `/ai_diagnostics` and ensure secrets are masked and legacy env usage is visible when configured
 
 ## Operator notes
 - Archived requests are read-only from the bot UI.
 - `error` indicates outbound clarification failure and should be investigated through logs.
 - Diagnostics and logs are admin-only.
-
 
 ## AI operations (admin)
 Master bot has admin-only AI control plane:
@@ -24,3 +25,9 @@ Master bot has admin-only AI control plane:
 - `AI Диагностика` (`/ai_diagnostics`)
 - `AI Переключение` (`/ai_switch provider:<...> model:<...> fallbackProvider:<...> fallbackModel:<...>`)
 - `AI Логи` (`/ai_logs ...`)
+
+## AI stage-1 operational policy
+- Keep `AI_BUSINESS_USAGE_ENABLED=false`.
+- Prefer `AI_PROVIDER=proxy` + DeepSeek model.
+- Allow `deepseek` as direct provider for diagnostics/switching when needed.
+- OpenAI/Gemini env presence is tolerated for compatibility but not required for stage-1 operations.

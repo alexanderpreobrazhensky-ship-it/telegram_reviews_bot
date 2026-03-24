@@ -19,8 +19,13 @@
 - State machine and validation in `src/core/shared/requestValidation.js`.
 - Persistence and migration in `src/infrastructure/db/index.js`.
 - Internal diagnostics/logs in `/internal/diagnostics` and `/internal/logs`.
-- AI-ready provider registry in `src/infrastructure/ai/index.js`.
+- AI infrastructure registry in `src/infrastructure/ai/index.js`.
 
+## AI runtime mode (current stage)
+- Stage 1 is DeepSeek-focused foundation.
+- Canonical config is normalized once in `src/infrastructure/config/index.js`, then reused by AI runtime/services.
+- Business usage remains OFF by default (`AI_BUSINESS_USAGE_ENABLED=false`), so AI is not wired into business request flows.
+- Diagnostics and runtime switching are active and operate on normalized canonical values.
 
 ## AI runtime settings (DB/meta)
 Runtime overrides are stored in DB meta and can be changed without redeploy:
@@ -29,3 +34,7 @@ Runtime overrides are stored in DB meta and can be changed without redeploy:
 - `ai_enabled_runtime`
 - `ai_business_usage_enabled_runtime`
 - `last_ai_diagnostics_at` / `last_ai_diagnostics_status` / `last_ai_diagnostics_summary`
+
+## AI env resolution visibility
+- `/internal/diagnostics` returns resolved AI config and source metadata (which env key won during resolution).
+- `/ai_status` and `/ai_diagnostics` show active provider/model plus resolved env source and legacy usage (masked secrets).
