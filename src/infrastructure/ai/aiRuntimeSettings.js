@@ -121,7 +121,22 @@ function createAiRuntimeSettings({ db, configAi }) {
       targetModel: state.targetModel || '',
       fallbackUsed: Boolean(state.fallbackUsed),
       fallbackConfigured: Boolean(state.fallbackConfigured),
-      errorCode: state.errorCode || ''
+      errorCode: state.errorCode || '',
+      errorDetail: state.errorDetail || '',
+      configStatus: state.configStatus || 'invalid',
+      primaryStatus: state.primaryStatus || 'not tested',
+      fallbackStatus: state.fallbackStatus || 'not configured',
+      configuredProvider: state.configuredProvider || '',
+      configuredModel: state.configuredModel || '',
+      effectiveProvider: state.effectiveProvider || '',
+      effectiveModel: state.effectiveModel || '',
+      runtimeOverridePresent: Boolean(state.runtimeOverridePresent),
+      runtimeOverrideValid: Boolean(state.runtimeOverrideValid),
+      primaryTestAttempted: Boolean(state.primaryTestAttempted),
+      primaryTestResult: state.primaryTestResult || 'NOT_TESTED',
+      fallbackTestAttempted: Boolean(state.fallbackTestAttempted),
+      fallbackTestResult: state.fallbackTestResult || 'FALLBACK_NOT_CONFIGURED',
+      finalDiagnosticsStatus: state.finalDiagnosticsStatus || state.status || 'unknown'
     };
     db.setMetaValue(DEFAULT_DIAGNOSTICS_KEY, payload);
     update({

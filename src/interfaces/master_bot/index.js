@@ -402,12 +402,21 @@ function buildAiStatusText({ aiInfrastructure, config }) {
     `Fallback provider/model: ${fallbackConfigured ? `${resolved.effectiveFallbackProvider}/${resolved.effectiveFallbackModel}` : '-'}`,
     `Fallback source: provider=${resolved.sources.fallbackProvider} model=${resolved.sources.fallbackModel}`,
     `Diagnostics target provider/model: ${resolved.diagnosticsTargetProvider}/${resolved.diagnosticsTargetModel}`,
+    `Runtime override present: ${resolved.runtimeOverridePresent ? 'yes' : 'no'}`,
+    `Runtime override valid: ${resolved.runtimeOverrideValid ? 'yes' : 'no'}`,
     `Allowed providers: ${(runtime.allowedProviders || []).join(', ') || '-'}`,
     `Timeout: ${config.ai?.timeoutMs || 0}ms (source=${config.ai?.sources?.AI_TIMEOUT_MS?.source || 'default'})`,
     `Proxy configured: ${config.ai?.proxyUrl && config.ai?.proxyToken ? 'yes' : 'no'}`,
     `Legacy env detected: ${(config.ai?.legacyDetected || []).join(', ') || '-'}`,
     `Legacy env ignored: ${(config.ai?.legacyIgnored || []).join(', ') || '-'}`,
     `Legacy env used: ${(config.ai?.legacyUsed || []).join(', ') || '-'}`,
+    `Config status: ${diagnostics.configStatus || 'unknown'}`,
+    `Primary status: ${diagnostics.primaryStatus || 'not tested'}`,
+    `Fallback status: ${diagnostics.fallbackStatus || (fallbackConfigured ? 'not tested' : 'not configured')}`,
+    `Primary test attempted: ${diagnostics.primaryTestAttempted ? 'yes' : 'no'}`,
+    `Primary test result: ${diagnostics.primaryTestResult || 'NOT_TESTED'}`,
+    `Fallback test attempted: ${diagnostics.fallbackTestAttempted ? 'yes' : 'no'}`,
+    `Fallback test result: ${diagnostics.fallbackTestResult || (fallbackConfigured ? 'NOT_TESTED' : 'FALLBACK_NOT_CONFIGURED')}`,
     `Last diagnostics: ${diagnostics.status || runtime.lastAiDiagnosticsStatus || 'never'}`,
     `Last diagnostics at: ${diagnostics.at || runtime.lastAiDiagnosticsAt || '-'}`,
     `Last diagnostics summary: ${diagnostics.summary || runtime.lastAiDiagnosticsSummary || '-'}`
@@ -425,7 +434,7 @@ function buildAiLogsText(aiInfrastructure, filters = {}) {
     taskType: filters.task || null,
     limit: Number(filters.limit || 20)
   }) || [];
-  const lines = events.map((item) => `${item.timestamp} | task_type=${item.taskType} | provider=${item.provider} | model=${item.model} | duration_ms=${item.durationMs} | ${item.success ? 'success' : 'fail'} | fallback_used=${item.fallbackUsed ? 'yes' : 'no'} | error_code=${item.errorCode || '-'} | error=${item.errorSummary || '-'}`);
+  const lines = events.map((item) => `${item.timestamp} | task_type=${item.taskType} | stage=${item.metaJson?.stage || '-'} | provider=${item.provider} | model=${item.model} | duration_ms=${item.durationMs} | ${item.success ? 'success' : 'fail'} | fallback_used=${item.fallbackUsed ? 'yes' : 'no'} | config_validation_result=${item.metaJson?.configValidationResult || '-'} | primary_provider_attempt=${item.metaJson?.primaryProviderAttempt || '-'} | primary_provider_result=${item.metaJson?.primaryProviderResult || '-'} | fallback_provider_attempt=${item.metaJson?.fallbackProviderAttempt || '-'} | fallback_provider_result=${item.metaJson?.fallbackProviderResult || '-'} | final_diagnostics_status=${item.metaJson?.finalDiagnosticsStatus || '-'} | error_code=${item.errorCode || '-'} | error=${item.errorSummary || '-'}`);
   return [
     'AI логи:',
     `Фильтры: since=${filters.since || '-'} provider=${filters.provider || '-'} status=${filters.status || '-'} task=${filters.task || '-'}`,
@@ -434,6 +443,23 @@ function buildAiLogsText(aiInfrastructure, filters = {}) {
     `Ignored legacy keys: ${(configAi?.legacyIgnored || []).join(', ') || '-'}`,
     lines.join('\n') || 'Нет AI событий'
   ].join('\n\n');
+}
+
+function buildAiDiagnosticsSummary(result) {
+  const state = result?.state || {};
+  const probe = result?.probe || {};
+  return [
+    `${result.ok ? '✅' : '❌'} ${result.summary || (result.ok ? 'AI diagnostics OK' : 'AI diagnostics failed')}`,
+    `final_status=${state.finalDiagnosticsStatus || state.status || probe.diagnosticsStatus || '-'}`,
+    `configured=${state.configuredProvider || '-'}:${state.configuredModel || '-'}`,
+    `effective=${state.effectiveProvider || state.provider || '-'}:${state.effectiveModel || state.model || '-'}`,
+    `target=${state.targetProvider || probe.targetProvider || '-'}:${state.targetModel || probe.targetModel || '-'}`,
+    `runtime_override_present=${state.runtimeOverridePresent ? 'yes' : 'no'} runtime_override_valid=${state.runtimeOverrideValid ? 'yes' : 'no'}`,
+    `primary_test_attempted=${state.primaryTestAttempted ? 'yes' : 'no'} primary_test_result=${state.primaryTestResult || probe.primaryTestResult || 'NOT_TESTED'}`,
+    `fallback_configured=${state.fallbackConfigured ? 'yes' : 'no'} fallback_test_attempted=${state.fallbackTestAttempted ? 'yes' : 'no'} fallback_test_result=${state.fallbackTestResult || probe.fallbackTestResult || 'FALLBACK_NOT_CONFIGURED'}`,
+    `config_status=${state.configStatus || probe.configStatus || '-'} primary_status=${state.primaryStatus || probe.primaryStatus || '-'} fallback_status=${state.fallbackStatus || probe.fallbackStatus || '-'}`,
+    `duration=${state.durationMs || probe.durationMs || 0}ms`
+  ].join('\n');
 }
 
 function parseAiSwitchCommand(text = '') {
@@ -682,8 +708,7 @@ async function handleMasterWebhook({ body, config, headers = {}, rawHeaders = []
           updateSession(sessionKey, { screen: 'menu:ai:diagnostics', backAction: 'menu:ai', step: null });
           await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: 'AI диагностика...' });
           const result = await aiInfrastructure.runDiagnostics();
-          return respondWithMessage({ channel, token, recipientId, text: `${result.ok ? '✅' : '❌'} ${result.probe.summary}
-provider=${result.probe.state.provider || '-'} model=${result.probe.state.model || '-'} fallback=${result.probe.state.fallbackUsed ? 'yes' : 'no'} duration=${result.probe.state.durationMs}ms`, payload: { ok: result.ok, diagnostics: result }, extra: { reply_markup: buildAiMenuKeyboard() } });
+          return respondWithMessage({ channel, token, recipientId, text: buildAiDiagnosticsSummary(result), payload: { ok: result.ok, diagnostics: result }, extra: { reply_markup: buildAiMenuKeyboard() } });
         }
         if (data === 'ai:switch') {
           updateSession(sessionKey, { screen: 'menu:ai:switch', backAction: 'menu:ai', step: null });
@@ -837,7 +862,7 @@ provider=${result.probe.state.provider || '-'} model=${result.probe.state.model 
       if (!isAdmin(actor)) return respondWithMessage({ channel, token, recipientId, text: 'Недостаточно прав.', payload: { ok: false, error: 'ACCESS_DENIED' } });
       updateSession(sessionKey, { screen: 'menu:ai:diagnostics', backAction: 'menu:ai', step: null });
       const result = await aiInfrastructure.runDiagnostics();
-      return respondWithMessage({ channel, token, recipientId, text: `${result.ok ? '✅' : '❌'} ${result.probe.summary}` , payload: { ok: result.ok, diagnostics: result }, extra: { reply_markup: buildAiMenuKeyboard() } });
+      return respondWithMessage({ channel, token, recipientId, text: buildAiDiagnosticsSummary(result), payload: { ok: result.ok, diagnostics: result }, extra: { reply_markup: buildAiMenuKeyboard() } });
     }
     if (text.startsWith('/ai_logs')) {
       if (!isAdmin(actor)) return respondWithMessage({ channel, token, recipientId, text: 'Недостаточно прав.', payload: { ok: false, error: 'ACCESS_DENIED' } });
