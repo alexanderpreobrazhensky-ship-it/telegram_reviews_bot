@@ -1,27 +1,25 @@
 # Security
 
-## Access control
-- `MASTER_BOT_ADMIN_IDS` and `MAX_MASTER_BOT_ADMIN_IDS` bootstrap admin access.
-- Additional master/manager users are persisted in `staff_users` and granted/revoked only through master-bot access flow.
-- Internal admin routes rely on `INTERNAL_ADMIN_WHITELIST`.
+## Access model
+- Bootstrap: `MASTER_BOT_ADMIN_IDS`, `MAX_MASTER_BOT_ADMIN_IDS`.
+- Persistent grants/revokes: через `staff_users` (master bot access flow).
+- Internal pages: `INTERNAL_ADMIN_WHITELIST`.
 
 ## Secret handling
-- Diagnostics and bot-facing status screens mask tokens and secrets.
-- `MAX_WEBHOOK_SECRET` is required for MAX webhook validation when MAX is enabled.
-- AI env is visible in diagnostics only in masked form.
+- В диагностиках и статусах секреты маскируются.
+- В AI-блоке отображается только masked/boolean readiness.
+- `MAX_WEBHOOK_SECRET` обязателен для MAX webhook validation при `MAX_ENABLED=true`.
 
-## Data constraints
-- Phone numbers are normalized to 10 digits without `+7/8`.
-- Outbound client clarification never uses email as a fallback channel.
-- Channel fallback is allowed only when a real `maxId` or `telegramId` exists.
-
-## Operational risks
-- Internal routes are still simple env-allowlist endpoints.
-- Bot identity is provider payload-based, not a full IAM system.
-- SQLite file access should be restricted by deployment filesystem permissions.
-
+## Data safety constraints
+- Номер телефона нормализуется в 10 цифр.
+- Архивные заявки read-only в master card flow.
+- Outbound клиентские сообщения не используют email fallback.
 
 ## AI security notes
-- AI secrets are never printed raw in diagnostics/logs.
-- Proxy/OpenAI/DeepSeek secrets are masked in admin diagnostics.
-- AI admin surfaces are restricted to admin-only in Master bot.
+- AI status/diagnostics/logs доступны только admin роли.
+- Разделяются config-invalid и provider-failed состояния.
+- Runtime override не должен скрывать некорректную canonical config.
+
+## Operational risks
+- Internal endpoints защищены allowlist-подходом, не полноценным IAM.
+- Безопасность SQLite зависит от прав файловой системы и deploy-контекста.

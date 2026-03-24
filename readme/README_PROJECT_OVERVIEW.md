@@ -1,42 +1,30 @@
 # Project Overview
 
-## What this project is
-A Node-first multi-bot platform with one shared runtime:
-- shared HTTP server
-- shared WebApp
-- Telegram client bot
-- Telegram master bot
-- Telegram integration bot
-- MAX client bot
-- MAX master bot
-- SQLite persistence
-- in-process persisted scheduler
-- AI-ready infrastructure layer kept disabled by default
+## Что это за проект
+Единый **Node-first** runtime для обработки заявок и операционной работы мастер-команды:
+- HTTP runtime (`app.js` + `src/server/index.js`)
+- Telegram client/master/integration bots
+- MAX client/master bots
+- WebApp (`public/index.html`, `public/webapp.js`)
+- SQLite-first persistence
+- встроенный persisted scheduler
+- AI control plane (инфраструктурный контур + диагностика + runtime switch)
+- Email intake (IMAP) с отдельной логикой T-Business/needs_review
 
-## Canonical production path
+## Production baseline (source of truth)
 - `app.js`
 - `src/server/index.js`
 - `src/infrastructure/config/index.js`
 - `src/infrastructure/db/index.js`
-- `src/interfaces/client_bot/index.js`
 - `src/interfaces/master_bot/index.js`
+- `src/interfaces/client_bot/index.js`
 - `src/interfaces/integration_bot/index.js`
 - `public/webapp.js`
 
-## Current integration-bot model
-- Telegram-only operator bot with reply-keyboard main menu.
-- Main sections: all events, failed, pending, stats, instruction, selfcheck.
-- Event cards support inline callbacks for details, retry, and ignore.
-- Slash commands remain as compatibility/fallback for manual operation.
+## Master-bot reality
+Главное меню: новые заявки, в работе, архив, поиск, quality cases, инструкция, диагностика, логи, доступы, AI (admin).
 
-## Current master-bot model
-- Main menu is inline callback-based.
-- Stable callbacks: `menu:new_requests`, `menu:in_progress`, `menu:archive`, `menu:search`, `menu:quality_cases`, `menu:instruction`, `menu:diagnostics`, `menu:logs`, `menu:access`.
-- Request cards use: take in progress, ask client, processed, in service, complete, comment, details.
-- Legacy inline callbacks are remapped and refreshed instead of surfacing raw transition failures.
-
-## Current request lifecycle
-Primary statuses:
+Статусная модель заявки:
 - `new`
 - `in_progress`
 - `processed`
@@ -44,15 +32,34 @@ Primary statuses:
 - `completed`
 - `error`
 
-Processed substatuses:
+Подстатусы `processed`:
 - `recorded`
 - `consulted`
 - `spam`
 - `waiting_decision`
 - `rejected`
 
-Archive is modeled by `archived=true`, not by a separate operational queue status.
+Архив — это `archived=true`, а не отдельный operational status.
 
+## Email intake / T-Business reality
+Если включён `EMAIL_INTAKE_ENABLED=true`, пуллер IMAP получает письма, нормализует payload, запускает дедупликацию и создаёт заявки.
 
-## AI contour status
-Project now contains Stage 1 AI infrastructure/control-plane only. Business flows remain non-AI by default.
+В payload фиксируются:
+- `source_provider` (`t_business` / `email_generic`)
+- `priority` (для T-Business — `high`)
+- `existing_client`
+- `needs_review`
+- `match_basis`
+- `match_confidence`
+
+## AI reality
+AI уже реализован как отдельный control plane:
+- AI Status
+- AI Diagnostics
+- AI Switch (runtime override)
+- AI Logs
+
+Бизнес-использование AI может быть выключено (`AI_BUSINESS_USAGE_ENABLED=false`), даже если инфраструктура и диагностика активны.
+
+## Аудит
+Единый audit source of truth: `audit/MASTER_AUDIT.md`.

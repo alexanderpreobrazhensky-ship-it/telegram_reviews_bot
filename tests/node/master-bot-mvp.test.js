@@ -214,7 +214,8 @@ test('diagnostics and logs are available only for admin and do not expose raw se
   await withServer(async (base) => {
     const adminDiag = await sendMaster(base, '/diagnostics');
     assert.equal(adminDiag.ok, true);
-    assert.match(adminDiag.text, /Telegram bot: OK/i);
+    assert.match(adminDiag.text, /Channels:/i);
+    assert.match(adminDiag.text, /Telegram client\/master\/integration:/i);
     assert.doesNotMatch(adminDiag.text, /ABCDEF_SECRET/);
 
     const adminLogs = await sendMaster(base, '/logs request:none');
@@ -227,6 +228,46 @@ test('diagnostics and logs are available only for admin and do not expose raw se
   });
   delete process.env.TELEGRAM_CLIENT_BOT_TOKEN;
   delete process.env.TELEGRAM_MASTER_BOT_TOKEN;
+});
+
+test('instruction and diagnostics include new workflow, email and separate AI sections', async () => {
+  process.env.TELEGRAM_CLIENT_BOT_TOKEN = '123456:ABCDEF_SECRET';
+  process.env.TELEGRAM_MASTER_BOT_TOKEN = '123456:MASTER_SECRET';
+  process.env.TELEGRAM_INTEGRATION_BOT_TOKEN = '123456:INTEGRATION_SECRET';
+  process.env.EMAIL_INTAKE_ENABLED = 'true';
+  process.env.EMAIL_IMAP_HOST = 'imap.example.com';
+  process.env.EMAIL_IMAP_USER = 'bot@example.com';
+  process.env.EMAIL_IMAP_PASSWORD = 'secret';
+  process.env.EMAIL_IMAP_FOLDER = 'Т-БАНК ЗАЯВКИ';
+  process.env.AI_ENABLED = 'true';
+  process.env.AI_PROVIDER = 'proxy';
+  process.env.AI_MODEL = 'deepseek-chat';
+  await withServer(async (base) => {
+    const help = await sendMaster(base, '/help');
+    assert.equal(help.ok, true);
+    assert.match(help.text, /Главное меню:/i);
+    assert.match(help.text, /Needs review \/ review scenarios:/i);
+    assert.match(help.text, /AI control plane \(admin\):/i);
+    assert.match(help.text, /Email intake \/ T-Business:/i);
+
+    const diagnostics = await sendMaster(base, '/diagnostics');
+    assert.equal(diagnostics.ok, true);
+    assert.match(diagnostics.text, /Runtime:/i);
+    assert.match(diagnostics.text, /DB \/ persistence:/i);
+    assert.match(diagnostics.text, /Email intake:/i);
+    assert.match(diagnostics.text, /AI diagnostics \(separate block\):/i);
+  });
+  delete process.env.TELEGRAM_CLIENT_BOT_TOKEN;
+  delete process.env.TELEGRAM_MASTER_BOT_TOKEN;
+  delete process.env.TELEGRAM_INTEGRATION_BOT_TOKEN;
+  delete process.env.EMAIL_INTAKE_ENABLED;
+  delete process.env.EMAIL_IMAP_HOST;
+  delete process.env.EMAIL_IMAP_USER;
+  delete process.env.EMAIL_IMAP_PASSWORD;
+  delete process.env.EMAIL_IMAP_FOLDER;
+  delete process.env.AI_ENABLED;
+  delete process.env.AI_PROVIDER;
+  delete process.env.AI_MODEL;
 });
 
 test('persistence stores status history internal comments and assignment', async () => {
