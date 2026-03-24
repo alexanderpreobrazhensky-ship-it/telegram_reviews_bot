@@ -190,3 +190,39 @@ AI вынесен в отдельный блок, где отражаются:
 - Документационная прозрачность и диагностика подтверждены.
 - Live корректность зависит от валидности окружения и внешней доступности провайдеров.
 - Задача по переносу reference dataset не включает исправление AI runtime/config logic.
+
+## 17) WebApp existing client deterministic lookup (phone+fio)
+
+### Что внедрено
+- В backend submit flow WebApp/site (`/api/client/requests/*`) добавлен централизованный lookup в reference bridge SQLite.
+- Источник данных: `data/reference/client_vehicle_bridge/lira_normalized_database.sqlite` (read-only usage).
+- Правило матчинга: exact-only `phone(10 digits) + fio(normalized)`.
+- Результат сохраняется в `request.payload`:
+  - `existing_client`
+  - `client_match_basis`
+  - `matched_reference_client_id`
+  - `matched_reference_source`
+  - `matched_reference_snapshot`
+  - `needs_review`
+
+### Конфликтная логика
+- `1 match`: `existing_client=true`, `client_match_basis=phone_fio`, `needs_review=false`.
+- `0 match`: `existing_client=false`.
+- `>1 matches`: `existing_client=false`, `needs_review=true`, `client_match_basis=conflict_multiple_matches`.
+
+### Отображение
+- Master bot карточка и первичное уведомление содержат поля:
+  - `Действующий клиент`
+  - `Основание проверки`
+  - `ID в reference-базе`
+  - `Требуется проверка`
+- Internal request card (`/internal/requests/:id`) также показывает lookup-поля.
+
+### Диагностика
+- `GET /internal/diagnostics` дополнен блоком `existingClientLookup`:
+  - `enabled`, `available`, `datasetPath`, `lastLookupStatus`, `lastError`.
+
+### Ограничения
+- Email/VIN не участвуют в ключе WebApp lookup.
+- Fuzzy/AI matching не используется.
+- Reference bridge dataset остаётся отдельным lookup-слоем и не подменяет runtime DB.

@@ -9,6 +9,7 @@ const { REQUEST_STATUSES, validateClientRequestPayload: validateClientRequestPay
 const { createRateLimiter } = require('../infrastructure/rate_limit');
 const { filterRequestsForExport, mapRequestForExport, serializeCsv } = require('../infrastructure/export');
 const { createRepositories } = require('../infrastructure/repositories');
+const { createReferenceClientLookup } = require('../infrastructure/referenceClientLookup');
 const { ingestEmail } = require('../integrations/email');
 const { oneCSyncPlaceholder } = require('../integrations/one_c');
 const { integrationService, createReportingService } = require('../core/application');
@@ -109,12 +110,19 @@ async function sendTelegramMessage(token, chatId, text, extra = {}) {
 
 async function duplicateToMastersChat({ config, request, payload }) {
   if (!config.telegramMasterBotToken || !config.telegramMastersChatId) return;
+  const existingClient = payload.existing_client === true;
+  const needsReview = payload.needs_review === true;
+  const basis = payload.client_match_basis || '-';
   const text = [
     `Новая заявка: ${request.id}`,
     `Тип: ${request.requestType}`,
     `Телефон: ${payload.phone || '-'}`,
     `VIN: ${payload.vin || '-'}`,
-    `Описание: ${payload.description || payload.question || payload.changeDetails || '-'}`
+    `Описание: ${payload.description || payload.question || payload.changeDetails || '-'}`,
+    `Действующий клиент: ${existingClient ? 'Да' : 'Нет'}`,
+    `Основание: ${basis}`,
+    `ID в reference-базе: ${payload.matched_reference_client_id || '-'}`,
+    `Требуется проверка: ${needsReview ? 'Да' : 'Нет'}`
   ].join('\n');
   await sendTelegramMessage(config.telegramMasterBotToken, Number(config.telegramMastersChatId), text, {
     reply_markup: {
@@ -139,8 +147,37 @@ async function duplicateToMastersChat({ config, request, payload }) {
   });
 }
 
-function createClientRequest({ body, type, sourceChannel = 'webapp', repositories = createRepositories({ db }) }) {
+function createClientRequest({
+  body,
+  type,
+  sourceChannel = 'webapp',
+  repositories = createRepositories({ db }),
+  existingClientLookup = null,
+  logger = console
+}) {
   const normalizedPhone = resolvePhoneInput(body);
+  const lookup = existingClientLookup?.lookupByPhoneAndFio({
+    phone: normalizedPhone,
+    fullName: body.fullName
+  }) || {
+    existingClient: false,
+    needsReview: false,
+    clientMatchBasis: 'lookup_disabled',
+    matchedReferenceClientId: null,
+    matchedReferenceSource: null,
+    matchedReferenceSnapshot: null,
+    lookupStatus: 'lookup_disabled',
+    normalizedPhone,
+    normalizedFio: String(body.fullName || '').trim().toLowerCase()
+  };
+  logger.info('webapp request received', { sourceChannel, requestType: type });
+  logger.info('webapp phone normalized', { sourceChannel, normalizedPhone: lookup.normalizedPhone });
+  logger.info('webapp fio normalized', { sourceChannel, normalizedFio: lookup.normalizedFio });
+  logger.info('reference lookup attempted', {
+    sourceChannel,
+    lookupStatus: lookup.lookupStatus,
+    matchedReferenceClientId: lookup.matchedReferenceClientId || null
+  });
   const client = repositories.requests.createClient({
     fullName: body.fullName,
     phone: normalizedPhone,
@@ -169,7 +206,13 @@ function createClientRequest({ body, type, sourceChannel = 'webapp', repositorie
       question: body.question || '',
       changeDetails: body.changeDetails || '',
       contactSource: body.contactSource || body.nativeContact?.source || 'manual',
-      nativeContact: body.nativeContact || null
+      nativeContact: body.nativeContact || null,
+      existing_client: Boolean(lookup.existingClient),
+      needs_review: Boolean(lookup.needsReview),
+      client_match_basis: lookup.clientMatchBasis || 'phone_fio_no_match',
+      matched_reference_client_id: lookup.matchedReferenceClientId || null,
+      matched_reference_source: lookup.matchedReferenceSource || null,
+      matched_reference_snapshot: lookup.matchedReferenceSnapshot || null
     }
   });
   db.createCommunicationEvent({
@@ -180,7 +223,7 @@ function createClientRequest({ body, type, sourceChannel = 'webapp', repositorie
     direction: 'inbound',
     payload: { action: 'request_created', type, contactSource: body.contactSource || body.nativeContact?.source || 'manual' }
   });
-  return { client, vehicle, request };
+  return { client, vehicle, request, existingClientLookup: lookup };
 }
 
 function trackAnalytics(event) {
@@ -306,6 +349,7 @@ function renderInternalRequestsPage({ requests, filters, adminId, requestCards }
 
 function renderInternalRequestCardPage({ adminId, card }) {
   const request = card.request;
+  const payload = request.payload || {};
   const eventsHtml = (card.requestEvents || []).map((event) => `
     <li>
       <strong>${escapeHtml(event.canonicalEventType || event.eventType)}</strong>
@@ -327,6 +371,11 @@ function renderInternalRequestCardPage({ adminId, card }) {
         <li>Created: ${escapeHtml(request.createdAt)}</li>
         <li>Phone: ${escapeHtml(card.client?.phone || '-')}</li>
         <li>Source: ${escapeHtml(request.sourceChannel || '-')}</li>
+        <li>Existing client: ${escapeHtml(payload.existing_client === true ? 'yes' : 'no')}</li>
+        <li>Client match basis: ${escapeHtml(payload.client_match_basis || '-')}</li>
+        <li>Reference client id: ${escapeHtml(payload.matched_reference_client_id || '-')}</li>
+        <li>Reference source: ${escapeHtml(payload.matched_reference_source || '-')}</li>
+        <li>Needs review: ${escapeHtml(payload.needs_review === true ? 'yes' : 'no')}</li>
         <li>Assignee: ${escapeHtml(request.assignedTo || '-')}</li>
         <li>Assigned by: ${escapeHtml(request.assignedBy || '-')}</li>
         <li>Assigned at: ${escapeHtml(request.assignedAt || '-')}</li>
@@ -389,6 +438,7 @@ function buildMaxHealthPayload(config) {
 function createServer({ config, logger }) {
   const router = [];
   const repositories = createRepositories({ db });
+  const existingClientLookup = createReferenceClientLookup({ logger });
   const aiInfrastructure = initializeAiInfrastructure({ config, db, logger });
   const reportingService = createReportingService({ db });
   const webappLimiter = createRateLimiter({ windowMs: config.webappRateLimitWindowMs, limit: config.webappRateLimitMax });
@@ -473,6 +523,7 @@ function createServer({ config, logger }) {
           AI_ALLOWED_PROVIDERS: config.ai?.allowedProviders || [],
           AI_TIMEOUT_MS: config.ai?.timeoutMs || 0
         },
+        existingClientLookup: existingClientLookup.getDiagnostics(),
         healthEndpoints: ['/health', '/health/db', '/health/max'],
         scheduler: {
           waitingDecisionScheduled: db.listTasks(['scheduled', 'processing']).filter((item) => item.taskType === 'waiting_decision_followup').length,
@@ -674,7 +725,14 @@ function createServer({ config, logger }) {
         text: body.description || body.question || body.changeDetails || '',
         withinMs: config.webappDedupeWindowMs
       });
-      const { client, request: created } = createClientRequest({ body, type, sourceChannel, repositories });
+      const { client, request: created } = createClientRequest({
+        body,
+        type,
+        sourceChannel,
+        repositories,
+        existingClientLookup,
+        logger
+      });
       if (duplicate && duplicate.id !== created.id) {
         repositories.requests.markDuplicate({
           requestId: created.id,
@@ -692,9 +750,9 @@ function createServer({ config, logger }) {
           metaJson: { duplicateRequestId: duplicate.id }
         });
       }
-      await duplicateToMastersChat({ config, request: created, payload: body });
+      await duplicateToMastersChat({ config, request: created, payload: { ...body, ...(created.payload || {}) } });
       if (created.requestType === REQUEST_TYPES.COMPLAINT) {
-        await duplicateToMastersChat({ config, request: created, payload: body });
+        await duplicateToMastersChat({ config, request: created, payload: { ...body, ...(created.payload || {}) } });
       }
       return sendJson(res, 201, duplicate ? { ...created, deduplicated: true, duplicateOfRequestId: duplicate.id } : created);
     }
