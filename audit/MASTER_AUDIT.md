@@ -7,7 +7,7 @@ Do not recreate split audit files.
 - Node-first runtime rooted at `app.js` and `src/server/index.js`.
 - Shared server hosts WebApp, Telegram webhooks, MAX webhooks, internal admin routes, and scheduler bootstrap.
 - MAX remains embedded in the same project; no separate BotHost service.
-- AI layer exists only as disabled infrastructure in `src/infrastructure/ai/`.
+- AI layer exists as infrastructure in `src/infrastructure/ai/` and uses normalized config from `src/infrastructure/config/index.js`.
 
 ## Runtime
 - Single-process Node runtime.
@@ -16,8 +16,9 @@ Do not recreate split audit files.
 
 ## Env
 - Core env is loaded in `src/infrastructure/config/index.js`.
-- AI env is present but disabled by default.
-- Diagnostics mask secrets and expose readiness only.
+- AI env has canonical `AI_*` contract with Railway legacy compatibility mapping.
+- Canonical priority is enforced: canonical `AI_*` -> shared legacy -> `CLIENT_*` legacy -> defaults.
+- Diagnostics mask secrets and expose readiness plus source-resolution metadata.
 
 ## Persistence
 - SQLite is canonical.
@@ -52,6 +53,7 @@ Do not recreate split audit files.
 ## Testing
 - Node test suite covers state transitions, follow-up scheduler behavior, routing, diagnostics/logging, and regression flows.
 - Post-deploy smoke should explicitly exercise both Telegram and MAX master menus plus legacy callbacks.
+- AI env compatibility is covered by node tests validating legacy mapping and canonical override priority.
 
 ## Deploy risks
 - SQLite file permissions and persistence mount quality remain critical.
@@ -63,9 +65,9 @@ Do not recreate split audit files.
 - Runtime request handling does not invoke AI providers.
 - Before enabling AI in production, add provider-specific rate limiting, audit logging, and user-facing fallback messaging.
 
-## AI Stage 1 (Infrastructure Only)
-- Added multi-provider AI infrastructure layer under `src/infrastructure/ai` with `proxy` as primary default, `openai` fallback, and direct `deepseek` adapter.
-- Added runtime AI settings storage via DB `meta` keys with admin runtime switching support (provider/model + fallback).
-- Added forced AI diagnostics path and AI event logging (task/provider/model/duration/success/fallback/error).
-- Added admin-only Master Bot AI control plane: AI status, diagnostics, switching, and logs.
-- AI business usage remains disabled by default (`AI_BUSINESS_USAGE_ENABLED=false`) and not connected to client/master business flows.
+## AI Stage 1 (Infrastructure Only, DeepSeek-first)
+- Canonical AI envs: `AI_ENABLED`, `AI_BUSINESS_USAGE_ENABLED`, `AI_PROVIDER`, `AI_MODEL`, `AI_PROXY_URL`, `AI_PROXY_TOKEN`, `AI_TIMEOUT_MS`, `AI_ALLOWED_PROVIDERS`, `AI_DIAGNOSTICS_ENABLED`.
+- Defaults are DeepSeek-focused: provider `proxy`, model `deepseek-chat`, allowed providers `proxy,deepseek`, business usage `false`.
+- Legacy Railway aliases are supported, including `AI_ENGINE`, `AI_TIMEOUT_SECONDS`, `DEEPSEEK_*`, `CLIENT_DEEPSEEK_*`, `OPENAI_API_KEY`, `GEMINI_API_KEY`.
+- `FORCT_FALLBACK` is handled as legacy typo/deprecated compatibility input.
+- Admin diagnostics include resolved provider/model/timeout source and list of legacy env keys that were consumed.

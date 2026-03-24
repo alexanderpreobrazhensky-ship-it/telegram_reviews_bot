@@ -482,7 +482,17 @@ function createServer({ config, logger }) {
         ai: {
           ...(aiInfrastructure.runtimeSettings.get() || {}),
           proxyConfigured: Boolean(config.ai?.proxyUrl && config.ai?.proxyToken),
-          configValid: Boolean(config.ai?.provider && config.ai?.model)
+          configValid: Boolean(config.ai?.provider && config.ai?.model),
+          resolved: {
+            provider: config.ai?.provider || '',
+            model: config.ai?.model || '',
+            timeoutMs: config.ai?.timeoutMs || 0,
+            allowedProviders: config.ai?.allowedProviders || [],
+            sources: config.ai?.sources || {},
+            legacyUsed: config.ai?.legacyUsed || [],
+            legacyForceFallbackRequested: Boolean(config.ai?.legacyForceFallbackRequested),
+            legacyForceFallbackFlags: config.ai?.legacyForceFallbackFlags || []
+          }
         }
       });
     }

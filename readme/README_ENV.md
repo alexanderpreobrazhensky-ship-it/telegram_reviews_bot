@@ -34,30 +34,48 @@
 - `FEEDBACK_REQUEST_DELAY_MINUTES`
 - `REQUEST_FOLLOWUP_INTERVAL_DAYS`
 
-## AI-ready
-- `AI_ENABLED=false`
-- `AI_PROVIDER=`
-- `AI_MODEL=`
-- `AI_API_KEY=`
-- `AI_TIMEOUT_MS=5000`
+## AI canonical env contract (Stage 1, DeepSeek-focused)
+These are canonical and must be used as source of truth:
+- `AI_ENABLED=true`
+- `AI_BUSINESS_USAGE_ENABLED=false`
+- `AI_PROVIDER=proxy`
+- `AI_MODEL=deepseek-chat`
+- `AI_PROXY_URL=`
+- `AI_PROXY_TOKEN=`
+- `AI_TIMEOUT_MS=8000`
+- `AI_ALLOWED_PROVIDERS=proxy,deepseek`
+- `AI_DIAGNOSTICS_ENABLED=true`
+
+Additional compatibility env (non-canonical but supported):
+- `AI_FALLBACK_PROVIDER=deepseek`
+- `AI_FALLBACK_MODEL=deepseek-chat`
+- `AI_DEEPSEEK_API_KEY=`
+- `AI_DEEPSEEK_BASE_URL=https://api.deepseek.com/chat/completions`
+- `AI_OPENAI_API_KEY=`
+- `AI_GEMINI_API_KEY=`
+
+## Legacy Railway compatibility (old -> new)
+Priority order: canonical `AI_*` -> shared legacy -> `CLIENT_*` legacy -> defaults.
+
+| Legacy env | Canonical/internal target | Notes |
+|---|---|---|
+| `AI_ENGINE` | `AI_PROVIDER` | shared legacy alias |
+| `AI_TIMEOUT_SECONDS` | `AI_TIMEOUT_MS` | converted seconds -> milliseconds |
+| `CLIENT_AI_TIMEOUT_SECONDS` | `AI_TIMEOUT_MS` | fallback alias after shared legacy |
+| `DEEPSEEK_MODEL` | `AI_MODEL` | shared legacy alias |
+| `CLIENT_DEEPSEEK_MODEL` | `AI_MODEL` | fallback alias |
+| `DEEPSEEK_BASE_URL` | `AI_PROXY_URL` + `AI_DEEPSEEK_BASE_URL` | proxy-first compatibility + deepseek direct endpoint compatibility |
+| `CLIENT_DEEPSEEK_BASE_URL` | `AI_PROXY_URL` + `AI_DEEPSEEK_BASE_URL` | fallback alias |
+| `DEEPSEEK_API_KEY` | `AI_PROXY_TOKEN` + `AI_DEEPSEEK_API_KEY` | proxy token compatibility + deepseek direct compatibility |
+| `CLIENT_DEEPSEEK_API_KEY` | `AI_PROXY_TOKEN` + `AI_DEEPSEEK_API_KEY` | fallback alias |
+| `DEEPSEEK_ALLOW_REQUESTS_FALLBACK` | internal legacy flag only | not a canonical source of truth |
+| `CLIENT_FORCE_FALLBACK` | internal legacy flag only | not a canonical source of truth |
+| `FORCT_FALLBACK` | internal legacy flag only | legacy typo, deprecated |
+| `OPENAI_API_KEY` | `AI_OPENAI_API_KEY` | compatibility only |
+| `GEMINI_API_KEY` | `AI_GEMINI_API_KEY` | compatibility placeholder only |
 
 ## Legacy aliases still accepted
 - `DB_FILE_PATH`
 - `INTERNAL_ADMIN_WHITELIST_IDS`
 - `WEBAPP_TELEGRAM_CHANNEL_LINK`
-
-
-## AI env contract (Stage 1)
-- `AI_ENABLED=true`
-- `AI_BUSINESS_USAGE_ENABLED=false`
-- `AI_PROVIDER=proxy`
-- `AI_MODEL=deepseek-chat`
-- `AI_FALLBACK_PROVIDER=openai`
-- `AI_FALLBACK_MODEL=gpt-4o-mini`
-- `AI_PROXY_URL=`
-- `AI_PROXY_TOKEN=`
-- `AI_OPENAI_API_KEY=`
-- `AI_DEEPSEEK_API_KEY=`
-- `AI_TIMEOUT_MS=8000`
-- `AI_ALLOWED_PROVIDERS=proxy,openai,deepseek`
-- `AI_DIAGNOSTICS_ENABLED=true`
+- `AI_API_KEY` (mapped as legacy alias for `AI_OPENAI_API_KEY`)

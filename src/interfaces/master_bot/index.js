@@ -371,9 +371,12 @@ function buildAiStatusText({ aiInfrastructure, config }) {
     `AI enabled: ${runtime.aiEnabledRuntime ? 'ON' : 'OFF'} (env=${config.ai?.enabled ? 'ON' : 'OFF'})`,
     `AI business usage enabled: ${runtime.aiBusinessUsageEnabledRuntime ? 'ON' : 'OFF'} (env=${config.ai?.businessUsageEnabled ? 'ON' : 'OFF'})`,
     `Active provider/model: ${runtime.activeProvider}/${runtime.activeModel}`,
+    `Active source: provider=${config.ai?.sources?.AI_PROVIDER?.source || 'default'} model=${config.ai?.sources?.AI_MODEL?.source || 'default'}`,
     `Fallback provider/model: ${runtime.activeFallbackProvider}/${runtime.activeFallbackModel}`,
     `Allowed providers: ${(runtime.allowedProviders || []).join(', ') || '-'}`,
+    `Timeout: ${config.ai?.timeoutMs || 0}ms (source=${config.ai?.sources?.AI_TIMEOUT_MS?.source || 'default'})`,
     `Proxy configured: ${config.ai?.proxyUrl && config.ai?.proxyToken ? 'yes' : 'no'}`,
+    `Legacy AI env used: ${(config.ai?.legacyUsed || []).join(', ') || '-'}`,
     `Last diagnostics: ${diagnostics.status || runtime.lastAiDiagnosticsStatus || 'never'}`,
     `Last diagnostics at: ${diagnostics.at || runtime.lastAiDiagnosticsAt || '-'}`,
     `Last diagnostics summary: ${diagnostics.summary || runtime.lastAiDiagnosticsSummary || '-'}`

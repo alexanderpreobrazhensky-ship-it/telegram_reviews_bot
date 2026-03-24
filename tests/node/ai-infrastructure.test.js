@@ -21,7 +21,11 @@ test('ai config defaults and env contract are parsed', () => {
     AI_MODEL: process.env.AI_MODEL,
     AI_FALLBACK_PROVIDER: process.env.AI_FALLBACK_PROVIDER,
     AI_FALLBACK_MODEL: process.env.AI_FALLBACK_MODEL,
-    AI_ALLOWED_PROVIDERS: process.env.AI_ALLOWED_PROVIDERS
+    AI_ALLOWED_PROVIDERS: process.env.AI_ALLOWED_PROVIDERS,
+    AI_TIMEOUT_MS: process.env.AI_TIMEOUT_MS,
+    AI_TIMEOUT_SECONDS: process.env.AI_TIMEOUT_SECONDS,
+    DEEPSEEK_MODEL: process.env.DEEPSEEK_MODEL,
+    CLIENT_DEEPSEEK_MODEL: process.env.CLIENT_DEEPSEEK_MODEL
   };
 
   process.env.AI_ENABLED = 'true';
@@ -44,6 +48,67 @@ test('ai config defaults and env contract are parsed', () => {
   restoreEnv(snapshot);
 });
 
+
+
+test('ai config supports legacy railway mapping with canonical priority', () => {
+  const snapshot = {
+    AI_PROVIDER: process.env.AI_PROVIDER,
+    AI_ENGINE: process.env.AI_ENGINE,
+    AI_MODEL: process.env.AI_MODEL,
+    DEEPSEEK_MODEL: process.env.DEEPSEEK_MODEL,
+    CLIENT_DEEPSEEK_MODEL: process.env.CLIENT_DEEPSEEK_MODEL,
+    AI_TIMEOUT_MS: process.env.AI_TIMEOUT_MS,
+    AI_TIMEOUT_SECONDS: process.env.AI_TIMEOUT_SECONDS,
+    CLIENT_AI_TIMEOUT_SECONDS: process.env.CLIENT_AI_TIMEOUT_SECONDS,
+    DEEPSEEK_API_KEY: process.env.DEEPSEEK_API_KEY,
+    DEEPSEEK_BASE_URL: process.env.DEEPSEEK_BASE_URL,
+    OPENAI_API_KEY: process.env.OPENAI_API_KEY,
+    GEMINI_API_KEY: process.env.GEMINI_API_KEY,
+    FORCT_FALLBACK: process.env.FORCT_FALLBACK
+  };
+
+  process.env.AI_ENGINE = 'deepseek';
+  process.env.DEEPSEEK_MODEL = 'deepseek-legacy';
+  process.env.CLIENT_DEEPSEEK_MODEL = 'deepseek-client';
+  process.env.AI_TIMEOUT_SECONDS = '9';
+  process.env.CLIENT_AI_TIMEOUT_SECONDS = '11';
+  process.env.DEEPSEEK_API_KEY = 'legacy-deepseek-key';
+  process.env.DEEPSEEK_BASE_URL = 'https://legacy.deepseek.local/chat/completions';
+  process.env.OPENAI_API_KEY = 'legacy-openai-key';
+  process.env.GEMINI_API_KEY = 'legacy-gemini-key';
+  process.env.FORCT_FALLBACK = 'true';
+
+  delete process.env.AI_PROVIDER;
+  delete process.env.AI_MODEL;
+  delete process.env.AI_TIMEOUT_MS;
+
+  let config = loadConfig();
+  assert.equal(config.ai.provider, 'deepseek');
+  assert.equal(config.ai.model, 'deepseek-legacy');
+  assert.equal(config.ai.timeoutMs, 9000);
+  assert.equal(config.ai.proxyToken, 'legacy-deepseek-key');
+  assert.equal(config.ai.proxyUrl, 'https://legacy.deepseek.local/chat/completions');
+  assert.equal(config.ai.openaiApiKey, 'legacy-openai-key');
+  assert.equal(config.ai.geminiApiKey, 'legacy-gemini-key');
+  assert.equal(config.ai.legacyForceFallbackRequested, true);
+  assert.equal(config.ai.sources.AI_PROVIDER.source, 'AI_ENGINE');
+  assert.equal(config.ai.sources.AI_MODEL.source, 'DEEPSEEK_MODEL');
+  assert.equal(config.ai.sources.AI_TIMEOUT_MS.source, 'AI_TIMEOUT_SECONDS');
+
+  process.env.AI_PROVIDER = 'proxy';
+  process.env.AI_MODEL = 'deepseek-chat';
+  process.env.AI_TIMEOUT_MS = '7000';
+
+  config = loadConfig();
+  assert.equal(config.ai.provider, 'proxy');
+  assert.equal(config.ai.model, 'deepseek-chat');
+  assert.equal(config.ai.timeoutMs, 7000);
+  assert.equal(config.ai.sources.AI_PROVIDER.source, 'AI_PROVIDER');
+  assert.equal(config.ai.sources.AI_MODEL.source, 'AI_MODEL');
+  assert.equal(config.ai.sources.AI_TIMEOUT_MS.source, 'AI_TIMEOUT_MS');
+
+  restoreEnv(snapshot);
+});
 test('ai runtime settings bootstrap from env and allow runtime override', () => {
   db.resetStore();
   const runtime = createAiRuntimeSettings({
