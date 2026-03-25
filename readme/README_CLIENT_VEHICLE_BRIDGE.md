@@ -55,7 +55,7 @@
 ### Текущий runtime use-case (WebApp exact lookup)
 - В runtime используется **только read-only lookup** для web/site заявок.
 - Источник: `data/reference/client_vehicle_bridge/lira_normalized_database.sqlite` (предпочтительно к XLSX для программного поиска).
-- Текущий ключ: только `phone_norm + client_name/client_name_norm` (exact deterministic match).
+- Текущий ключ: только `phone_norm` (exact deterministic match, 10 digits).
 - При одном совпадении заявка получает `existing_client=true`; при `0` совпадений — `false`; при `>1` — conflict (`needs_review=true`).
 - Lookup не меняет runtime production DB и не делает auto-merge с клиентской production-историей.
 
@@ -81,13 +81,14 @@
 ## 11) Обязательные правила нормализации
 1. Телефон: только 10 цифр, без `+7`, ведущей `8`, скобок, пробелов, кавычек, дефисов.
 2. Email не является основным ключом matching.
-3. Порядок сопоставления клиента: `phone -> fio -> vin`.
+3. Текущий runtime порядок сопоставления клиента: `phone` (primary); FIO/VIN не обязательны для existing-client флага.
 4. VIN формата `no_vin_*` считается placeholder.
 5. Пробег (`latest_mileage`, `max_mileage`, `last_mileage_date`) — отдельный полезный признак.
 
 ## Update 2026-03-25: Runtime lookup contract
 - Runtime WebApp lookup использует SQLite dataset как read-only reference слой.
 - Текущий lookup-ключ: только `normalized_phone` (10 цифр).
+- Runtime path resolution отвязан от случайного `cwd`: default path строится от кода (`../../data/reference/...`), что сохраняет доступ после deploy.
 - Контракты результата:
   - exact single phone match -> `existing_client=true`, `client_match_basis=phone`;
   - no phone match -> `existing_client=false`, `client_match_basis=no_match`;

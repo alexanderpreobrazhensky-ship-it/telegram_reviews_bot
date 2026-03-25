@@ -26,15 +26,16 @@ WebApp payload может содержать Telegram/MAX identity;
 
 ## Existing client lookup (site/WebApp)
 - Для submit flow (`/api/client/requests/*`) добавлен backend lookup в `data/reference/client_vehicle_bridge/lira_normalized_database.sqlite`.
-- Правило детерминированное и exact-only: совпасть должны одновременно `phone (10 digits)` + `ФИО` после нормализации (trim, collapse spaces, case-insensitive, `ё -> е`).
+- Primary business rule: **exact phone match по нормализованному 10-значному номеру**.
 - Если найден один точный match:
   - `payload.existing_client = true`
-  - `payload.client_match_basis = phone_fio`
+- `payload.client_match_basis = phone`
   - `payload.matched_reference_client_id` заполняется из `clients.client_code`
+  - `payload.matched_reference_source` содержит источник reference lookup
   - `payload.needs_review = false`
-- Если match не найден: `existing_client = false`.
-- Если найдено несколько записей по `phone+fio`: `existing_client = false`, `needs_review = true`, `client_match_basis = conflict_multiple_matches`.
-- Email/VIN не используются как ключи в этом WebApp lookup.
+- Если match не найден: `existing_client = false`, `client_match_basis = no_match`.
+- Если найдено несколько записей по телефону: `existing_client = false`, `needs_review = true`, `client_match_basis = multiple_phone_matches`.
+- FIO/VIN не используются как обязательные ключи для определения existing client в текущем релизе.
 
 ## Update 2026-03-25 (WebApp intake hardening)
 - Existing client lookup переведён на primary business rule `phone exact match` (нормализованный 10-значный номер).
@@ -48,3 +49,13 @@ WebApp payload может содержать Telegram/MAX identity;
   - `wasClientBefore=no` -> VIN обязателен;
   - если признак не выбран -> submit блокируется.
 - Проверка правила выполняется и на frontend (`public/webapp.js`), и на backend (`validateClientRequestPayload`).
+
+## Update 2026-03-25 (runtime dataset access hardening)
+- Root cause `reference_dataset_unavailable` после деплоя: loader зависел от `process.cwd()` и в некоторых runtime-контейнерах искал dataset в неверном каталоге.
+- Исправление: runtime path resolution теперь anchored на repository-relative path (`src/... -> ../../data/reference/...`) с fallback chain только для default режима.
+- Если явно задан `REFERENCE_CLIENT_LOOKUP_SQLITE_PATH`/`REFERENCE_CLIENT_LOOKUP_DATASET_PATH`, используется strict path (без silent fallback), чтобы ошибка конфигурации была видимой.
+- В `/internal/diagnostics` и master-бот диагностике доступны поля:
+  - configured/path/exists/readable/type
+  - loader status / available
+  - total rows / phone index built
+  - last lookup result/target/match count/error.

@@ -52,6 +52,8 @@ npm test
 ### Dataset / Lookup
 1. dataset available -> exact/no/multiple phone match.
 2. dataset unavailable -> `reference_dataset_unavailable` surfaced explicitly.
+3. runtime path resolution does not depend on `cwd`.
+4. контрольный номер `9506275333` из reference dataset даёт `existing_client=true`, `client_match_basis=phone`.
 
 ### WebApp validation
 1. `wasClientBefore=yes`, VIN empty -> allowed.
