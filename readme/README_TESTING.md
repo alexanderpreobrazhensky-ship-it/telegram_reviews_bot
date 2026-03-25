@@ -47,3 +47,20 @@ npm test
 6. Проверены: summary/funnel/sources/rejections/warranty/stuck/existing_new/t_business.
 7. Экспорт CSV работает и учитывает текущий reportType/period.
 8. Regression: master/client/integration/webapp маршруты живы.
+
+## Update 2026-03-25: Mandatory test matrix additions
+### Dataset / Lookup
+1. dataset available -> exact/no/multiple phone match.
+2. dataset unavailable -> `reference_dataset_unavailable` surfaced explicitly.
+
+### WebApp validation
+1. `wasClientBefore=yes`, VIN empty -> allowed.
+2. `wasClientBefore=no`, VIN empty -> blocked.
+3. `wasClientBefore` unset -> blocked.
+4. `wasClientBefore=no`, VIN set -> allowed.
+
+### Request flow / parity
+1. New WebApp request persisted with status `new`.
+2. Request visible in `Новые заявки` query.
+3. Telegram master notification attempted.
+4. MAX master notification attempted when MAX enabled and admins configured.

@@ -63,3 +63,14 @@
 - В каждом отчёте доступны кнопки: `Обновить`, `Экспорт`, `Подробнее`, `Назад`, `В меню`.
 - Экспорт: CSV по текущему типу отчёта/периоду (через кнопку в master-боте или `/api/reports/export` с admin auth).
 - Internal/API доступ к отчётам должен использовать admin whitelist (`admin_id` / `x-admin-id`).
+
+## Update 2026-03-25: WebApp request flow + Telegram/MAX parity
+- После создания WebApp заявки проверяется operational цепочка:
+  1) request received,
+  2) request persisted,
+  3) request visible in `new` list,
+  4) telegram notification result,
+  5) max notification result.
+- Последняя диагностическая запись сохраняется в `meta` и доступна в `/internal/diagnostics` как `webappRequestFlow`.
+- Existing client diagnostics расширена: `configured`, `available`, `datasetPath`, `source`, `loaderStatus`, `lastLookupAttemptedAt`, `lastLookupResult`, `lastError`.
+- Для MAX parity уведомления о новых WebApp заявках отправляются также в MAX master channel (по `MAX_MASTER_BOT_ADMIN_IDS`) при включённом MAX.

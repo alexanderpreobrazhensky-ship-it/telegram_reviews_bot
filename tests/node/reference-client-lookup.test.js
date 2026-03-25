@@ -54,7 +54,7 @@ async function withServer(env, run) {
   }
 }
 
-test('lookup normalizes phone/fio and classifies exact/no/conflict cases deterministically', () => {
+test('lookup normalizes phone and classifies exact/no/conflict cases deterministically', () => {
   const fixture = createReferenceFixture();
   try {
     const lookup = createReferenceClientLookup({ datasetPath: fixture.dbPath, logger: { info() {} } });
@@ -66,32 +66,43 @@ test('lookup normalizes phone/fio and classifies exact/no/conflict cases determi
 
     const exact = lookup.lookupByPhoneAndFio({ phone: '+7 (999) 111-22-33', fullName: '  иВанОВ   Иван Иванович ' });
     assert.equal(exact.existingClient, true);
-    assert.equal(exact.clientMatchBasis, 'phone_fio');
+    assert.equal(exact.clientMatchBasis, 'phone');
     assert.equal(exact.matchedReferenceClientId, 'C-1');
     assert.equal(exact.needsReview, false);
 
     const onlyPhone = lookup.lookupByPhoneAndFio({ phone: '89991112244', fullName: 'Совсем Другой Клиент' });
-    assert.equal(onlyPhone.existingClient, false);
-    assert.equal(onlyPhone.clientMatchBasis, 'phone_fio_no_match');
+    assert.equal(onlyPhone.existingClient, true);
+    assert.equal(onlyPhone.clientMatchBasis, 'phone');
     assert.equal(onlyPhone.needsReview, false);
 
     const onlyFio = lookup.lookupByPhoneAndFio({ phone: '9000000000', fullName: 'Петров Петр Петрович' });
     assert.equal(onlyFio.existingClient, false);
-    assert.equal(onlyFio.clientMatchBasis, 'phone_fio_no_match');
+    assert.equal(onlyFio.clientMatchBasis, 'no_match');
 
     const none = lookup.lookupByPhoneAndFio({ phone: '9111111111', fullName: 'Новый Клиент' });
     assert.equal(none.existingClient, false);
-    assert.equal(none.clientMatchBasis, 'phone_fio_no_match');
+    assert.equal(none.clientMatchBasis, 'no_match');
 
     const multiple = lookup.lookupByPhoneAndFio({ phone: '+7 (999) 555-00-00', fullName: 'Смирнов Семен Семенович' });
     assert.equal(multiple.existingClient, false);
     assert.equal(multiple.needsReview, true);
-    assert.equal(multiple.clientMatchBasis, 'conflict_multiple_matches');
+    assert.equal(multiple.clientMatchBasis, 'multiple_phone_matches');
     assert.equal(Array.isArray(multiple.matchedReferenceSnapshot.candidates), true);
     assert.equal(multiple.matchedReferenceSnapshot.candidates.length, 2);
   } finally {
     fs.rmSync(fixture.tmpDir, { recursive: true, force: true });
   }
+});
+
+test('lookup reports reference_dataset_unavailable when dataset path is missing', () => {
+  const lookup = createReferenceClientLookup({ datasetPath: '/tmp/not-found-reference.sqlite', logger: { info() {} } });
+  const result = lookup.lookupByPhoneAndFio({ phone: '9991112233', fullName: 'Иванов Иван' });
+  assert.equal(result.existingClient, false);
+  assert.equal(result.clientMatchBasis, 'reference_dataset_unavailable');
+  assert.equal(result.lookupStatus, 'dataset_missing');
+  const diagnostics = lookup.getDiagnostics();
+  assert.equal(diagnostics.available, false);
+  assert.equal(diagnostics.loaderStatus, 'dataset_missing');
 });
 
 test('webapp request persists existing_client flags and master card shows them', async () => {
@@ -121,7 +132,7 @@ test('webapp request persists existing_client flags and master card shows them',
         assert.equal(response.status, 201);
         const created = await response.json();
         assert.equal(created.payload.existing_client, true);
-        assert.equal(created.payload.client_match_basis, 'phone_fio');
+        assert.equal(created.payload.client_match_basis, 'phone');
         assert.equal(created.payload.matched_reference_client_id, 'C-1');
         assert.equal(created.payload.needs_review, false);
 
@@ -133,7 +144,7 @@ test('webapp request persists existing_client flags and master card shows them',
         const payload = await search.json();
         assert.equal(payload.ok, true);
         assert.match(payload.text, /Действующий клиент: Да/i);
-        assert.match(payload.text, /Основание проверки: phone_fio/i);
+        assert.match(payload.text, /Основание: phone/i);
         assert.match(payload.text, /ID в reference-базе: C-1/i);
       }
     );

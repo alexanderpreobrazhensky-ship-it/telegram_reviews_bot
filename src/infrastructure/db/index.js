@@ -1592,7 +1592,7 @@ function listRequests({ phone, telegramId, maxId, statuses, channel, requestType
     params.push(requestType);
   }
   if (where.length) sql += ` WHERE ${where.join(' AND ')}`;
-  sql += ' ORDER BY created_at ASC';
+  sql += ' ORDER BY created_at DESC';
   return getDb().prepare(sql).all(...params).map(requestRowToEntity).map((item) => ({ ...item, summary: String(item.description || '').slice(0, 120) }));
 }
 
