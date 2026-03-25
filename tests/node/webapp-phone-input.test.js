@@ -54,7 +54,9 @@ const formCases = [
     type: 'warranty_request',
     fill(form) {
       form.querySelector('input[name="fullName"]').value = 'Иван Иванов';
+      form.querySelector('input[name="wasClientBefore"][value="yes"]').checked = true;
       form.querySelector('input[name="visitDate"]').value = '2026-03-01';
+      form.querySelector('input[name="vin"]').value = '';
       form.querySelector('textarea[name="description"]').value = 'Повторная неисправность';
     }
   },
@@ -64,6 +66,8 @@ const formCases = [
     type: 'data_change_request',
     fill(form) {
       form.querySelector('input[name="fullName"]').value = 'Иван Иванов';
+      form.querySelector('input[name="wasClientBefore"][value="no"]').checked = true;
+      form.querySelector('input[name="vin"]').value = 'VIN-DATA-CHANGE';
       form.querySelector('textarea[name="changeDetails"]').value = 'Сменил телефон';
     }
   }

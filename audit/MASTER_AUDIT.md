@@ -244,3 +244,28 @@ AI вынесен в отдельный блок, где отражаются:
 ### Проверки
 - Добавлены/обновлены node tests по admin-only доступу и кнопочному отчётному потоку.
 - Подтверждена регрессия базовых webhook/health/report routes.
+
+## 18) Update 2026-03-25 — WebApp intake / lookup / parity remediation
+
+### Root cause: `reference_dataset_unavailable`
+- Основная причина: runtime lookup layer фактически зависел от строгого `phone+fio` фильтра и не давал бизнес-матч при корректном phone-only кейсе.
+- Дополнительно в диагностике не хватало явных признаков loader state (`configured`, `loaderStatus`, `lastLookupAttemptedAt`, `lastLookupResult`), из-за чего инцидент выглядел как «клиент не найден».
+
+### Что исправлено
+1. Lookup переведён на primary rule `exact normalized phone match`.
+2. Добавлены явные исходы `no_match`, `multiple_phone_matches`, `reference_dataset_unavailable`.
+3. Расширена диагностика reference dataset loader.
+4. В WebApp flow добавлен operational trace: persisted/visible/telegram notified/max notified.
+5. Для MAX parity добавлена доставка уведомлений о новых WebApp заявках в MAX master контур (`MAX_MASTER_BOT_ADMIN_IDS`).
+6. Валидация `wasClientBefore` + VIN dependency внедрена на фронте и бэке.
+7. Списки заявок читаются в порядке `created_at DESC`, чтобы новые заявки не прятались внизу старой очереди.
+
+### Текущая матрица отображения в master card
+- `existing_client=true` -> `Основание: phone`.
+- `existing_client=false` + no match -> `Основание: no_match`.
+- dataset unavailable -> `Основание: reference_dataset_unavailable`.
+- multiple matches -> `Основание: multiple_phone_matches`, `Требуется проверка: Да`.
+
+### Open items
+- Для production MAX parity требуется валидная конфигурация `MAX_MASTER_BOT_TOKEN`, `MAX_WEBHOOK_SECRET`, `MAX_MASTER_BOT_ADMIN_IDS`.
+- Если dataset путь не смонтирован в runtime, диагностика теперь это явно покажет, но операционно это должно чиниться окружением/деплоем.

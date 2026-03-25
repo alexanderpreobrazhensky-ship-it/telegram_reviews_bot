@@ -24,16 +24,16 @@
     '/forms/service-request': { title: requestTypeLabels.service_request, endpoint: '/api/client/requests/service', type: 'service_request', fields: ['fullName', 'phone', 'wasClientBefore', 'brand', 'model', 'year', 'vin', 'description'] },
     '/forms/parts-request': { title: requestTypeLabels.parts_request, endpoint: '/api/client/requests/parts', type: 'parts_request', fields: ['fullName', 'phone', 'wasClientBefore', 'brand', 'model', 'year', 'vin', 'description'] },
     '/forms/consultation': { title: requestTypeLabels.consultation_request, endpoint: '/api/client/requests/consultation', type: 'consultation_request', fields: ['fullName', 'phone', 'wasClientBefore', 'car', 'vin', 'question'] },
-    '/forms/warranty-request': { title: requestTypeLabels.warranty_request, endpoint: '/api/client/requests/warranty', type: 'warranty_request', fields: ['fullName', 'phone', 'visitDate', 'description'] },
-    '/forms/data-change-request': { title: requestTypeLabels.data_change_request, endpoint: '/api/client/requests/data-change', type: 'data_change_request', fields: ['fullName', 'phone', 'changeDetails'] }
+    '/forms/warranty-request': { title: requestTypeLabels.warranty_request, endpoint: '/api/client/requests/warranty', type: 'warranty_request', fields: ['fullName', 'phone', 'wasClientBefore', 'visitDate', 'vin', 'description'] },
+    '/forms/data-change-request': { title: requestTypeLabels.data_change_request, endpoint: '/api/client/requests/data-change', type: 'data_change_request', fields: ['fullName', 'phone', 'wasClientBefore', 'vin', 'changeDetails'] }
   };
 
   const requiredByType = {
     service_request: ['fullName', 'phone', 'wasClientBefore', 'brand', 'model', 'year', 'vin', 'description'],
     parts_request: ['fullName', 'phone', 'wasClientBefore', 'year', 'vin', 'description'],
     consultation_request: ['fullName', 'phone', 'wasClientBefore', 'car', 'vin', 'question'],
-    warranty_request: ['fullName', 'phone', 'visitDate', 'description'],
-    data_change_request: ['fullName', 'phone', 'changeDetails']
+    warranty_request: ['fullName', 'phone', 'wasClientBefore', 'visitDate', 'description'],
+    data_change_request: ['fullName', 'phone', 'wasClientBefore', 'changeDetails']
   };
 
   function normalizePhone(value) {
@@ -107,7 +107,7 @@
   }
 
   function label(name) {
-    const labels = { fullName: 'ФИО', phone: 'Телефон', year: 'Год', vin: 'VIN', description: 'Описание проблемы', question: 'Вопрос', changeDetails: 'Что изменилось', brand: 'Марка', model: 'Модель', car: 'Автомобиль', visitDate: 'Дата визита', wasClientBefore: 'Были у нас ранее?' };
+    const labels = { fullName: 'ФИО', phone: 'Телефон', year: 'Год', vin: 'VIN', description: 'Описание проблемы', question: 'Вопрос', changeDetails: 'Что изменилось', brand: 'Марка', model: 'Модель', car: 'Автомобиль', visitDate: 'Дата визита', wasClientBefore: 'Был у нас ранее' };
     return labels[name] || name;
   }
 
@@ -232,6 +232,12 @@
     (requiredByType[type] || []).forEach((field) => {
       if (!String(payload[field] || '').trim()) errors.push({ field, message: `Поле «${label(field)}» обязательно` });
     });
+    if (payload.wasClientBefore === 'no' && !String(payload.vin || '').trim()) {
+      errors.push({ field: 'vin', message: 'VIN обязателен, если вы у нас не были ранее' });
+    }
+    if (!['yes', 'no'].includes(String(payload.wasClientBefore || '').trim().toLowerCase())) {
+      errors.push({ field: 'wasClientBefore', message: 'Выберите «Да» или «Нет»' });
+    }
     if (!/^\d{10}$/.test(String(payload.phone || ''))) errors.push({ field: 'phone', message: PHONE_HINT });
     return errors;
   }

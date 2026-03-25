@@ -39,8 +39,14 @@ function createReferenceClientLookup({ logger = console, datasetPath = process.e
   const state = {
     enabled,
     datasetPath,
+    configured: Boolean(datasetPath),
     available: false,
+    loaderStatus: 'not_initialized',
+    source: 'sqlite',
+    tableName: 'clients',
     lastLookupStatus: 'not_attempted',
+    lastLookupAttemptedAt: null,
+    lastLookupResult: null,
     lastError: null,
     clientIdColumn: null,
     clientNameColumn: null,
@@ -53,6 +59,7 @@ function createReferenceClientLookup({ logger = console, datasetPath = process.e
 
   if (!enabled) {
     state.lastLookupStatus = 'disabled';
+    state.loaderStatus = 'disabled';
     return {
       getDiagnostics: () => ({ ...state }),
       lookupByPhoneAndFio: () => ({
@@ -72,6 +79,8 @@ function createReferenceClientLookup({ logger = console, datasetPath = process.e
   try {
     if (!fs.existsSync(datasetPath)) {
       state.lastLookupStatus = 'dataset_missing';
+      state.loaderStatus = 'dataset_missing';
+      state.lastError = `Dataset file does not exist: ${datasetPath}`;
       return {
         getDiagnostics: () => ({ ...state }),
         lookupByPhoneAndFio: ({ phone, fullName } = {}) => ({
@@ -98,6 +107,7 @@ function createReferenceClientLookup({ logger = console, datasetPath = process.e
 
     if (!state.phoneColumn || !state.clientNameColumn) {
       state.lastLookupStatus = 'schema_unsupported';
+      state.loaderStatus = 'schema_unsupported';
       state.lastError = 'Required clients columns are missing';
       state.db.close();
       state.db = null;
@@ -128,8 +138,10 @@ function createReferenceClientLookup({ logger = console, datasetPath = process.e
     state.queryByPhone = state.db.prepare(`SELECT ${selectColumns.join(', ')} FROM clients WHERE ${state.phoneColumn} = ?`);
     state.available = true;
     state.lastLookupStatus = 'ready';
+    state.loaderStatus = 'ready';
   } catch (error) {
     state.lastLookupStatus = 'init_failed';
+    state.loaderStatus = 'init_failed';
     state.lastError = String(error.message || error);
     state.available = false;
     state.db = null;
@@ -138,6 +150,7 @@ function createReferenceClientLookup({ logger = console, datasetPath = process.e
   function lookupByPhoneAndFio({ phone, fullName } = {}) {
     const normalizedPhone = normalizePhoneForLookup(phone);
     const normalizedFio = normalizeFio(fullName);
+    state.lastLookupAttemptedAt = new Date().toISOString();
 
     logger.info?.('webapp existing client lookup attempted', {
       datasetPath: state.datasetPath,
@@ -148,6 +161,7 @@ function createReferenceClientLookup({ logger = console, datasetPath = process.e
 
     if (!state.available || !state.queryByPhone) {
       state.lastLookupStatus = 'lookup_unavailable';
+      state.lastLookupResult = 'reference_dataset_unavailable';
       return {
         existingClient: false,
         needsReview: false,
@@ -161,12 +175,13 @@ function createReferenceClientLookup({ logger = console, datasetPath = process.e
       };
     }
 
-    if (!normalizedPhone || !normalizedFio) {
+    if (!normalizedPhone) {
+      state.lastLookupResult = 'no_match';
       state.lastLookupStatus = 'no_match';
       return {
         existingClient: false,
         needsReview: false,
-        clientMatchBasis: 'phone_fio_not_provided',
+        clientMatchBasis: 'phone_not_provided',
         matchedReferenceClientId: null,
         matchedReferenceSource: null,
         matchedReferenceSnapshot: null,
@@ -176,17 +191,15 @@ function createReferenceClientLookup({ logger = console, datasetPath = process.e
       };
     }
 
-    const candidates = state.queryByPhone.all(normalizedPhone).filter((row) => {
-      const normalizedCandidate = normalizeFio(row.normalized_name || row.full_name);
-      return normalizedCandidate === normalizedFio;
-    });
+    const candidates = state.queryByPhone.all(normalizedPhone);
 
     if (!candidates.length) {
       state.lastLookupStatus = 'no_match';
+      state.lastLookupResult = 'no_match';
       return {
         existingClient: false,
         needsReview: false,
-        clientMatchBasis: 'phone_fio_no_match',
+        clientMatchBasis: 'no_match',
         matchedReferenceClientId: null,
         matchedReferenceSource: null,
         matchedReferenceSnapshot: null,
@@ -198,10 +211,11 @@ function createReferenceClientLookup({ logger = console, datasetPath = process.e
 
     if (candidates.length > 1) {
       state.lastLookupStatus = 'multiple_matches';
+      state.lastLookupResult = 'multiple_phone_matches';
       return {
         existingClient: false,
         needsReview: true,
-        clientMatchBasis: 'conflict_multiple_matches',
+        clientMatchBasis: 'multiple_phone_matches',
         matchedReferenceClientId: null,
         matchedReferenceSource: state.datasetPath,
         matchedReferenceSnapshot: {
@@ -220,10 +234,11 @@ function createReferenceClientLookup({ logger = console, datasetPath = process.e
 
     const matched = candidates[0];
     state.lastLookupStatus = 'exact_match';
+    state.lastLookupResult = 'exact_phone_match';
     return {
       existingClient: true,
       needsReview: false,
-      clientMatchBasis: 'phone_fio',
+      clientMatchBasis: 'phone',
       matchedReferenceClientId: matched.client_id || null,
       matchedReferenceSource: matched.source_system || 'reference_bridge_sqlite',
       matchedReferenceSnapshot: {
@@ -239,9 +254,16 @@ function createReferenceClientLookup({ logger = console, datasetPath = process.e
   return {
     getDiagnostics: () => ({
       enabled: state.enabled,
+      configured: state.configured,
       datasetPath: state.datasetPath,
+      source: state.source,
+      tableName: state.tableName,
       available: state.available,
+      loaderStatus: state.loaderStatus,
       lastLookupStatus: state.lastLookupStatus,
+      lastLookupAttemptedAt: state.lastLookupAttemptedAt,
+      lastLookupResult: state.lastLookupResult,
+      cacheStatus: 'sqlite_direct_no_cache',
       lastError: state.lastError
     }),
     lookupByPhoneAndFio

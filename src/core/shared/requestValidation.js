@@ -90,11 +90,11 @@ function resolveStrictClientPhone(body = {}) {
 function validateClientRequestPayload(body = {}, type) {
   const errors = [];
   const requiredByType = {
-    service_request: ['fullName', 'phone', 'wasClientBefore', 'brand', 'model', 'year', 'vin', 'description'],
-    parts_request: ['fullName', 'phone', 'wasClientBefore', 'year', 'vin', 'description'],
-    consultation_request: ['fullName', 'phone', 'wasClientBefore', 'car', 'vin', 'question'],
-    warranty_request: ['fullName', 'phone', 'visitDate', 'description'],
-    data_change_request: ['fullName', 'phone', 'changeDetails']
+    service_request: ['fullName', 'phone', 'wasClientBefore', 'brand', 'model', 'year', 'description'],
+    parts_request: ['fullName', 'phone', 'wasClientBefore', 'year', 'description'],
+    consultation_request: ['fullName', 'phone', 'wasClientBefore', 'car', 'question'],
+    warranty_request: ['fullName', 'phone', 'wasClientBefore', 'visitDate', 'description'],
+    data_change_request: ['fullName', 'phone', 'wasClientBefore', 'changeDetails']
   };
 
   const phone = resolveStrictClientPhone(body);
@@ -108,6 +108,13 @@ function validateClientRequestPayload(body = {}, type) {
 
   if ((requiredByType[type] || []).includes('phone') && !/^\d{10}$/.test(phone) && !errors.includes('phone must contain exactly 10 digits')) {
     errors.push('phone must contain exactly 10 digits');
+  }
+
+  const wasClientBefore = String(body.wasClientBefore || '').trim().toLowerCase();
+  if (!['yes', 'no'].includes(wasClientBefore)) {
+    errors.push('wasClientBefore must be selected');
+  } else if (wasClientBefore === 'no' && !String(body.vin || '').trim()) {
+    errors.push('vin is required when wasClientBefore is no');
   }
 
   return { errors, normalizedPhone: phone };

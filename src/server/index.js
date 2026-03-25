@@ -14,6 +14,7 @@ const { ingestEmail } = require('../integrations/email');
 const { oneCSyncPlaceholder } = require('../integrations/one_c');
 const { integrationService, createReportingService } = require('../core/application');
 const { initializeAiInfrastructure } = require('../infrastructure/ai');
+const { sendChannelMessage } = require('../infrastructure/messaging');
 
 function readBody(req) {
   return new Promise((resolve) => {
@@ -109,7 +110,6 @@ async function sendTelegramMessage(token, chatId, text, extra = {}) {
 }
 
 async function duplicateToMastersChat({ config, request, payload }) {
-  if (!config.telegramMasterBotToken || !config.telegramMastersChatId) return;
   const existingClient = payload.existing_client === true;
   const needsReview = payload.needs_review === true;
   const basis = payload.client_match_basis || '-';
@@ -124,27 +124,40 @@ async function duplicateToMastersChat({ config, request, payload }) {
     `ID в reference-базе: ${payload.matched_reference_client_id || '-'}`,
     `Требуется проверка: ${needsReview ? 'Да' : 'Нет'}`
   ].join('\n');
-  await sendTelegramMessage(config.telegramMasterBotToken, Number(config.telegramMastersChatId), text, {
-    reply_markup: {
-      inline_keyboard: [
-        [
-          { text: 'Взять в работу', callback_data: `req:${request.id}:in_progress` },
-          { text: 'Запросить данные', callback_data: `req:${request.id}:ask_client` }
-        ],
-        [
-          { text: 'Обработана', callback_data: `req:${request.id}:processed_menu` },
-          { text: 'В сервисе', callback_data: `req:${request.id}:in_service` }
-        ],
-        [
-          { text: 'Завершить', callback_data: `req:${request.id}:completed` },
-          { text: 'Комментарий', callback_data: `req:${request.id}:comment` }
-        ],
-        [
-          { text: 'Подробнее', callback_data: `card:${request.id}` }
-        ]
+  const replyMarkup = {
+    inline_keyboard: [
+      [
+        { text: 'Взять в работу', callback_data: `req:${request.id}:in_progress` },
+        { text: 'Запросить данные', callback_data: `req:${request.id}:ask_client` }
+      ],
+      [
+        { text: 'Обработана', callback_data: `req:${request.id}:processed_menu` },
+        { text: 'В сервисе', callback_data: `req:${request.id}:in_service` }
+      ],
+      [
+        { text: 'Завершить', callback_data: `req:${request.id}:completed` },
+        { text: 'Комментарий', callback_data: `req:${request.id}:comment` }
+      ],
+      [
+        { text: 'Подробнее', callback_data: `card:${request.id}` }
       ]
-    }
-  });
+    ]
+  };
+  const telegramOk = config.telegramMasterBotToken && config.telegramMastersChatId
+    ? await sendTelegramMessage(config.telegramMasterBotToken, Number(config.telegramMastersChatId), text, { reply_markup: replyMarkup })
+    : false;
+  const maxRecipients = config.maxEnabled ? (config.maxMasterBotAdminIds || []).filter(Boolean) : [];
+  const maxResults = await Promise.all(maxRecipients.map((recipientId) => sendChannelMessage({
+    channel: 'max',
+    token: config.maxMasterBotToken,
+    recipientId,
+    text,
+    extra: { reply_markup: replyMarkup }
+  })));
+  return {
+    telegram: { attempted: Boolean(config.telegramMasterBotToken && config.telegramMastersChatId), delivered: Boolean(telegramOk) },
+    max: { attempted: maxRecipients.length > 0, recipients: maxRecipients.length, delivered: maxResults.filter(Boolean).length }
+  };
 }
 
 function createClientRequest({
@@ -156,6 +169,15 @@ function createClientRequest({
   logger = console
 }) {
   const normalizedPhone = resolvePhoneInput(body);
+  const wasClientBefore = String(body.wasClientBefore || '').trim().toLowerCase();
+  const vinPresent = Boolean(String(body.vin || '').trim());
+  const vinRequired = wasClientBefore === 'no';
+  logger.info('was_client_before validation result', {
+    sourceChannel,
+    wasClientBefore,
+    valid: ['yes', 'no'].includes(wasClientBefore)
+  });
+  logger.info('vin requirement decision', { sourceChannel, vinRequired, vinPresent, reason: vinRequired ? 'was_client_before_no' : 'was_client_before_yes' });
   const lookup = existingClientLookup?.lookupByPhoneAndFio({
     phone: normalizedPhone,
     fullName: body.fullName
@@ -200,7 +222,10 @@ function createClientRequest({
     description: body.description || body.question || body.changeDetails || '',
     sourceChannel,
     payload: {
-      wasClientBefore: body.wasClientBefore || '',
+      wasClientBefore: wasClientBefore,
+      was_client_before: wasClientBefore,
+      vin_present: vinPresent,
+      vin_required_reason: vinRequired ? 'was_client_before_no' : 'was_client_before_yes_or_unknown',
       visitDate: body.visitDate || '',
       car: body.car || '',
       question: body.question || '',
@@ -209,7 +234,7 @@ function createClientRequest({
       nativeContact: body.nativeContact || null,
       existing_client: Boolean(lookup.existingClient),
       needs_review: Boolean(lookup.needsReview),
-      client_match_basis: lookup.clientMatchBasis || 'phone_fio_no_match',
+      client_match_basis: lookup.clientMatchBasis || 'no_match',
       matched_reference_client_id: lookup.matchedReferenceClientId || null,
       matched_reference_source: lookup.matchedReferenceSource || null,
       matched_reference_snapshot: lookup.matchedReferenceSnapshot || null
@@ -223,6 +248,8 @@ function createClientRequest({
     direction: 'inbound',
     payload: { action: 'request_created', type, contactSource: body.contactSource || body.nativeContact?.source || 'manual' }
   });
+  logger.info('request saved', { requestId: request.id, sourceChannel });
+  logger.info('status assigned', { requestId: request.id, status: request.status });
   return { client, vehicle, request, existingClientLookup: lookup };
 }
 
@@ -524,6 +551,13 @@ function createServer({ config, logger }) {
           AI_TIMEOUT_MS: config.ai?.timeoutMs || 0
         },
         existingClientLookup: existingClientLookup.getDiagnostics(),
+        webappRequestFlow: db.getMetaValue('webapp_request_flow:last', {
+          requestReceived: false,
+          requestPersisted: false,
+          requestVisibleInNewRequests: false,
+          telegramNotification: { attempted: false, delivered: false },
+          maxNotification: { attempted: false, delivered: 0 }
+        }),
         healthEndpoints: ['/health', '/health/db', '/health/max'],
         scheduler: {
           waitingDecisionScheduled: db.listTasks(['scheduled', 'processing']).filter((item) => item.taskType === 'waiting_decision_followup').length,
@@ -759,7 +793,22 @@ function createServer({ config, logger }) {
           metaJson: { duplicateRequestId: duplicate.id }
         });
       }
-      await duplicateToMastersChat({ config, request: created, payload: { ...body, ...(created.payload || {}) } });
+      const notifyResult = await duplicateToMastersChat({ config, request: created, payload: { ...body, ...(created.payload || {}) } });
+      logger.info('telegram notify result', { requestId: created.id, ...(notifyResult?.telegram || {}) });
+      logger.info('max notify result', { requestId: created.id, ...(notifyResult?.max || {}) });
+      const visibleInNewRequests = db.listRequests({ statuses: ['new'] }).some((item) => item.id === created.id);
+      logger.info('list visibility result', { requestId: created.id, visibleInNewRequests });
+      db.setMetaValue('webapp_request_flow:last', {
+        requestId: created.id,
+        requestType: type,
+        sourceChannel,
+        requestReceived: true,
+        requestPersisted: true,
+        requestVisibleInNewRequests: visibleInNewRequests,
+        telegramNotification: notifyResult?.telegram || { attempted: false, delivered: false },
+        maxNotification: notifyResult?.max || { attempted: false, delivered: 0 },
+        createdAt: new Date().toISOString()
+      });
       if (created.requestType === REQUEST_TYPES.COMPLAINT) {
         await duplicateToMastersChat({ config, request: created, payload: { ...body, ...(created.payload || {}) } });
       }

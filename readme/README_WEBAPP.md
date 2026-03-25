@@ -35,3 +35,16 @@ WebApp payload может содержать Telegram/MAX identity;
 - Если match не найден: `existing_client = false`.
 - Если найдено несколько записей по `phone+fio`: `existing_client = false`, `needs_review = true`, `client_match_basis = conflict_multiple_matches`.
 - Email/VIN не используются как ключи в этом WebApp lookup.
+
+## Update 2026-03-25 (WebApp intake hardening)
+- Existing client lookup переведён на primary business rule `phone exact match` (нормализованный 10-значный номер).
+- FIO больше не блокирует match: если телефон найден ровно один раз -> `existing_client=true`, `client_match_basis=phone`.
+- Если нет совпадения -> `client_match_basis=no_match`.
+- Если по одному телефону найдено >1 клиента -> `client_match_basis=multiple_phone_matches`, `needs_review=true`.
+- Если dataset недоступен -> `client_match_basis=reference_dataset_unavailable` (не маскируется под `no_match`).
+- Поле `Был у нас ранее` (`wasClientBefore`) обязательно для всех WebApp форм.
+- VIN-правило:
+  - `wasClientBefore=yes` -> VIN не обязателен;
+  - `wasClientBefore=no` -> VIN обязателен;
+  - если признак не выбран -> submit блокируется.
+- Проверка правила выполняется и на frontend (`public/webapp.js`), и на backend (`validateClientRequestPayload`).

@@ -124,7 +124,7 @@ function buildRequestCardText(card) {
     `Описание: ${r.description || '-'}`,
     `Источник: ${r.sourceChannel || '-'}`,
     `Действующий клиент: ${existingClient ? 'Да' : 'Нет'}`,
-    `Основание проверки: ${payload.client_match_basis || '-'}`,
+    `Основание: ${payload.client_match_basis || '-'}`,
     `ID в reference-базе: ${payload.matched_reference_client_id || '-'}`,
     `Источник reference: ${payload.matched_reference_source || '-'}`,
     `Требуется проверка: ${needsReview ? 'Да' : 'Нет'}`,

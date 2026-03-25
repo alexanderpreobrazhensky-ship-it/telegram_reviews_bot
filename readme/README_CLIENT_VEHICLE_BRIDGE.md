@@ -84,3 +84,13 @@
 3. Порядок сопоставления клиента: `phone -> fio -> vin`.
 4. VIN формата `no_vin_*` считается placeholder.
 5. Пробег (`latest_mileage`, `max_mileage`, `last_mileage_date`) — отдельный полезный признак.
+
+## Update 2026-03-25: Runtime lookup contract
+- Runtime WebApp lookup использует SQLite dataset как read-only reference слой.
+- Текущий lookup-ключ: только `normalized_phone` (10 цифр).
+- Контракты результата:
+  - exact single phone match -> `existing_client=true`, `client_match_basis=phone`;
+  - no phone match -> `existing_client=false`, `client_match_basis=no_match`;
+  - multiple matches -> `existing_client=false`, `needs_review=true`, `client_match_basis=multiple_phone_matches`;
+  - dataset unavailable/init failure/schema unsupported -> `client_match_basis=reference_dataset_unavailable`.
+- `reference_dataset_unavailable` трактуется как инфраструктурная проблема dataset-доступности, а не как бизнес `no_match`.
