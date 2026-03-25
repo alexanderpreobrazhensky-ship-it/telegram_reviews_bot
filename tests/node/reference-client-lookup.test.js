@@ -103,6 +103,11 @@ test('lookup reports reference_dataset_unavailable when dataset path is missing'
   const diagnostics = lookup.getDiagnostics();
   assert.equal(diagnostics.available, false);
   assert.equal(diagnostics.loaderStatus, 'dataset_missing');
+  assert.equal(diagnostics.datasetExists, false);
+  assert.equal(diagnostics.datasetReadable, false);
+  assert.equal(diagnostics.datasetType, 'sqlite');
+  assert.equal(diagnostics.lastLookupTargetPhone, '9991112233');
+  assert.equal(diagnostics.lastLookupMatchCount, 0);
 });
 
 test('webapp request persists existing_client flags and master card shows them', async () => {
@@ -146,9 +151,34 @@ test('webapp request persists existing_client flags and master card shows them',
         assert.match(payload.text, /Действующий клиент: Да/i);
         assert.match(payload.text, /Основание: phone/i);
         assert.match(payload.text, /ID в reference-базе: C-1/i);
+        assert.match(payload.text, /Источник reference: fixture_1c/i);
       }
     );
   } finally {
     fs.rmSync(fixture.tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('default dataset path resolution works outside project cwd and supports phone exact match 9506275333', () => {
+  const previousCwd = process.cwd();
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lookup-cwd-'));
+  try {
+    process.chdir(tmpDir);
+    const lookup = createReferenceClientLookup({ logger: { info() {}, warn() {}, error() {} } });
+    const diagnostics = lookup.getDiagnostics();
+    assert.equal(diagnostics.available, true);
+    assert.equal(diagnostics.loaderStatus, 'ready');
+    assert.equal(diagnostics.datasetExists, true);
+    assert.equal(diagnostics.datasetReadable, true);
+    assert.equal(diagnostics.datasetType, 'sqlite');
+    assert.equal(diagnostics.phoneIndexBuilt, true);
+    assert.ok(diagnostics.totalClientRows > 0);
+    const exact = lookup.lookupByPhoneAndFio({ phone: '9506275333', fullName: 'Любое ФИО' });
+    assert.equal(exact.existingClient, true);
+    assert.equal(exact.clientMatchBasis, 'phone');
+    assert.equal(exact.matchedReferenceClientId, 'ЦБ005355');
+  } finally {
+    process.chdir(previousCwd);
+    fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
