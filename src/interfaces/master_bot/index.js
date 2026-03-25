@@ -339,6 +339,7 @@ function buildDiagnosticsText({ config, actor, channel, detailed = false, aiInfr
   const waitingDecisionTasks = followupTasks.filter((item) => item.taskType === 'waiting_decision_followup');
   const consultedTasks = followupTasks.filter((item) => item.taskType === 'consulted_followup');
   const emailIntake = db.getMetaValue('email_intake:diagnostics', {});
+  const referenceLookup = db.getMetaValue('reference_client_lookup:diagnostics', {});
   const writable = require('node:fs').existsSync(runtime.dir || '.');
   const ai = config.ai || {};
   const aiRuntime = aiInfrastructure?.runtimeSettings?.get ? aiInfrastructure.runtimeSettings.get() : null;
@@ -390,6 +391,16 @@ function buildDiagnosticsText({ config, actor, channel, detailed = false, aiInfr
     `- processed/duplicates/failed_parse: ${emailIntake.processedCount || 0}/${emailIntake.duplicateCount || 0}/${emailIntake.failedParseCount || 0}`,
     `- last email processed: ${emailIntake.lastEmailProcessed?.messageId || emailIntake.lastEmailProcessed?.uid || '-'}`,
     `- t_business readiness: ${config.emailIntake?.sourceTBusinessEnabled ? 'ON' : 'OFF'} (priority=${config.emailIntake?.sourceTBusinessPriority || 'high'})`,
+    '',
+    'Reference dataset lookup:',
+    `- configured: ${referenceLookup.configured ? 'yes' : 'no'}`,
+    `- path: ${referenceLookup.datasetPath || '-'}`,
+    `- exists/readable/type: ${referenceLookup.datasetExists ? 'yes' : 'no'} / ${referenceLookup.datasetReadable ? 'yes' : 'no'} / ${referenceLookup.datasetType || '-'}`,
+    `- loader status: ${referenceLookup.loaderStatus || '-'}`,
+    `- available: ${referenceLookup.available ? 'yes' : 'no'} | rows=${referenceLookup.totalClientRows || 0} | phone index built=${referenceLookup.phoneIndexBuilt ? 'yes' : 'no'}`,
+    `- last lookup: result=${referenceLookup.lastLookupResult || '-'} target_phone=${referenceLookup.lastLookupTargetPhone || '-'} match_count=${referenceLookup.lastLookupMatchCount ?? '-'}`,
+    `- last lookup status/at: ${referenceLookup.lastLookupStatus || '-'} / ${referenceLookup.lastLookupAttemptedAt || '-'}`,
+    `- last error: ${referenceLookup.lastError || '-'}`,
     '',
     'AI diagnostics (separate block):',
     `- verdict: ${aiVerdict}`,

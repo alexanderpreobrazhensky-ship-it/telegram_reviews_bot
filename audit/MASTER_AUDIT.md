@@ -191,12 +191,12 @@ AI вынесен в отдельный блок, где отражаются:
 - Live корректность зависит от валидности окружения и внешней доступности провайдеров.
 - Задача по переносу reference dataset не включает исправление AI runtime/config logic.
 
-## 17) WebApp existing client deterministic lookup (phone+fio)
+## 17) WebApp existing client deterministic lookup (phone primary)
 
 ### Что внедрено
 - В backend submit flow WebApp/site (`/api/client/requests/*`) добавлен централизованный lookup в reference bridge SQLite.
 - Источник данных: `data/reference/client_vehicle_bridge/lira_normalized_database.sqlite` (read-only usage).
-- Правило матчинга: exact-only `phone(10 digits) + fio(normalized)`.
+- Правило матчинга: exact-only `phone(10 digits)` как primary.
 - Результат сохраняется в `request.payload`:
   - `existing_client`
   - `client_match_basis`
@@ -206,17 +206,46 @@ AI вынесен в отдельный блок, где отражаются:
   - `needs_review`
 
 ### Конфликтная логика
-- `1 match`: `existing_client=true`, `client_match_basis=phone_fio`, `needs_review=false`.
-- `0 match`: `existing_client=false`.
-- `>1 matches`: `existing_client=false`, `needs_review=true`, `client_match_basis=conflict_multiple_matches`.
+- `1 match`: `existing_client=true`, `client_match_basis=phone`, `needs_review=false`.
+- `0 match`: `existing_client=false`, `client_match_basis=no_match`.
+- `>1 matches`: `existing_client=false`, `needs_review=true`, `client_match_basis=multiple_phone_matches`.
 
 ### Отображение
 - Master bot карточка и первичное уведомление содержат поля:
   - `Действующий клиент`
-  - `Основание проверки`
+  - `Основание`
   - `ID в reference-базе`
+  - `Источник reference`
   - `Требуется проверка`
 - Internal request card (`/internal/requests/:id`) также показывает lookup-поля.
+
+## 18) Runtime reference dataset access hardening (2026-03-25)
+
+### Root cause
+- Причина повторяющегося `reference_dataset_unavailable` после деплоя: lookup loader использовал default path от `process.cwd()`.
+- В отдельных runtime/deploy окружениях рабочая директория отличалась от корня репозитория, поэтому loader искал `data/reference/...` не там, где лежал артефакт.
+
+### Fix
+- Default dataset path теперь вычисляется от расположения кода (`src/infrastructure -> ../../data/reference/client_vehicle_bridge/lira_normalized_database.sqlite`), а не от `cwd`.
+- Добавлен path resolution self-check с видимой диагностикой:
+  - configured/path/exists/readable/type
+  - loaderStatus/available
+  - totalClientRows/phoneIndexBuilt
+  - lastLookupResult/lastLookupTargetPhone/lastLookupMatchCount/lastError
+- Если явно задан `REFERENCE_CLIENT_LOOKUP_SQLITE_PATH` или `REFERENCE_CLIENT_LOOKUP_DATASET_PATH`, используется strict path (без silent fallback), чтобы конфигурационные ошибки не маскировались.
+
+### Business rule state
+- Primary rule: `exact phone match => existing_client=true` (`client_match_basis=phone`).
+- `no match => client_match_basis=no_match`.
+- `multiple matches => client_match_basis=multiple_phone_matches`, `needs_review=true`.
+- `reference_dataset_unavailable` остаётся только для реальной инфраструктурной недоступности dataset.
+
+### Evidence
+- Контрольный номер `9506275333` найден в reference SQLite и проходит runtime lookup (`existing_client=true`, `client_match_basis=phone`).
+- Master-карточка/уведомление отображают `Действующий клиент`, `Основание`, `ID в reference-базе`, `Источник reference`, `Требуется проверка`.
+
+### Status
+- **fixed** для заявленной проблемы runtime dataset access + phone-primary matching.
 
 ### Диагностика
 - `GET /internal/diagnostics` дополнен блоком `existingClientLookup`:
