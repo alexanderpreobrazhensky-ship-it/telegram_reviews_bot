@@ -74,3 +74,35 @@
 - Последняя диагностическая запись сохраняется в `meta` и доступна в `/internal/diagnostics` как `webappRequestFlow`.
 - Existing client diagnostics расширена: `configured`, `available`, `datasetPath`, `source`, `loaderStatus`, `lastLookupAttemptedAt`, `lastLookupResult`, `lastError`.
 - Для MAX parity уведомления о новых WebApp заявках отправляются также в MAX master channel (по `MAX_MASTER_BOT_ADMIN_IDS`) при включённом MAX.
+
+## Update 2026-03-25: Reference Dataset / Client Lookup Diagnostics (master-бот)
+Добавлен отдельный operational блок диагностики `Reference Dataset / Client Lookup Diagnostics`.
+
+### Что показывает «Статус базы»
+- dataset configured/path resolved/exists/readable;
+- dataset type (`sqlite`/`xlsx`/`runtime cache`);
+- dataset loader status (`not_started`/`loaded`/`failed`);
+- total rows, phone index built, lookup enabled;
+- effective business rule: `phone exact match active`;
+- last lookup status/result/error/target/match_count.
+
+### Статусы (разделены по причинам)
+- `DATASET_NOT_CONFIGURED`
+- `DATASET_PATH_UNRESOLVED`
+- `DATASET_FILE_MISSING`
+- `DATASET_UNREADABLE`
+- `DATASET_LOAD_FAILED`
+- `LOOKUP_DISABLED`
+- `LOOKUP_OK_NO_MATCH`
+- `LOOKUP_OK_EXACT_MATCH`
+- `LOOKUP_OK_MULTIPLE_MATCHES`
+- `LOOKUP_FAILED`
+- `REFERENCE_DATASET_UNAVAILABLE`
+
+### Master-бот flow
+Меню `Диагностика -> База клиентов`:
+- `Статус базы`
+- `Проверить lookup (9506275333)`
+- `Проверить номер` (ручной ввод, с `Назад`/`В меню`)
+
+Ключевое: диагностика использует тот же runtime lookup path, что и WebApp request creation/existing client detection.

@@ -95,3 +95,11 @@
   - multiple matches -> `existing_client=false`, `needs_review=true`, `client_match_basis=multiple_phone_matches`;
   - dataset unavailable/init failure/schema unsupported -> `client_match_basis=reference_dataset_unavailable`.
 - `reference_dataset_unavailable` трактуется как инфраструктурная проблема dataset-доступности, а не как бизнес `no_match`.
+
+## Update 2026-03-25: Runtime lookup diagnostics contract
+Для bridge dataset добавлен runtime-диагностический контракт, который отличает инфраструктурные ошибки от бизнес-результата матчинга.
+
+- Exact phone match (`10 digits`) остаётся primary business rule.
+- `no_match` больше не маскируется под `reference_dataset_unavailable`.
+- Диагностика поддерживает probe по конкретному номеру (включая `9506275333`) через тот же lookup path, что WebApp flow.
+- В diagnostics теперь фиксируются matched client ids/names (если безопасно), basis, status и lookup error.

@@ -66,3 +66,18 @@ npm test
 2. Request visible in `Новые заявки` query.
 3. Telegram master notification attempted.
 4. MAX master notification attempted when MAX enabled and admins configured.
+
+## Update 2026-03-25: Reference Dataset diagnostics test matrix
+Обязательные проверки:
+1. dataset configured;
+2. dataset missing;
+3. dataset unreadable;
+4. dataset load failed;
+5. lookup no_match;
+6. lookup exact_match;
+7. lookup multiple_matches;
+8. контрольный номер `9506275333`;
+9. diagnostics UI в master-боте (`Диагностика -> База клиентов`);
+10. pending-input flow для `Проверить номер`;
+11. кнопки `Назад` / `В меню` в diagnostic flow;
+12. regression: existing diagnostics/master bot/WebApp/existing-client path.

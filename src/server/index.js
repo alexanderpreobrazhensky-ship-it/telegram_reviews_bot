@@ -1021,7 +1021,7 @@ function createServer({ config, logger }) {
       const { body, invalidJson } = await readBody(req);
       if (invalidJson) return sendJson(res, 400, { error: 'Invalid JSON payload' });
       const payload = matched.handler
-        ? await matched.handler({ body, config, headers: req.headers, pathname, method: req.method, rawHeaders: req.rawHeaders || [], aiInfrastructure })
+        ? await matched.handler({ body, config, headers: req.headers, pathname, method: req.method, rawHeaders: req.rawHeaders || [], aiInfrastructure, existingClientLookup })
         : { accepted: true };
       logger.info(`Accepted route: ${req.method} ${pathname}`);
       return sendJson(res, payload?.statusCode || 200, payload);

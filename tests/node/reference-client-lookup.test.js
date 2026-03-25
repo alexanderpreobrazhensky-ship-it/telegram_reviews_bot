@@ -102,12 +102,65 @@ test('lookup reports reference_dataset_unavailable when dataset path is missing'
   assert.equal(result.lookupStatus, 'dataset_missing');
   const diagnostics = lookup.getDiagnostics();
   assert.equal(diagnostics.available, false);
-  assert.equal(diagnostics.loaderStatus, 'dataset_missing');
+  assert.equal(diagnostics.loaderStatus, 'failed');
+  assert.equal(diagnostics.loaderFailureReason, 'DATASET_FILE_MISSING');
   assert.equal(diagnostics.datasetExists, false);
   assert.equal(diagnostics.datasetReadable, false);
   assert.equal(diagnostics.datasetType, 'sqlite');
   assert.equal(diagnostics.lastLookupTargetPhone, '9991112233');
   assert.equal(diagnostics.lastLookupMatchCount, 0);
+});
+
+test('diagnostic lookup statuses distinguish exact/no_match/multiple and dedicated test number', () => {
+  const lookup = createReferenceClientLookup({ logger: { info() {}, warn() {}, error() {} } });
+
+  const exact = lookup.runLookupDiagnostics({ phone: '9506275333', fullName: 'Тест' });
+  assert.equal(exact.lookupStatus, 'exact_match');
+  assert.equal(exact.diagnosticStatus, 'LOOKUP_OK_EXACT_MATCH');
+  assert.ok(exact.matchedClientIds.includes('ЦБ005355'));
+
+  const noMatch = lookup.runLookupDiagnostics({ phone: '9000000000', fullName: 'Новый Клиент' });
+  assert.equal(noMatch.lookupStatus, 'no_match');
+  assert.equal(noMatch.diagnosticStatus, 'LOOKUP_OK_NO_MATCH');
+  assert.equal(noMatch.matchCount, 0);
+});
+
+test('diagnostics returns DATASET_UNREADABLE for unreadable dataset file', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'reference-client-lookup-unreadable-'));
+  const dbPath = path.join(tmpDir, 'unreadable.sqlite');
+  fs.writeFileSync(dbPath, 'placeholder');
+  const originalAccessSync = fs.accessSync;
+  fs.accessSync = (targetPath, mode) => {
+    if (targetPath === dbPath) throw new Error('EACCES');
+    return originalAccessSync(targetPath, mode);
+  };
+  try {
+    const lookup = createReferenceClientLookup({ datasetPath: dbPath, logger: { info() {}, warn() {}, error() {} } });
+    const diagnostics = lookup.getDiagnostics();
+    assert.equal(diagnostics.loaderStatus, 'failed');
+    assert.equal(diagnostics.loaderFailureReason, 'DATASET_UNREADABLE');
+    const probe = lookup.runLookupDiagnostics({ phone: '9506275333', fullName: 'Тест' });
+    assert.equal(probe.diagnosticStatus, 'DATASET_UNREADABLE');
+  } finally {
+    fs.accessSync = originalAccessSync;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('diagnostics returns DATASET_LOAD_FAILED for invalid sqlite payload', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'reference-client-lookup-invalid-'));
+  const dbPath = path.join(tmpDir, 'invalid.sqlite');
+  fs.writeFileSync(dbPath, 'not a sqlite file');
+  try {
+    const lookup = createReferenceClientLookup({ datasetPath: dbPath, logger: { info() {}, warn() {}, error() {} } });
+    const diagnostics = lookup.getDiagnostics();
+    assert.equal(diagnostics.loaderStatus, 'failed');
+    assert.equal(diagnostics.loaderFailureReason, 'DATASET_LOAD_FAILED');
+    const probe = lookup.runLookupDiagnostics({ phone: '9506275333', fullName: 'Тест' });
+    assert.equal(probe.diagnosticStatus, 'DATASET_LOAD_FAILED');
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
 });
 
 test('webapp request persists existing_client flags and master card shows them', async () => {
@@ -167,7 +220,7 @@ test('default dataset path resolution works outside project cwd and supports pho
     const lookup = createReferenceClientLookup({ logger: { info() {}, warn() {}, error() {} } });
     const diagnostics = lookup.getDiagnostics();
     assert.equal(diagnostics.available, true);
-    assert.equal(diagnostics.loaderStatus, 'ready');
+    assert.equal(diagnostics.loaderStatus, 'loaded');
     assert.equal(diagnostics.datasetExists, true);
     assert.equal(diagnostics.datasetReadable, true);
     assert.equal(diagnostics.datasetType, 'sqlite');
