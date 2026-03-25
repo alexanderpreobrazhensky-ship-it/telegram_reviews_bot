@@ -230,6 +230,68 @@ test('diagnostics and logs are available only for admin and do not expose raw se
   delete process.env.TELEGRAM_MASTER_BOT_TOKEN;
 });
 
+test('master diagnostics exposes reference dataset menu, lookup test and manual phone flow', async () => {
+  await withServer(async (base) => {
+    const diagnostics = await sendMaster(base, '/diagnostics');
+    assert.equal(diagnostics.ok, true);
+
+    const openReference = await fetch(`${base}/telegram/master_bot/webhook`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ callback_query: { id: 'diag-ref-1', from: { id: 5001, first_name: 'Admin' }, message: { chat: { id: 5001 } }, data: 'diag:reference' } })
+    }).then((res) => res.json());
+    assert.equal(openReference.ok, true);
+    assert.match(openReference.text, /Диагностика базы клиентов/i);
+
+    const status = await fetch(`${base}/telegram/master_bot/webhook`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ callback_query: { id: 'diag-ref-2', from: { id: 5001, first_name: 'Admin' }, message: { chat: { id: 5001 } }, data: 'diag:reference:status' } })
+    }).then((res) => res.json());
+    assert.equal(status.ok, true);
+    assert.match(status.text, /Reference Dataset \/ Client Lookup Diagnostics/i);
+    assert.match(status.text, /dataset configured:/i);
+    assert.match(status.text, /phone index built:/i);
+
+    const testLookup = await fetch(`${base}/telegram/master_bot/webhook`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ callback_query: { id: 'diag-ref-3', from: { id: 5001, first_name: 'Admin' }, message: { chat: { id: 5001 } }, data: 'diag:reference:lookup:test' } })
+    }).then((res) => res.json());
+    assert.equal(testLookup.ok, true);
+    assert.match(testLookup.text, /raw input phone: 9506275333/i);
+    assert.match(testLookup.text, /result: exact_match/i);
+
+    const manualPrompt = await fetch(`${base}/telegram/master_bot/webhook`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ callback_query: { id: 'diag-ref-4', from: { id: 5001, first_name: 'Admin' }, message: { chat: { id: 5001 } }, data: 'diag:reference:lookup:manual' } })
+    }).then((res) => res.json());
+    assert.equal(manualPrompt.ok, true);
+    assert.match(manualPrompt.text, /Введите номер телефона/i);
+
+    const backFromPending = await fetch(`${base}/telegram/master_bot/webhook`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ callback_query: { id: 'diag-ref-4b', from: { id: 5001, first_name: 'Admin' }, message: { chat: { id: 5001 } }, data: 'nav:back' } })
+    }).then((res) => res.json());
+    assert.equal(backFromPending.ok, true);
+    assert.match(backFromPending.text, /Диагностика базы клиентов/i);
+
+    await fetch(`${base}/telegram/master_bot/webhook`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ callback_query: { id: 'diag-ref-4c', from: { id: 5001, first_name: 'Admin' }, message: { chat: { id: 5001 } }, data: 'diag:reference:lookup:manual' } })
+    }).then((res) => res.json());
+
+    const manualResult = await sendMaster(base, '9506275333');
+    assert.equal(manualResult.ok, true);
+    assert.match(manualResult.text, /normalized phone: 9506275333/i);
+    assert.match(manualResult.text, /result: exact_match/i);
+    assert.match(manualResult.text, /matched client ids: .*ЦБ005355/i);
+  });
+});
+
 test('instruction and diagnostics include new workflow, email and separate AI sections', async () => {
   process.env.TELEGRAM_CLIENT_BOT_TOKEN = '123456:ABCDEF_SECRET';
   process.env.TELEGRAM_MASTER_BOT_TOKEN = '123456:MASTER_SECRET';

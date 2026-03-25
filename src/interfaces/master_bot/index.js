@@ -25,6 +25,7 @@ const PROCESSED_SUBSTATUS_LABELS = {
   waiting_decision: 'ждёт решения',
   rejected: 'отказ'
 };
+const REFERENCE_TEST_PHONE = '9506275333';
 const LEGACY_CALLBACK_MAP = Object.freeze({
   assigned: { action: 'in_progress', event: 'legacy_assign' },
   awaiting_client: { action: 'refresh_only', event: 'legacy_waiting_client' },
@@ -478,6 +479,71 @@ function buildAiMenuKeyboard() {
   };
 }
 
+function buildReferenceDatasetMenuKeyboard() {
+  return withNavigationRows([
+    [{ text: 'Статус базы', callback_data: 'diag:reference:status' }],
+    [{ text: `Проверить lookup (${REFERENCE_TEST_PHONE})`, callback_data: 'diag:reference:lookup:test' }],
+    [{ text: 'Проверить номер', callback_data: 'diag:reference:lookup:manual' }]
+  ], { includeBack: true, includeMenu: true });
+}
+
+function resolveReferenceDiagnosticStatus(referenceLookup = {}) {
+  if (!referenceLookup.lookupEnabled) return 'LOOKUP_DISABLED';
+  if (!referenceLookup.configured) return 'DATASET_NOT_CONFIGURED';
+  if (!referenceLookup.datasetPathResolved) return 'DATASET_PATH_UNRESOLVED';
+  if (!referenceLookup.datasetExists) return 'DATASET_FILE_MISSING';
+  if (!referenceLookup.datasetReadable) return 'DATASET_UNREADABLE';
+  if (referenceLookup.loaderStatus === 'failed') return referenceLookup.loaderFailureReason || 'DATASET_LOAD_FAILED';
+  return referenceLookup.lastLookupStatus === 'multiple_matches'
+    ? 'LOOKUP_OK_MULTIPLE_MATCHES'
+    : referenceLookup.lastLookupStatus === 'exact_match'
+      ? 'LOOKUP_OK_EXACT_MATCH'
+      : referenceLookup.lastLookupStatus === 'no_match'
+        ? 'LOOKUP_OK_NO_MATCH'
+        : 'REFERENCE_DATASET_UNAVAILABLE';
+}
+
+function buildReferenceDatasetStatusText(referenceLookup = {}) {
+  return [
+    'Reference Dataset / Client Lookup Diagnostics',
+    `diagnostic status: ${resolveReferenceDiagnosticStatus(referenceLookup)}`,
+    `dataset configured: ${referenceLookup.configured ? 'yes' : 'no'}`,
+    `dataset path resolved: ${referenceLookup.datasetPathResolved ? 'yes' : 'no'}`,
+    `dataset path: ${referenceLookup.datasetPath || '-'}`,
+    `dataset exists: ${referenceLookup.datasetExists ? 'yes' : 'no'}`,
+    `dataset readable: ${referenceLookup.datasetReadable ? 'yes' : 'no'}`,
+    `dataset type: ${referenceLookup.datasetType || '-'}`,
+    `dataset loader status: ${referenceLookup.loaderStatus || 'not_started'}`,
+    `total rows available: ${referenceLookup.totalClientRows || 0}`,
+    `phone index built: ${referenceLookup.phoneIndexBuilt ? 'yes' : 'no'}`,
+    `lookup enabled: ${referenceLookup.lookupEnabled ? 'yes' : 'no'}`,
+    `effective business rule (phone exact match active): ${referenceLookup.exactPhoneMatchActive ? 'yes' : 'no'}`,
+    `last lookup status: ${referenceLookup.lastLookupStatus || '-'}`,
+    `last lookup result: ${referenceLookup.lastLookupResult || '-'}`,
+    `last lookup error: ${referenceLookup.lastLookupError || referenceLookup.lastError || '-'}`,
+    `last lookup target phone: ${referenceLookup.lastLookupTargetPhone || '-'}`,
+    `last lookup match count: ${referenceLookup.lastLookupMatchCount ?? '-'}`,
+    `last lookup matched client ids: ${(referenceLookup.lastLookupMatchedClientIds || []).join(', ') || '-'}`
+  ].join('\n');
+}
+
+function buildReferenceLookupResultText(result = {}) {
+  return [
+    'Reference lookup diagnostics result',
+    `diagnostic status: ${result.diagnosticStatus || 'LOOKUP_FAILED'}`,
+    `raw input phone: ${result.rawPhone || '-'}`,
+    `normalized phone: ${result.normalizedPhone || '-'}`,
+    `dataset available: ${result.datasetAvailable ? 'yes' : 'no'}`,
+    `lookup attempted: ${result.lookupAttempted ? 'yes' : 'no'}`,
+    `match count: ${result.matchCount ?? 0}`,
+    `result: ${result.lookupStatus || result.result || 'lookup_failed'}`,
+    `match basis: ${result.matchBasis || '-'}`,
+    `matched client ids: ${(result.matchedClientIds || []).join(', ') || '-'}`,
+    `matched client names: ${(result.matchedClientNames || []).join(', ') || '-'}`,
+    `lookup error: ${result.error || '-'}`
+  ].join('\n');
+}
+
 function withNavigationRows(rows = [], { includeBack = true, includeMenu = true } = {}) {
   const keyboard = Array.isArray(rows) ? [...rows] : [];
   const navRow = [];
@@ -703,7 +769,7 @@ async function handleMenuAction({ action, actor, channel, token, recipientId, ma
   if (action === 'menu:diagnostics') {
     updateSession(sessionKey, { screen: 'menu:diagnostics', backAction: 'menu:root', step: null });
     if (!isAdmin(actor)) return respondWithMessage({ channel, token, recipientId, text: 'Недостаточно прав.', payload: { ok: false, error: 'ACCESS_DENIED', action } });
-    return respondWithMessage({ channel, token, recipientId, text: buildDiagnosticsText({ config, actor, channel, detailed: false, aiInfrastructure }), payload: { ok: true, action }, extra: { reply_markup: withNavigationRows([[{ text: 'обновить', callback_data: 'admin:diagnostics' }, { text: 'прогнать проверку', callback_data: 'admin:diagnostics' }], [{ text: 'краткий статус', callback_data: 'admin:diagnostics_short' }, { text: 'подробный статус', callback_data: 'admin:diagnostics_detailed' }]], { includeBack: true, includeMenu: true }) } });
+    return respondWithMessage({ channel, token, recipientId, text: buildDiagnosticsText({ config, actor, channel, detailed: false, aiInfrastructure }), payload: { ok: true, action }, extra: { reply_markup: withNavigationRows([[{ text: 'обновить', callback_data: 'admin:diagnostics' }, { text: 'прогнать проверку', callback_data: 'admin:diagnostics' }], [{ text: 'краткий статус', callback_data: 'admin:diagnostics_short' }, { text: 'подробный статус', callback_data: 'admin:diagnostics_detailed' }], [{ text: 'База клиентов', callback_data: 'diag:reference' }]], { includeBack: true, includeMenu: true }) } });
   }
   if (action === 'menu:logs') {
     if (!isAdmin(actor)) return respondWithMessage({ channel, token, recipientId, text: 'Недостаточно прав.', payload: { ok: false, error: 'ACCESS_DENIED', action } });
@@ -755,7 +821,7 @@ function buildHistoryText(card) {
   return `История заявки ${card.request.id}:\n${buildHistoryLines(card)}`;
 }
 
-async function handleMasterWebhook({ body, config, headers = {}, rawHeaders = [], pathname = '', method = 'POST', channel = 'telegram', aiInfrastructure = null }) {
+async function handleMasterWebhook({ body, config, headers = {}, rawHeaders = [], pathname = '', method = 'POST', channel = 'telegram', aiInfrastructure = null, existingClientLookup = null }) {
   if (channel === 'max') {
     const bodyKeys = body && typeof body === 'object' && !Array.isArray(body) ? Object.keys(body).sort() : [];
     logger.info('master_bot MAX webhook route hit', { channel, pathname, method: String(method || '').toUpperCase(), bodyPresent: Boolean(body), bodyKeys });
@@ -815,6 +881,10 @@ async function handleMasterWebhook({ body, config, headers = {}, rawHeaders = []
         const backAction = session.backAction || (session.screen && session.screen.startsWith('menu:ai') ? 'menu:ai' : 'menu:root');
         if (backAction === 'menu:root') {
           return respondWithMessage({ channel, token, recipientId, text: 'Главное меню', payload: { ok: true, action: 'menu:root' }, extra: { reply_markup: buildMainMenuKeyboard(actor) } });
+        }
+        if (backAction === 'diag:reference') {
+          updateSession(sessionKey, { screen: 'menu:diagnostics:reference', backAction: 'menu:diagnostics', step: null });
+          return respondWithMessage({ channel, token, recipientId, text: 'Диагностика базы клиентов: выберите действие.', payload: { ok: true, action: 'diag:reference' }, extra: { reply_markup: buildReferenceDatasetMenuKeyboard() } });
         }
         return handleMenuAction({ action: backAction, actor, channel, token, recipientId, masterService, config, sessionKey, aiInfrastructure });
       }
@@ -899,6 +969,59 @@ async function handleMasterWebhook({ body, config, headers = {}, rawHeaders = []
         sessions.set(sessionKey, { step: 'logs_filter', detailed: data === 'admin:logs_detailed' });
         await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: 'Введите фильтр' });
         return respondWithMessage({ channel, token, recipientId, text: 'Введите фильтр логов в формате request:<id> type:<type> bot:<bot> since:YYYY-MM-DD' });
+      }
+      if (data === 'diag:reference') {
+        if (!isAdmin(actor)) {
+          await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: 'Недостаточно прав' });
+          return respondWithMessage({ channel, token, recipientId, text: 'Недостаточно прав.', payload: { ok: false, error: 'ACCESS_DENIED' } });
+        }
+        updateSession(sessionKey, { screen: 'menu:diagnostics:reference', backAction: 'menu:diagnostics', step: null });
+        await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: 'База клиентов' });
+        return respondWithMessage({ channel, token, recipientId, text: 'Диагностика базы клиентов: выберите действие.', payload: { ok: true }, extra: { reply_markup: buildReferenceDatasetMenuKeyboard() } });
+      }
+      if (data === 'diag:reference:status') {
+        if (!isAdmin(actor)) {
+          await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: 'Недостаточно прав' });
+          return respondWithMessage({ channel, token, recipientId, text: 'Недостаточно прав.', payload: { ok: false, error: 'ACCESS_DENIED' } });
+        }
+        updateSession(sessionKey, { screen: 'menu:diagnostics:reference:status', backAction: 'diag:reference', step: null });
+        const diagnostics = existingClientLookup?.getDiagnostics?.() || db.getMetaValue('reference_client_lookup:diagnostics', {});
+        db.setMetaValue('reference_client_lookup:diagnostics', diagnostics);
+        await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: 'Статус базы' });
+        return respondWithMessage({ channel, token, recipientId, text: buildReferenceDatasetStatusText(diagnostics), payload: { ok: true, diagnostics }, extra: { reply_markup: buildReferenceDatasetMenuKeyboard() } });
+      }
+      if (data === 'diag:reference:lookup:test') {
+        if (!isAdmin(actor)) {
+          await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: 'Недостаточно прав' });
+          return respondWithMessage({ channel, token, recipientId, text: 'Недостаточно прав.', payload: { ok: false, error: 'ACCESS_DENIED' } });
+        }
+        updateSession(sessionKey, { screen: 'menu:diagnostics:reference:lookup:test', backAction: 'diag:reference', step: null });
+        await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: 'Проверка lookup' });
+        const result = existingClientLookup?.runLookupDiagnostics?.({ phone: REFERENCE_TEST_PHONE, fullName: 'diagnostic test' })
+          || {
+            rawPhone: REFERENCE_TEST_PHONE,
+            normalizedPhone: null,
+            datasetAvailable: false,
+            lookupAttempted: false,
+            matchCount: 0,
+            matchBasis: 'reference_dataset_unavailable',
+            lookupStatus: 'lookup_failed',
+            diagnosticStatus: 'REFERENCE_DATASET_UNAVAILABLE',
+            matchedClientIds: [],
+            matchedClientNames: [],
+            error: 'REFERENCE_LOOKUP_RUNTIME_UNAVAILABLE'
+          };
+        db.setMetaValue('reference_client_lookup:diagnostics', existingClientLookup?.getDiagnostics?.() || db.getMetaValue('reference_client_lookup:diagnostics', {}));
+        return respondWithMessage({ channel, token, recipientId, text: buildReferenceLookupResultText(result), payload: { ok: true, result }, extra: { reply_markup: buildReferenceDatasetMenuKeyboard() } });
+      }
+      if (data === 'diag:reference:lookup:manual') {
+        if (!isAdmin(actor)) {
+          await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: 'Недостаточно прав' });
+          return respondWithMessage({ channel, token, recipientId, text: 'Недостаточно прав.', payload: { ok: false, error: 'ACCESS_DENIED' } });
+        }
+        updateSession(sessionKey, { screen: 'menu:diagnostics:reference:lookup:manual', backAction: 'diag:reference', step: 'reference_lookup_phone' });
+        await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: 'Введите номер' });
+        return respondWithMessage({ channel, token, recipientId, text: 'Введите номер телефона для диагностики lookup (например, 9506275333).', payload: { ok: true }, extra: { reply_markup: withNavigationRows([], { includeBack: true, includeMenu: true }) } });
       }
 
       if (data.startsWith('ai:')) {
@@ -1123,6 +1246,25 @@ async function handleMasterWebhook({ body, config, headers = {}, rawHeaders = []
     if (session?.step === 'logs_filter') {
       sessions.delete(sessionKey);
       return respondWithMessage({ channel, token, recipientId, text: buildLogsText(parseLogsFilter(text), Boolean(session.detailed)), payload: { ok: true } });
+    }
+    if (session?.step === 'reference_lookup_phone') {
+      const result = existingClientLookup?.runLookupDiagnostics?.({ phone: text, fullName: 'manual diagnostic' })
+        || {
+          rawPhone: text,
+          normalizedPhone: null,
+          datasetAvailable: false,
+          lookupAttempted: false,
+          matchCount: 0,
+          matchBasis: 'reference_dataset_unavailable',
+          lookupStatus: 'lookup_failed',
+          diagnosticStatus: 'REFERENCE_DATASET_UNAVAILABLE',
+          matchedClientIds: [],
+          matchedClientNames: [],
+          error: 'REFERENCE_LOOKUP_RUNTIME_UNAVAILABLE'
+        };
+      sessions.delete(sessionKey);
+      db.setMetaValue('reference_client_lookup:diagnostics', existingClientLookup?.getDiagnostics?.() || db.getMetaValue('reference_client_lookup:diagnostics', {}));
+      return respondWithMessage({ channel, token, recipientId, text: buildReferenceLookupResultText(result), payload: { ok: true, result }, extra: { reply_markup: buildReferenceDatasetMenuKeyboard() } });
     }
 
 

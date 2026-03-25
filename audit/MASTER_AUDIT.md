@@ -617,3 +617,20 @@ Root cause на случай деградации (гипотеза, не инц
 - AI runtime readiness: **not fixed operationally / partially fixed architecturally**.
 - `wasClientBefore` + VIN rules: **fixed (runtime confirmed)**.
 
+
+### 23.7 Reference Dataset runtime diagnostics (2026-03-25)
+
+**Статус:** **[confirmed]**
+
+Что добавлено:
+1. Отдельный диагностический блок `Reference Dataset / Client Lookup Diagnostics` в master-боте.
+2. Разделение причин отказа lookup/dataset на дискретные статусы (`DATASET_*`, `LOOKUP_*`, `REFERENCE_DATASET_UNAVAILABLE`).
+3. Диагностический lookup probe использует тот же runtime path, что WebApp existing client detection.
+4. Добавлен контрольный probe по `9506275333` + ручная проверка любого номера с нормализацией.
+5. В логах/диагностике фиксируются raw/normalized phone, match count, matched ids, error reason.
+
+Подтверждённые критерии:
+- можно отличить `no_match` от `dataset_unavailable` и `load_failed`; **[confirmed]**
+- exact phone match rule прозрачно виден в diagnostics (`phone exact match active`); **[confirmed]**
+- navigation/pending flow (`Назад`/`В меню`) сохранён; **[confirmed]**
+- WebApp lookup path не дублирован отдельной «игрушечной» проверкой; **[confirmed]**
