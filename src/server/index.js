@@ -122,6 +122,7 @@ async function duplicateToMastersChat({ config, request, payload }) {
     `Действующий клиент: ${existingClient ? 'Да' : 'Нет'}`,
     `Основание: ${basis}`,
     `ID в reference-базе: ${payload.matched_reference_client_id || '-'}`,
+    `Источник reference: ${payload.matched_reference_source || '-'}`,
     `Требуется проверка: ${needsReview ? 'Да' : 'Нет'}`
   ].join('\n');
   const replyMarkup = {
@@ -466,6 +467,7 @@ function createServer({ config, logger }) {
   const router = [];
   const repositories = createRepositories({ db });
   const existingClientLookup = createReferenceClientLookup({ logger });
+  db.setMetaValue('reference_client_lookup:diagnostics', existingClientLookup.getDiagnostics());
   const aiInfrastructure = initializeAiInfrastructure({ config, db, logger });
   const reportingService = createReportingService({ db });
   const webappLimiter = createRateLimiter({ windowMs: config.webappRateLimitWindowMs, limit: config.webappRateLimitMax });
@@ -809,6 +811,7 @@ function createServer({ config, logger }) {
         maxNotification: notifyResult?.max || { attempted: false, delivered: 0 },
         createdAt: new Date().toISOString()
       });
+      db.setMetaValue('reference_client_lookup:diagnostics', existingClientLookup.getDiagnostics());
       if (created.requestType === REQUEST_TYPES.COMPLAINT) {
         await duplicateToMastersChat({ config, request: created, payload: { ...body, ...(created.payload || {}) } });
       }

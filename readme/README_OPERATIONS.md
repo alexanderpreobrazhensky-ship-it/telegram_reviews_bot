@@ -40,20 +40,20 @@
 ## Existing client lookup checks (WebApp/site)
 После релиза проверять дополнительно:
 1. `GET /internal/diagnostics` содержит блок `existingClientLookup`:
-   - `enabled`
-   - `available`
-   - `datasetPath`
-   - `lastLookupStatus`
-2. Создать WebApp заявку с known `phone+fio` из reference dataset:
-   - в payload заявки есть `existing_client=true`, `client_match_basis=phone_fio`.
+   - `configured`, `datasetPath`, `datasetExists`, `datasetReadable`, `datasetType`
+   - `loaderStatus`, `available`, `totalClientRows`, `phoneIndexBuilt`
+   - `lastLookupResult`, `lastLookupTargetPhone`, `lastLookupMatchCount`, `lastError`
+2. Создать WebApp заявку с known phone из reference dataset (например `9506275333`):
+   - в payload заявки есть `existing_client=true`, `client_match_basis=phone`.
 3. Создать заявку без совпадения:
-   - `existing_client=false`.
+   - `existing_client=false`, `client_match_basis=no_match`.
 4. Для конфликтного кейса (multiple matches):
-   - `existing_client=false`, `needs_review=true`, `client_match_basis=conflict_multiple_matches`.
+   - `existing_client=false`, `needs_review=true`, `client_match_basis=multiple_phone_matches`.
 5. В карточке master-бота проверить видимость полей:
    - `Действующий клиент`
-   - `Основание проверки`
+   - `Основание`
    - `ID в reference-базе`
+   - `Источник reference`
    - `Требуется проверка`
 
 ## Management reports (admin-only)
