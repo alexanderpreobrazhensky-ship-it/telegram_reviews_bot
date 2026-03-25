@@ -499,3 +499,121 @@
 - `npm test` -> passed (96/96)
 - Выборочный code audit по контурам: `app.js`, `src/server/index.js`, `src/infrastructure/config/index.js`, `src/infrastructure/db/index.js`, `src/infrastructure/referenceClientLookup.js`, `src/infrastructure/ai/*`, `src/integrations/email/*`, `src/interfaces/master_bot/index.js`, `public/webapp.js`, `src/core/application/reportingService.js`, `readme/*`, `Dockerfile`, `.bothost/entrypoint.conf`.
 
+
+---
+
+## 23. Runtime Re-check After Code Audit (2026-03-25 UTC)
+
+Основа: данный re-check выполнен **поверх текущего `MASTER_AUDIT`**, без перезаписи предыдущей истории.
+
+### Runtime evidence scope
+- Runtime sandbox run: локальный запуск `createServer()` с отдельной SQLite (`/tmp/runtime-recheck-*.sqlite`), live HTTP submit по всем 5 webapp endpoint-ам, status transition, `/internal/diagnostics` snapshot, `integrationService.receiveIntegrationEvent()` для T-Business payload, `createEmailIntakePoller.runOnce()` и `ai.runDiagnostics()`.
+- Dataset probe: прямой SQLite query по `data/reference/client_vehicle_bridge/lira_normalized_database.sqlite`.
+- Regression confidence: `npm test` (96/96).
+
+### 23.1 Reference Dataset / Existing Client Lookup
+
+**Вердикт:** **[confirmed]** (в runtime sandbox + dataset probe).
+
+Проверено:
+1. Dataset физически присутствует в runtime path `data/reference/client_vehicle_bridge/lira_normalized_database.sqlite`, readable, loader status=`ready`, datasetType=`sqlite`. **[confirmed]**
+2. Lookup использует SQLite dataset напрямую (`cacheStatus=sqlite_direct_no_cache`), не XLSX runtime parser. **[confirmed]**
+3. Состояние `reference_dataset_unavailable` в проверенном runtime не воспроизводится (dataset exists/readable). **[confirmed]**
+4. Business rule `exact phone match => existing_client=true` фактически срабатывает. **[confirmed]**
+5. Контрольный номер `9506275333`:
+   - номер есть в dataset (`clients.phone_norm=9506275333`, `client_code=ЦБ005355`, `client_name=Лукьянова Мария Алексеевна`),
+   - lookup возвращает `existingClient=true`, `clientMatchBasis=phone`, `lookupStatus=exact_match`,
+   - созданная webapp заявка получает `payload.existing_client=true`, `payload.client_match_basis=phone`,
+   - в diagnostics lookup остаётся `available=true`, `lastLookupStatus=exact_match`. **[confirmed]**
+
+Root cause на случай деградации (гипотеза, не инцидент текущего re-check): missing/unreadable dataset path при deploy или неверный env override (`REFERENCE_CLIENT_LOOKUP_*`). **[hypothesis only]**
+
+### 23.2 WebApp Request Visibility
+
+**Вердикт:** **[confirmed]** (runtime sandbox).
+
+Проверено:
+1. Реальный submit -> create -> SQLite persist отрабатывает для всех типов:
+   - `service_request`, `consultation_request`, `parts_request`, `warranty_request`, `data_change_request`.
+2. Все 5 созданных заявок получили `status=new`.
+3. `db.listRequests({statuses:['new']})` содержит созданные записи (`newCount=5`).
+4. `webapp_request_flow:last` фиксирует `requestReceived=true`, `requestPersisted=true`, `requestVisibleInNewRequests=true`.
+5. Перевод мастером в работу подтверждён через `/api/requests/{id}/status` -> `status=in_progress`; запись видна в in-work выборке.
+
+Отдельно по бизнес-правилам формы:
+- `Был у нас ранее` обязателен: submit без поля возвращает validation error. **[confirmed]**
+- `Был у нас ранее = Нет` => VIN обязателен: submit без VIN блокируется. **[confirmed]**
+- `Был у нас ранее = Да` => VIN не обязателен: валидный submit проходит. **[confirmed]**
+
+Вывод: после deploy-подобного запуска WebApp-заявки попадают в рабочие списки при штатном runtime. **[confirmed]**
+
+### 23.3 Telegram / MAX Parity
+
+**Вердикт:** **[partially confirmed]**.
+
+Что подтверждено:
+1. Единая request сущность (single source of truth в SQLite) создаётся один раз и используется обоими каналами. **[confirmed]**
+2. Telegram delivery в sandbox отмечен как attempted/delivered (`telegramNotification.delivered=true` в trace текущего прогона). **[confirmed]**
+3. MAX ветка вызывается (attempted=true, recipients=2), но фактическая доставка `delivered=0`. **[confirmed]**
+
+Точный root cause отсутствия MAX-доставки в re-check:
+- delivery logic пытается отправить, но получает `MAX sendMessage exception: fetch failed` при текущем окружении (невалидный/недоступный токен/endpoint), т.е. проблема operational env/connectivity, а не отсутствие create/list source-of-truth. **[confirmed]**
+
+Итог parity:
+- parity на уровне source-of-truth: **есть**. **[confirmed]**
+- parity на уровне фактического notification UX: **неполная**. **[partially confirmed]**
+
+### 23.4 Email Intake / T-Business Runtime Readiness
+
+**Вердикт:** **[partially confirmed]**.
+
+Что подтверждено:
+1. T-Business processing path действительно создаёт request через integration flow:
+   - event processingStatus=`processed`,
+   - у request: `sourceChannel=email`, `payload.source_provider=t_business`, `payload.priority=high`,
+   - existing client match и match basis заполняются (в тестовом payload: `existing_client=true`, `match_basis=phone`). **[confirmed]**
+
+Что не подтверждено как production-ready:
+2. IMAP runtime в целевом окружении не подтверждён: `poller.runOnce()` дал `lastPollResult=failed`, `connectionStatus=failed`, `folderStatus=failed`, `lastError=ECONNREFUSED 127.0.0.1:2993` для проверочного контура. **[not confirmed]**
+3. Реальный доступ к mailbox/folder `Т-БАНК ЗАЯВКИ` в боевом провайдере не верифицирован данным запуском. **[not confirmed]**
+
+Интерпретация метрик `processed / duplicates / failed_parse`:
+- `processed` — число событий, дошедших до `integration event processingStatus=processed`.
+- `duplicates` — события, отфильтрованные dedupe/повторной обработкой.
+- `failed_parse` — количество PDF attachment parse failures (накапливается из `failedAttachmentParses`), это индикатор деградации parsing path, а не успешной обработки.
+
+Следствие для кейса вида `878/0/878`: это не «нормальная стабильная работа», а сигнал, что обработка событий могла идти, но PDF parsing path системно падал (требуется разбор формата вложений/парсера/контента). **[confirmed interpretation]**
+
+### 23.5 AI Runtime Readiness
+
+**Вердикт:** **[partially confirmed]** (architecturally ready, operationally not ready в проверенном runtime).
+
+Проверено:
+1. Effective config и runtime resolution отображаются корректно (provider/model/sources, override flags). **[confirmed]**
+2. Config validation/diagnostics separation работает: diagnostics вернули `status=CONFIG_INVALID` при `CONFIG_PROXY_NOT_CONFIGURED`. **[confirmed]**
+3. Primary provider readiness не подтверждена (`primaryTestAttempted=false`, `proxyConfigured=false`, auth secrets missing). **[not confirmed]**
+4. Fallback readiness не подтверждена (`fallbackConfigured=false`). **[not confirmed]**
+5. Business usage состояние отдельно видимо (`AI_BUSINESS_USAGE_ENABLED=false`) и не должно трактоваться как business-ready AI даже при включённом infra. **[confirmed]**
+
+Отдельный вывод:
+- Текущий AI-контур можно считать **architecturally ready**, но не **operationally ready** без валидных provider/proxy credentials и успешных live probes. **[partially confirmed]**
+
+### 23.6 Updated Operational Verdict
+
+#### Ответы на ключевые вопросы
+1. Работает ли existing client lookup в реальном runtime? — **Да, confirmed** (dataset доступен, lookup exact работает). 
+2. Достаточно ли exact phone match? — **Да, confirmed** (`existing_client=true`, basis=phone).
+3. Попадают ли WebApp-заявки в «Новые заявки»? — **Да, confirmed** (persist/new/list visibility).
+4. Есть ли реальный Telegram/MAX parity? — **Частично**: source-of-truth parity есть, delivery parity в MAX неполная.
+5. Работает ли T-Business intake фактически? — **Частично**: create-path подтверждён, IMAP/folder production readiness не подтверждена.
+6. Готов ли AI контур operationally? — **Нет, не подтверждено**; пока architecturally ready + diagnostics aware.
+7. Что остаётся открытой проблемой прямо сейчас? — MAX delivery env/connectivity, IMAP mailbox/folder operational readiness, AI provider/proxy readiness.
+
+#### Updated fixed status
+- Reference dataset / existing client lookup: **fixed (runtime confirmed)**.
+- WebApp -> DB -> list visibility: **fixed (runtime confirmed)**.
+- Telegram/MAX parity: **partially fixed**.
+- Email intake / T-Business: **partially fixed**.
+- AI runtime readiness: **not fixed operationally / partially fixed architecturally**.
+- `wasClientBefore` + VIN rules: **fixed (runtime confirmed)**.
+
