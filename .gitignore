@@ -11,5 +11,10 @@ __pycache__/
 /data/tickets.jsonl
 /data/system.json
 !/data/.gitkeep
+!/data/reference/
+!/data/reference/client_vehicle_bridge/
+!/data/reference/client_vehicle_bridge/lira_normalized_database.sqlite
+!/data/reference/client_vehicle_bridge/lira_normalized_database.xlsx
+!/data/reference/client_vehicle_bridge/schema.md
 
 node_modules/
