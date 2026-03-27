@@ -123,6 +123,11 @@ test('diagnostic lookup statuses distinguish exact/no_match/multiple and dedicat
   assert.equal(noMatch.lookupStatus, 'no_match');
   assert.equal(noMatch.diagnosticStatus, 'LOOKUP_OK_NO_MATCH');
   assert.equal(noMatch.matchCount, 0);
+
+  const exactSecondary = lookup.runLookupDiagnostics({ phone: '9200201890', fullName: 'Тест 2' });
+  assert.equal(exactSecondary.lookupStatus, 'exact_match');
+  assert.equal(exactSecondary.diagnosticStatus, 'LOOKUP_OK_EXACT_MATCH');
+  assert.ok(exactSecondary.matchedClientIds.includes('ЦБ001638'));
 });
 
 test('diagnostics returns DATASET_UNREADABLE for unreadable dataset file', () => {

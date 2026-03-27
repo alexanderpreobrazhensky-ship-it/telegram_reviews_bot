@@ -25,7 +25,8 @@ const PROCESSED_SUBSTATUS_LABELS = {
   waiting_decision: 'ждёт решения',
   rejected: 'отказ'
 };
-const REFERENCE_TEST_PHONE = '9506275333';
+const REFERENCE_TEST_PHONE_PRIMARY = '9506275333';
+const REFERENCE_TEST_PHONE_SECONDARY = '9200201890';
 const LEGACY_CALLBACK_MAP = Object.freeze({
   assigned: { action: 'in_progress', event: 'legacy_assign' },
   awaiting_client: { action: 'refresh_only', event: 'legacy_waiting_client' },
@@ -482,8 +483,10 @@ function buildAiMenuKeyboard() {
 function buildReferenceDatasetMenuKeyboard() {
   return withNavigationRows([
     [{ text: 'Статус базы', callback_data: 'diag:reference:status' }],
-    [{ text: `Проверить lookup (${REFERENCE_TEST_PHONE})`, callback_data: 'diag:reference:lookup:test' }],
-    [{ text: 'Проверить номер', callback_data: 'diag:reference:lookup:manual' }]
+    [{ text: `Проверить lookup (${REFERENCE_TEST_PHONE_PRIMARY})`, callback_data: 'diag:reference:lookup:test:primary' }],
+    [{ text: `Проверить lookup (${REFERENCE_TEST_PHONE_SECONDARY})`, callback_data: 'diag:reference:lookup:test:secondary' }],
+    [{ text: 'Проверить номер', callback_data: 'diag:reference:lookup:manual' }],
+    [{ text: 'Логи базы', callback_data: 'diag:reference:logs' }]
   ], { includeBack: true, includeMenu: true });
 }
 
@@ -553,6 +556,32 @@ function buildReferenceLookupResultText(result = {}) {
     `matched client ids: ${(result.matchedClientIds || []).join(', ') || '-'}`,
     `matched client names: ${(result.matchedClientNames || []).join(', ') || '-'}`,
     `lookup error: ${result.error || '-'}`
+  ].join('\n');
+}
+
+function buildReferenceDatasetLogsText(referenceLookup = {}) {
+  const candidates = Array.isArray(referenceLookup.pathCandidates) ? referenceLookup.pathCandidates : [];
+  return [
+    'Reference dataset logs (runtime diagnostics)',
+    `dataset path resolution started: configured=${referenceLookup.configured ? 'yes' : 'no'}`,
+    `dataset path resolved: ${referenceLookup.datasetPath || referenceLookup.resolvedDatasetPath || '-'}`,
+    `dataset exists check: ${referenceLookup.datasetExists ? 'yes' : 'no'}`,
+    `dataset readable check: ${referenceLookup.datasetReadable ? 'yes' : 'no'}`,
+    `dataset open result: ${referenceLookup.datasetOpenOk ? 'ok' : 'failed'}`,
+    `dataset load result: ${referenceLookup.loaderStatus || 'not_started'}`,
+    `phone index build result: ${referenceLookup.phoneIndexBuilt ? 'ok' : 'failed_or_not_started'}`,
+    `lookup enabled: ${referenceLookup.lookupEnabled ? 'yes' : 'no'}`,
+    `last lookup started at: ${referenceLookup.lastLookupAttemptedAt || '-'}`,
+    `last lookup raw phone: ${referenceLookup.lastLookupRawPhone || '-'}`,
+    `last lookup normalized phone: ${referenceLookup.lastLookupTargetPhone || '-'}`,
+    `last lookup match count: ${referenceLookup.lastLookupMatchCount ?? '-'}`,
+    `last lookup matched client ids: ${(referenceLookup.lastLookupMatchedClientIds || []).join(', ') || '-'}`,
+    `last lookup result: ${referenceLookup.lastLookupResult || '-'}`,
+    `last lookup status: ${referenceLookup.lastLookupStatus || '-'}`,
+    `last lookup error: ${referenceLookup.lastLookupError || referenceLookup.lastError || '-'}`,
+    `runtime cwd: ${referenceLookup.runtimeCwd || '-'}`,
+    `runtime main module: ${referenceLookup.runtimeMainModule || '-'}`,
+    `path candidates:\n${candidates.map((item, index) => `${index + 1}. ${item}`).join('\n') || '-'}`
   ].join('\n');
 }
 
@@ -1002,16 +1031,17 @@ async function handleMasterWebhook({ body, config, headers = {}, rawHeaders = []
         await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: 'Статус базы' });
         return respondWithMessage({ channel, token, recipientId, text: buildReferenceDatasetStatusText(diagnostics), payload: { ok: true, diagnostics }, extra: { reply_markup: buildReferenceDatasetMenuKeyboard() } });
       }
-      if (data === 'diag:reference:lookup:test') {
+      if (data === 'diag:reference:lookup:test' || data === 'diag:reference:lookup:test:primary' || data === 'diag:reference:lookup:test:secondary') {
         if (!isAdmin(actor)) {
           await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: 'Недостаточно прав' });
           return respondWithMessage({ channel, token, recipientId, text: 'Недостаточно прав.', payload: { ok: false, error: 'ACCESS_DENIED' } });
         }
+        const testPhone = data.endsWith(':secondary') ? REFERENCE_TEST_PHONE_SECONDARY : REFERENCE_TEST_PHONE_PRIMARY;
         updateSession(sessionKey, { screen: 'menu:diagnostics:reference:lookup:test', backAction: 'diag:reference', step: null });
         await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: 'Проверка lookup' });
-        const result = existingClientLookup?.runLookupDiagnostics?.({ phone: REFERENCE_TEST_PHONE, fullName: 'diagnostic test' })
+        const result = existingClientLookup?.runLookupDiagnostics?.({ phone: testPhone, fullName: 'diagnostic test' })
           || {
-            rawPhone: REFERENCE_TEST_PHONE,
+            rawPhone: testPhone,
             normalizedPhone: null,
             datasetAvailable: false,
             lookupAttempted: false,
@@ -1025,6 +1055,17 @@ async function handleMasterWebhook({ body, config, headers = {}, rawHeaders = []
           };
         db.setMetaValue('reference_client_lookup:diagnostics', existingClientLookup?.getDiagnostics?.() || db.getMetaValue('reference_client_lookup:diagnostics', {}));
         return respondWithMessage({ channel, token, recipientId, text: buildReferenceLookupResultText(result), payload: { ok: true, result }, extra: { reply_markup: buildReferenceDatasetMenuKeyboard() } });
+      }
+      if (data === 'diag:reference:logs') {
+        if (!isAdmin(actor)) {
+          await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: 'Недостаточно прав' });
+          return respondWithMessage({ channel, token, recipientId, text: 'Недостаточно прав.', payload: { ok: false, error: 'ACCESS_DENIED' } });
+        }
+        updateSession(sessionKey, { screen: 'menu:diagnostics:reference:logs', backAction: 'diag:reference', step: null });
+        const diagnostics = existingClientLookup?.getDiagnostics?.() || db.getMetaValue('reference_client_lookup:diagnostics', {});
+        db.setMetaValue('reference_client_lookup:diagnostics', diagnostics);
+        await answerChannelCallback({ channel, token, callbackId: event.callback.id, text: 'Логи базы' });
+        return respondWithMessage({ channel, token, recipientId, text: buildReferenceDatasetLogsText(diagnostics), payload: { ok: true, diagnostics }, extra: { reply_markup: buildReferenceDatasetMenuKeyboard() } });
       }
       if (data === 'diag:reference:lookup:manual') {
         if (!isAdmin(actor)) {

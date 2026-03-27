@@ -567,6 +567,8 @@ function createReferenceClientLookup({ logger = console, datasetPath = '' } = {}
       lastLookupError: state.lastLookupError,
       cacheStatus: 'sqlite_direct_no_cache',
       pathCandidates: state.pathCandidates,
+      runtimeCwd: process.cwd(),
+      runtimeMainModule: require.main?.filename || null,
       lastError: state.lastError,
       criticalDegradation: Boolean(state.required && state.enabled && (!state.available || !state.phoneIndexBuilt))
     }),

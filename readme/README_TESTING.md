@@ -103,3 +103,10 @@ npm test
 ### D. Safety mode
 1. `REFERENCE_LOOKUP_REQUIRED=true` + missing dataset -> `/health.status=degraded`;
 2. diagnostics: `required=true`, `criticalDegradation=true`.
+
+## Update 2026-03-27: Reference dataset diagnostics UI additions
+Дополнительно проверять в master-боте:
+1. Кнопки в `Диагностика -> База клиентов`: `Статус базы`, `Проверить lookup (9506275333)`, `Проверить lookup (9200201890)`, `Проверить номер`, `Логи базы`, `Назад`, `В меню`.
+2. Probe-результат для `9506275333`: `exact_match`, `existing_client=true`, `client_match_basis=phone`.
+3. Probe-результат для `9200201890`: `exact_match`, `existing_client=true`, `client_match_basis=phone`.
+4. `Логи базы` показывают runtime path resolution, file checks, loader/index status, последний lookup и candidate paths.
