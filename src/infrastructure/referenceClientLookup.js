@@ -2,6 +2,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const Database = require('better-sqlite3');
 const { normalizePhone10 } = require('../core/shared/phone');
+const { getBuildInfo } = require('./buildInfo');
 
 const REFERENCE_DATASET_RELATIVE_PATH = path.join('data', 'reference', 'client_vehicle_bridge', 'lira_normalized_database.sqlite');
 const DEFAULT_REFERENCE_DATASET_PATH = path.resolve(__dirname, '..', '..', REFERENCE_DATASET_RELATIVE_PATH);
@@ -51,6 +52,29 @@ function detectDatasetType(datasetPath) {
   if (ext === '.sqlite' || ext === '.db') return 'sqlite';
   if (ext === '.xlsx' || ext === '.xls') return 'xlsx';
   return 'unknown';
+}
+
+function getFileSizeBytes(filePath) {
+  try {
+    if (!filePath) return null;
+    return fs.statSync(filePath).size;
+  } catch {
+    return null;
+  }
+}
+
+function getDirectoryInfo(dirPath) {
+  if (!dirPath) return { exists: false, listing: [] };
+  try {
+    const stats = fs.statSync(dirPath);
+    if (!stats.isDirectory()) return { exists: false, listing: [] };
+    const listing = fs.readdirSync(dirPath, { withFileTypes: true })
+      .slice(0, 30)
+      .map((entry) => `${entry.name}${entry.isDirectory() ? '/' : ''}`);
+    return { exists: true, listing };
+  } catch {
+    return { exists: false, listing: [] };
+  }
 }
 
 function candidateDatasetPaths(explicitPath = '') {
@@ -103,6 +127,9 @@ function createReferenceClientLookup({ logger = console, datasetPath = '' } = {}
   const enabled = boolEnv('WEBAPP_EXISTING_CLIENT_LOOKUP_ENABLED', true);
   const required = boolEnv('REFERENCE_LOOKUP_REQUIRED', false);
   const resolved = resolveDatasetPath({ logger, explicitPath: datasetPath });
+  const buildInfo = getBuildInfo();
+  const runtimeDatasetDirPath = resolved.resolvedPath ? path.dirname(resolved.resolvedPath) : path.join('/app', 'data', 'reference', 'client_vehicle_bridge');
+  const runtimeDatasetDirInfo = getDirectoryInfo(runtimeDatasetDirPath);
   const state = {
     enabled,
     required,
@@ -114,7 +141,16 @@ function createReferenceClientLookup({ logger = console, datasetPath = '' } = {}
     datasetExists: Boolean(resolved.exists),
     datasetReadable: Boolean(resolved.readable),
     datasetType: detectDatasetType(resolved.resolvedPath),
+    expectedDatasetPath: DEFAULT_REFERENCE_DATASET_PATH,
+    runtimeDatasetPath: resolved.resolvedPath,
+    runtimeDatasetDirPath,
+    runtimeDatasetDirExists: runtimeDatasetDirInfo.exists,
+    runtimeDatasetDirListing: runtimeDatasetDirInfo.listing,
+    datasetFileSizeBytes: getFileSizeBytes(resolved.resolvedPath),
     pathCandidates: resolved.candidates || [],
+    buildCommitHash: buildInfo.commitHash,
+    buildBranch: buildInfo.branch,
+    buildTimestamp: buildInfo.buildTimestamp,
     available: false,
     loaderStatus: 'not_started',
     loaderFailureReason: null,
@@ -183,11 +219,17 @@ function createReferenceClientLookup({ logger = console, datasetPath = '' } = {}
 
   try {
     logger.info?.('reference dataset bootstrap start', {
+      buildCommitHash: state.buildCommitHash,
+      buildTimestamp: state.buildTimestamp,
       configured: state.configured,
       datasetPath: state.datasetPath,
       datasetExists: state.datasetExists,
       datasetReadable: state.datasetReadable,
-      datasetType: state.datasetType
+      datasetType: state.datasetType,
+      datasetFileSizeBytes: state.datasetFileSizeBytes,
+      runtimeDatasetDirPath: state.runtimeDatasetDirPath,
+      runtimeDatasetDirExists: state.runtimeDatasetDirExists,
+      runtimeDatasetDirListing: state.runtimeDatasetDirListing
     });
 
     if (!state.datasetExists) {
@@ -344,6 +386,7 @@ function createReferenceClientLookup({ logger = console, datasetPath = '' } = {}
     state.loaderStatus = 'loaded';
     logger.info?.('reference dataset bootstrap completed', {
       datasetPath: state.datasetPath,
+      datasetFileSizeBytes: state.datasetFileSizeBytes,
       totalClientRows: state.totalClientRows,
       phoneIndexBuilt: state.phoneIndexBuilt
     });
@@ -541,6 +584,12 @@ function createReferenceClientLookup({ logger = console, datasetPath = '' } = {}
       required: state.required,
       configured: state.configured,
       datasetPath: state.datasetPath,
+      expectedDatasetPath: state.expectedDatasetPath,
+      runtimeDatasetPath: state.runtimeDatasetPath,
+      runtimeDatasetDirPath: state.runtimeDatasetDirPath,
+      runtimeDatasetDirExists: state.runtimeDatasetDirExists,
+      runtimeDatasetDirListing: state.runtimeDatasetDirListing,
+      datasetFileSizeBytes: state.datasetFileSizeBytes,
       source: state.source,
       tableName: state.tableName,
       datasetExists: state.datasetExists,
@@ -567,6 +616,9 @@ function createReferenceClientLookup({ logger = console, datasetPath = '' } = {}
       lastLookupError: state.lastLookupError,
       cacheStatus: 'sqlite_direct_no_cache',
       pathCandidates: state.pathCandidates,
+      buildCommitHash: state.buildCommitHash,
+      buildBranch: state.buildBranch,
+      buildTimestamp: state.buildTimestamp,
       runtimeCwd: process.cwd(),
       runtimeMainModule: require.main?.filename || null,
       lastError: state.lastError,

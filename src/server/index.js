@@ -475,7 +475,22 @@ function createServer({ config, logger }) {
   const router = [];
   const repositories = createRepositories({ db });
   const existingClientLookup = createReferenceClientLookup({ logger });
-  db.setMetaValue('reference_client_lookup:diagnostics', existingClientLookup.getDiagnostics());
+  const lookupDiagnostics = existingClientLookup.getDiagnostics();
+  logger.info('reference dataset startup diagnostics', {
+    buildCommitHash: lookupDiagnostics.buildCommitHash,
+    buildTimestamp: lookupDiagnostics.buildTimestamp,
+    expectedDatasetPath: lookupDiagnostics.expectedDatasetPath,
+    datasetPath: lookupDiagnostics.datasetPath,
+    datasetExists: lookupDiagnostics.datasetExists,
+    datasetReadable: lookupDiagnostics.datasetReadable,
+    datasetFileSizeBytes: lookupDiagnostics.datasetFileSizeBytes,
+    loaderStatus: lookupDiagnostics.loaderStatus,
+    loaderFailureReason: lookupDiagnostics.loaderFailureReason,
+    datasetOpenOk: lookupDiagnostics.datasetOpenOk,
+    totalClientRows: lookupDiagnostics.totalClientRows,
+    phoneIndexBuilt: lookupDiagnostics.phoneIndexBuilt
+  });
+  db.setMetaValue('reference_client_lookup:diagnostics', lookupDiagnostics);
   const aiInfrastructure = initializeAiInfrastructure({ config, db, logger });
   const reportingService = createReportingService({ db });
   const webappLimiter = createRateLimiter({ windowMs: config.webappRateLimitWindowMs, limit: config.webappRateLimitMax });

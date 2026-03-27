@@ -7,9 +7,16 @@ const { sendChannelMessage } = require('./src/infrastructure/messaging');
 const { reconcileMaxWebhookSubscriptions } = require('./src/infrastructure/max/subscriptions');
 const { createEmailIntakePoller } = require('./src/integrations/email/intakePoller');
 const { integrationService } = require('./src/core/application');
+const { getBuildInfo } = require('./src/infrastructure/buildInfo');
 
 function bootstrap() {
   const config = loadConfig();
+  const buildInfo = getBuildInfo();
+  logger.info('App build metadata', {
+    appBuildCommit: buildInfo.commitHash,
+    appBuildBranch: buildInfo.branch,
+    appBuildTimestamp: buildInfo.buildTimestamp
+  });
   const dbRuntime = db.getDbRuntimeInfo();
   logger.info('DB runtime configured', {
     dbType: dbRuntime.type,
