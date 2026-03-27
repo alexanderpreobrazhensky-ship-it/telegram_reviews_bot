@@ -55,10 +55,13 @@ function detectDatasetType(datasetPath) {
 
 function candidateDatasetPaths(explicitPath = '') {
   if (explicitPath) return [explicitPath];
-  if (process.env.REFERENCE_CLIENT_LOOKUP_DATASET_PATH) return [process.env.REFERENCE_CLIENT_LOOKUP_DATASET_PATH];
-  if (process.env.REFERENCE_CLIENT_LOOKUP_SQLITE_PATH) return [process.env.REFERENCE_CLIENT_LOOKUP_SQLITE_PATH];
   const fromMainModule = path.join(path.dirname(require.main?.filename || process.cwd()), REFERENCE_DATASET_RELATIVE_PATH);
+  const configured = [
+    process.env.REFERENCE_CLIENT_LOOKUP_DATASET_PATH,
+    process.env.REFERENCE_CLIENT_LOOKUP_SQLITE_PATH
+  ].filter(Boolean);
   return [
+    ...configured,
     DEFAULT_REFERENCE_DATASET_PATH,
     path.resolve(process.cwd(), REFERENCE_DATASET_RELATIVE_PATH),
     path.resolve(fromMainModule),
@@ -133,6 +136,8 @@ function createReferenceClientLookup({ logger = console, datasetPath = '' } = {}
     normalizedNameColumn: null,
     phoneColumn: null,
     sourceColumn: null,
+    datasetOpenOk: false,
+    datasetOpenError: null,
     db: null,
     queryByPhone: null
   };
@@ -266,6 +271,8 @@ function createReferenceClientLookup({ logger = console, datasetPath = '' } = {}
     }
 
     state.db = new Database(state.datasetPath, { readonly: true, fileMustExist: true });
+    state.datasetOpenOk = true;
+    state.datasetOpenError = null;
     const columns = state.db.prepare('PRAGMA table_info(clients)').all().map((row) => row.name);
     state.clientIdColumn = findColumn(columns, ['client_code', 'client_external_id', 'id']);
     state.clientNameColumn = findColumn(columns, ['client_name', 'full_name', 'name']);
@@ -342,6 +349,8 @@ function createReferenceClientLookup({ logger = console, datasetPath = '' } = {}
     state.loaderFailureReason = 'DATASET_LOAD_FAILED';
     state.lastError = String(error.message || error);
     state.available = false;
+    state.datasetOpenOk = false;
+    state.datasetOpenError = state.lastError;
     state.db = null;
     logger.error?.('reference dataset bootstrap failed', {
       datasetPath: state.datasetPath,
@@ -532,8 +541,11 @@ function createReferenceClientLookup({ logger = console, datasetPath = '' } = {}
       datasetReadable: state.datasetReadable,
       datasetType: state.datasetType,
       datasetPathResolved: state.datasetPathResolved,
+      resolvedDatasetPath: state.datasetPath,
       totalClientRows: state.totalClientRows,
       phoneIndexBuilt: state.phoneIndexBuilt,
+      datasetOpenOk: state.datasetOpenOk,
+      datasetOpenError: state.datasetOpenError,
       available: state.available,
       loaderStatus: state.loaderStatus,
       loaderFailureReason: state.loaderFailureReason,

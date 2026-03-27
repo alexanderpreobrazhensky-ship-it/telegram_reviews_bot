@@ -235,3 +235,27 @@ test('default dataset path resolution works outside project cwd and supports pho
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
+
+test('invalid env dataset path falls back to runtime defaults and keeps lookup available', () => {
+  const prevDatasetPath = process.env.REFERENCE_CLIENT_LOOKUP_DATASET_PATH;
+  const prevSqlitePath = process.env.REFERENCE_CLIENT_LOOKUP_SQLITE_PATH;
+  process.env.REFERENCE_CLIENT_LOOKUP_DATASET_PATH = '/tmp/missing-reference-dataset.sqlite';
+  process.env.REFERENCE_CLIENT_LOOKUP_SQLITE_PATH = '/tmp/missing-reference-dataset.sqlite';
+  try {
+    const lookup = createReferenceClientLookup({ logger: { info() {}, warn() {}, error() {} } });
+    const diagnostics = lookup.getDiagnostics();
+    assert.equal(diagnostics.available, true);
+    assert.equal(diagnostics.loaderStatus, 'loaded');
+    assert.equal(diagnostics.datasetExists, true);
+    assert.equal(diagnostics.datasetReadable, true);
+    assert.equal(diagnostics.datasetOpenOk, true);
+    const exact = lookup.runLookupDiagnostics({ phone: '9506275333', fullName: 'Тест' });
+    assert.equal(exact.lookupStatus, 'exact_match');
+    assert.equal(exact.matchBasis, 'phone');
+  } finally {
+    if (prevDatasetPath === undefined) delete process.env.REFERENCE_CLIENT_LOOKUP_DATASET_PATH;
+    else process.env.REFERENCE_CLIENT_LOOKUP_DATASET_PATH = prevDatasetPath;
+    if (prevSqlitePath === undefined) delete process.env.REFERENCE_CLIENT_LOOKUP_SQLITE_PATH;
+    else process.env.REFERENCE_CLIENT_LOOKUP_SQLITE_PATH = prevSqlitePath;
+  }
+});
