@@ -660,3 +660,30 @@ Root cause на случай деградации (гипотеза, не инц
   - exact match, `matchedReferenceClientId=ЦБ005355`, basis=`phone`, `existing_client=true`. **[confirmed]**
 - Safety mode:
   - при `REFERENCE_LOOKUP_REQUIRED=true` + missing dataset `/health.status=degraded`. **[confirmed]**
+
+---
+
+## Update 2026-03-27 (UTC): Reference dataset diagnostics expansion
+
+### Что добавлено
+- Master-бот: `Диагностика -> База клиентов` расширен кнопками:
+  - `Статус базы`
+  - `Проверить lookup (9506275333)`
+  - `Проверить lookup (9200201890)`
+  - `Проверить номер`
+  - `Логи базы`
+- Добавлен операторский вывод runtime-контекста dataset:
+  - resolved path,
+  - file exists/readable,
+  - loader/index status,
+  - runtime cwd/main module,
+  - candidate paths,
+  - last lookup status/error/result.
+
+### Root cause (подтверждение)
+- Для инцидента `reference_dataset_unavailable` главным root cause остаётся mismatch runtime dataset path (env/deploy), когда сервис стартует с невалидным или недоступным SQLite-path.
+- Для устранения гаданий оператор получает путь и статус открытия/чтения прямо в master-диагностике.
+
+### Бизнес-правило
+- Primary rule без изменений: exact phone match => `existing_client=true`, `client_match_basis=phone`.
+- `no_match` и `dataset_unavailable` остаются строго разделёнными состояниями.

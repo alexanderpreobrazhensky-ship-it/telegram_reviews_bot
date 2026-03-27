@@ -256,11 +256,29 @@ test('master diagnostics exposes reference dataset menu, lookup test and manual 
     const testLookup = await fetch(`${base}/telegram/master_bot/webhook`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ callback_query: { id: 'diag-ref-3', from: { id: 5001, first_name: 'Admin' }, message: { chat: { id: 5001 } }, data: 'diag:reference:lookup:test' } })
+      body: JSON.stringify({ callback_query: { id: 'diag-ref-3', from: { id: 5001, first_name: 'Admin' }, message: { chat: { id: 5001 } }, data: 'diag:reference:lookup:test:primary' } })
     }).then((res) => res.json());
     assert.equal(testLookup.ok, true);
     assert.match(testLookup.text, /raw input phone: 9506275333/i);
     assert.match(testLookup.text, /result: exact_match/i);
+
+    const testLookupSecondary = await fetch(`${base}/telegram/master_bot/webhook`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ callback_query: { id: 'diag-ref-3b', from: { id: 5001, first_name: 'Admin' }, message: { chat: { id: 5001 } }, data: 'diag:reference:lookup:test:secondary' } })
+    }).then((res) => res.json());
+    assert.equal(testLookupSecondary.ok, true);
+    assert.match(testLookupSecondary.text, /raw input phone: 9200201890/i);
+    assert.match(testLookupSecondary.text, /result: exact_match/i);
+
+    const logs = await fetch(`${base}/telegram/master_bot/webhook`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ callback_query: { id: 'diag-ref-3c', from: { id: 5001, first_name: 'Admin' }, message: { chat: { id: 5001 } }, data: 'diag:reference:logs' } })
+    }).then((res) => res.json());
+    assert.equal(logs.ok, true);
+    assert.match(logs.text, /Reference dataset logs/i);
+    assert.match(logs.text, /dataset path resolved:/i);
 
     const manualPrompt = await fetch(`${base}/telegram/master_bot/webhook`, {
       method: 'POST',

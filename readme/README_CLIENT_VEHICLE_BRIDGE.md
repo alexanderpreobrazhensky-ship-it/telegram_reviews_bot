@@ -114,3 +114,10 @@
   - `required`/`criticalDegradation` для safety режима.
 - Новый safety-mode env:
   - `REFERENCE_LOOKUP_REQUIRED=true` — при недоступном dataset runtime health показывает `status=degraded` и `existingClientLookup.criticalDegradation=true`.
+
+## Update 2026-03-27: Diagnostic probes and statuses
+- В master-боте probe-номера для runtime lookup зафиксированы как:
+  - `9506275333`
+  - `9200201890`
+- Для каждого probe возвращается отдельный lookup verdict (`exact_match` / `no_match` / `multiple_matches` / `dataset_unavailable` / `lookup_failed`) и диагностический статус (`LOOKUP_OK_*`, `DATASET_*`, `REFERENCE_DATASET_UNAVAILABLE`).
+- Диагностика и WebApp используют один и тот же runtime lookup entrypoint (`lookupByPhoneAndFio`), что исключает рассинхрон «диагностика проходит, а прод-flow не работает».

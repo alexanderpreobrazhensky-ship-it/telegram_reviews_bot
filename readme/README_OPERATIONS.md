@@ -124,3 +124,10 @@ Root cause деградации `reference_dataset_unavailable` в инциде�
 
 Safety mode:
 - При `REFERENCE_LOOKUP_REQUIRED=true` и недоступном dataset `/health` возвращает `status=degraded`, а diagnostics содержит `criticalDegradation=true`.
+
+## Update 2026-03-27: Master diagnostics «База клиентов» (expanded)
+Новый блок `Диагностика -> База клиентов` в master-боте включает:
+1. `Статус базы` — полный runtime статус dataset (configured/path/exists/readable/type/loader/rows/index/lookup/error).
+2. `Проверить lookup (9506275333)` и `Проверить lookup (9200201890)` — отдельные runtime-пробы тем же lookup path, что WebApp request creation flow.
+3. `Проверить номер` — ручной ввод телефона с нормализацией и детальным результатом (raw/normalized/match count/matched ids/result/error).
+4. `Логи базы` — операторский срез path resolution + file checks + loader/index status + last lookup + runtime cwd/main module + candidate paths.
