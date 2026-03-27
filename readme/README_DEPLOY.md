@@ -47,3 +47,20 @@ AI_DIAGNOSTICS_ENABLED=true
 - Не менять production entrypoint (`app.js`).
 - Не выносить MAX в отдельный runtime.
 - Не ломать unified status model/master-bot flow.
+
+## Проверка deploy-артефакта reference dataset
+- На старте (`npm start`) автоматически выполняется `node scripts/verifyReferenceDataset.js` и пишет в лог:
+  - `buildCommitHash`, `buildBranch`, `buildTimestamp`
+  - `datasetResolvedPath`, `datasetDirectoryExists`, `datasetDirectoryListing`
+  - `datasetFileExists`, `datasetFileReadable`, `datasetFileSizeBytes`
+- В Docker build включена strict-проверка: `node scripts/verifyReferenceDataset.js --strict`.
+  - Если `.sqlite` не попал в образ или недоступен, build завершится ошибкой.
+- Для корректной трассировки деплоя передавайте build args:
+
+```bash
+docker build \
+  --build-arg APP_BUILD_COMMIT=$(git rev-parse HEAD) \
+  --build-arg APP_BUILD_BRANCH=$(git rev-parse --abbrev-ref HEAD) \
+  --build-arg APP_BUILD_TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
+  -t telegram-reviews-bot:latest .
+```

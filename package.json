@@ -9,7 +9,8 @@
   },
   "scripts": {
     "start": "node app.js",
-    "test": "node --test --test-concurrency=1 tests/node"
+    "test": "node --test --test-concurrency=1 tests/node",
+    "prestart": "node scripts/verifyReferenceDataset.js"
   },
   "keywords": [
     "telegram",

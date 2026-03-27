@@ -478,11 +478,15 @@ function createServer({ config, logger }) {
   const lookupDiagnostics = existingClientLookup.getDiagnostics();
   logger.info('reference dataset startup diagnostics', {
     buildCommitHash: lookupDiagnostics.buildCommitHash,
+    buildBranch: lookupDiagnostics.buildBranch,
     buildTimestamp: lookupDiagnostics.buildTimestamp,
     expectedDatasetPath: lookupDiagnostics.expectedDatasetPath,
     datasetPath: lookupDiagnostics.datasetPath,
     datasetExists: lookupDiagnostics.datasetExists,
     datasetReadable: lookupDiagnostics.datasetReadable,
+    runtimeDatasetDirPath: lookupDiagnostics.runtimeDatasetDirPath,
+    runtimeDatasetDirExists: lookupDiagnostics.runtimeDatasetDirExists,
+    runtimeDatasetDirListing: lookupDiagnostics.runtimeDatasetDirListing,
     datasetFileSizeBytes: lookupDiagnostics.datasetFileSizeBytes,
     loaderStatus: lookupDiagnostics.loaderStatus,
     loaderFailureReason: lookupDiagnostics.loaderFailureReason,
