@@ -236,7 +236,7 @@ test('default dataset path resolution works outside project cwd and supports pho
   }
 });
 
-test('invalid env dataset path falls back to runtime defaults and keeps lookup available', () => {
+test('invalid env dataset path is treated as strict config and surfaces dataset unavailable', () => {
   const prevDatasetPath = process.env.REFERENCE_CLIENT_LOOKUP_DATASET_PATH;
   const prevSqlitePath = process.env.REFERENCE_CLIENT_LOOKUP_SQLITE_PATH;
   process.env.REFERENCE_CLIENT_LOOKUP_DATASET_PATH = '/tmp/missing-reference-dataset.sqlite';
@@ -244,18 +244,37 @@ test('invalid env dataset path falls back to runtime defaults and keeps lookup a
   try {
     const lookup = createReferenceClientLookup({ logger: { info() {}, warn() {}, error() {} } });
     const diagnostics = lookup.getDiagnostics();
-    assert.equal(diagnostics.available, true);
-    assert.equal(diagnostics.loaderStatus, 'loaded');
-    assert.equal(diagnostics.datasetExists, true);
-    assert.equal(diagnostics.datasetReadable, true);
-    assert.equal(diagnostics.datasetOpenOk, true);
+    assert.equal(diagnostics.available, false);
+    assert.equal(diagnostics.loaderStatus, 'failed');
+    assert.equal(diagnostics.datasetExists, false);
+    assert.equal(diagnostics.datasetReadable, false);
+    assert.equal(diagnostics.datasetOpenOk, false);
     const exact = lookup.runLookupDiagnostics({ phone: '9506275333', fullName: 'Тест' });
-    assert.equal(exact.lookupStatus, 'exact_match');
-    assert.equal(exact.matchBasis, 'phone');
+    assert.equal(exact.lookupStatus, 'dataset_missing');
+    assert.equal(exact.matchBasis, 'reference_dataset_unavailable');
   } finally {
     if (prevDatasetPath === undefined) delete process.env.REFERENCE_CLIENT_LOOKUP_DATASET_PATH;
     else process.env.REFERENCE_CLIENT_LOOKUP_DATASET_PATH = prevDatasetPath;
     if (prevSqlitePath === undefined) delete process.env.REFERENCE_CLIENT_LOOKUP_SQLITE_PATH;
     else process.env.REFERENCE_CLIENT_LOOKUP_SQLITE_PATH = prevSqlitePath;
   }
+});
+
+test('health endpoint reports degraded status when REFERENCE_LOOKUP_REQUIRED=true and dataset unavailable', async () => {
+  await withServer(
+    {
+      REFERENCE_LOOKUP_REQUIRED: 'true',
+      REFERENCE_CLIENT_LOOKUP_SQLITE_PATH: '/tmp/missing-reference-dataset.sqlite',
+      REFERENCE_CLIENT_LOOKUP_DATASET_PATH: '/tmp/missing-reference-dataset.sqlite'
+    },
+    async (base) => {
+      const response = await fetch(`${base}/health`);
+      assert.equal(response.status, 200);
+      const body = await response.json();
+      assert.equal(body.status, 'degraded');
+      assert.equal(body.existingClientLookup.required, true);
+      assert.equal(body.existingClientLookup.available, false);
+      assert.equal(body.existingClientLookup.criticalDegradation, true);
+    }
+  );
 });

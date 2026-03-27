@@ -103,3 +103,14 @@
 - `no_match` больше не маскируется под `reference_dataset_unavailable`.
 - Диагностика поддерживает probe по конкретному номеру (включая `9506275333`) через тот же lookup path, что WebApp flow.
 - В diagnostics теперь фиксируются matched client ids/names (если безопасно), basis, status и lookup error.
+
+## Update 2026-03-27: Runtime dataset access hardening
+- Runtime dataset contract уточнён:
+  - при `REFERENCE_CLIENT_LOOKUP_DATASET_PATH`/`REFERENCE_CLIENT_LOOKUP_SQLITE_PATH` используется **strict path** (без fallback на default пути);
+  - если explicit/env path указывает на missing/unreadable файл, lookup переходит в `reference_dataset_unavailable` с точной причиной (`DATASET_FILE_MISSING`/`DATASET_UNREADABLE`/`DATASET_LOAD_FAILED`).
+- Primary business rule закреплён: `exact phone match => existing_client=true`, `client_match_basis=phone`, `needs_review=false`.
+- В diagnostics добавлены:
+  - `lastLookupRawPhone` + `lastLookupTargetPhone` (normalized),
+  - `required`/`criticalDegradation` для safety режима.
+- Новый safety-mode env:
+  - `REFERENCE_LOOKUP_REQUIRED=true` — при недоступном dataset runtime health показывает `status=degraded` и `existingClientLookup.criticalDegradation=true`.

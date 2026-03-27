@@ -634,3 +634,29 @@ Root cause на случай деградации (гипотеза, не инц
 - exact phone match rule прозрачно виден в diagnostics (`phone exact match active`); **[confirmed]**
 - navigation/pending flow (`Назад`/`В меню`) сохранён; **[confirmed]**
 - WebApp lookup path не дублирован отдельной «игрушечной» проверкой; **[confirmed]**
+
+---
+
+## 24. Runtime dataset access hardening (2026-03-27 UTC)
+
+### 24.1 Root cause (confirmed in degraded scenario simulation)
+- При ошибочном env override (`REFERENCE_CLIENT_LOOKUP_DATASET_PATH` / `REFERENCE_CLIENT_LOOKUP_SQLITE_PATH`) runtime path указывал на несуществующий файл, и lookup не стартовал (`DATASET_FILE_MISSING`), что давало `client_match_basis=reference_dataset_unavailable`. **[confirmed]**
+- Для устранения неоднозначности path resolution переведён в strict-mode для explicit/env path (без fallback на другие кандидаты). Теперь проблема конфигурации/деплоя видна сразу и не маскируется. **[confirmed]**
+
+### 24.2 Что изменено
+1. `createReferenceClientLookup`:
+   - strict env/explicit path resolution;
+   - расширенная диагностика (`lastLookupRawPhone`, `required`, `criticalDegradation`);
+   - сохранён primary rule: exact phone single match => existing client = true.
+2. `/health`:
+   - добавлен блок `existingClientLookup`;
+   - при `REFERENCE_LOOKUP_REQUIRED=true` и недоступном dataset — `status=degraded`.
+3. Master diagnostics:
+   - отображаются `lookup required`, `critical degradation`, `last lookup raw phone`.
+
+### 24.3 Runtime proof (local deploy-like)
+- Dataset path в runtime: `/workspace/telegram_reviews_bot/data/reference/client_vehicle_bridge/lira_normalized_database.sqlite`; файл существует/читается, SQLite открывается, rows loaded > 0, phone index built. **[confirmed]**
+- Контрольный номер `9506275333`:
+  - exact match, `matchedReferenceClientId=ЦБ005355`, basis=`phone`, `existing_client=true`. **[confirmed]**
+- Safety mode:
+  - при `REFERENCE_LOOKUP_REQUIRED=true` + missing dataset `/health.status=degraded`. **[confirmed]**

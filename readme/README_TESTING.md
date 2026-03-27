@@ -81,3 +81,25 @@ npm test
 10. pending-input flow для `Проверить номер`;
 11. кнопки `Назад` / `В меню` в diagnostic flow;
 12. regression: existing diagnostics/master bot/WebApp/existing-client path.
+
+## Update 2026-03-27: Mandatory runtime access regression
+Дополнительно обязательно покрывать:
+
+### A. Dataset runtime access
+1. strict env path (invalid env path => `DATASET_FILE_MISSING`, без fallback на default dataset);
+2. dataset exists/readable checks;
+3. sqlite open checks (`datasetOpenOk`);
+4. phone index ready (`phoneIndexBuilt=true` в loaded состоянии).
+
+### B. Lookup behavior
+1. `9506275333` -> `exact_match`, `existing_client=true`, `client_match_basis=phone`;
+2. `no_match` scenario -> `existing_client=false`, `client_match_basis=no_match`;
+3. `multiple_matches` scenario -> `needs_review=true`, `client_match_basis=multiple_phone_matches`;
+4. dataset unavailable scenario -> `client_match_basis=reference_dataset_unavailable`.
+
+### C. Rendering
+1. Master card correct fields for exact match/no match/multiple matches/dataset unavailable.
+
+### D. Safety mode
+1. `REFERENCE_LOOKUP_REQUIRED=true` + missing dataset -> `/health.status=degraded`;
+2. diagnostics: `required=true`, `criticalDegradation=true`.
