@@ -106,3 +106,21 @@
 - `Проверить номер` (ручной ввод, с `Назад`/`В меню`)
 
 Ключевое: диагностика использует тот же runtime lookup path, что и WebApp request creation/existing client detection.
+
+## Update 2026-03-27: Reference lookup runtime checks (prod-ready)
+Root cause деградации `reference_dataset_unavailable` в инцидентном сценарии: runtime получал невалидный dataset path из env/deploy-конфига (missing/unreadable SQLite), и lookup не мог стартовать.
+
+Что проверять после deploy:
+1. Runtime path:
+   - если env override задан, используется только он (strict);
+   - если env override не задан, используется `data/reference/client_vehicle_bridge/lira_normalized_database.sqlite` (в контейнере обычно `/app/data/reference/client_vehicle_bridge/lira_normalized_database.sqlite`).
+2. `GET /internal/diagnostics`:
+   - `datasetPath`, `datasetExists`, `datasetReadable`, `datasetType=sqlite`,
+   - `datasetOpenOk`, `loaderStatus=loaded`, `phoneIndexBuilt=true`, `available=true`.
+3. Probe номер `9506275333` через master-бот (`Диагностика -> База клиентов -> Проверить lookup (9506275333)`):
+   - `result=exact_match`, `matchBasis=phone`, `matchCount=1`.
+4. Создать WebApp заявку с `9506275333`:
+   - в карточке master-бота: `Действующий клиент: Да`, `Основание: phone`, `Требуется проверка: Нет`.
+
+Safety mode:
+- При `REFERENCE_LOOKUP_REQUIRED=true` и недоступном dataset `/health` возвращает `status=degraded`, а diagnostics содержит `criticalDegradation=true`.

@@ -432,13 +432,21 @@ function renderInternalRequestCardPage({ adminId, card }) {
   </html>`;
 }
 
-function buildHealthPayload(config) {
+function buildHealthPayload(config, existingClientLookup) {
+  const lookupDiagnostics = existingClientLookup?.getDiagnostics?.() || {};
+  const degraded = Boolean(lookupDiagnostics.criticalDegradation);
   return {
-    status: 'ok',
+    status: degraded ? 'degraded' : 'ok',
     uptimeSeconds: Math.round(process.uptime()),
     env: config.nodeEnv,
     timestamp: new Date().toISOString(),
-    envAudit: config.envAudit
+    envAudit: config.envAudit,
+    existingClientLookup: {
+      required: Boolean(lookupDiagnostics.required),
+      available: Boolean(lookupDiagnostics.available),
+      phoneIndexBuilt: Boolean(lookupDiagnostics.phoneIndexBuilt),
+      criticalDegradation: degraded
+    }
   };
 }
 
@@ -481,7 +489,7 @@ function createServer({ config, logger }) {
     const pathname = requestUrl.pathname;
     logger.info('http request received', { method: req.method, pathname, ip: requestIp(req) });
 
-    if (req.method === 'GET' && pathname === '/health') return sendJson(res, 200, buildHealthPayload(config));
+    if (req.method === 'GET' && pathname === '/health') return sendJson(res, 200, buildHealthPayload(config, existingClientLookup));
     if (req.method === 'GET' && pathname === '/health/db') return sendJson(res, 200, buildDbHealthPayload());
     if (req.method === 'GET' && pathname === '/health/max') return sendJson(res, 200, buildMaxHealthPayload(config));
 

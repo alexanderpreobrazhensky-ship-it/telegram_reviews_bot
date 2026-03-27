@@ -55,13 +55,10 @@ function detectDatasetType(datasetPath) {
 
 function candidateDatasetPaths(explicitPath = '') {
   if (explicitPath) return [explicitPath];
+  const configuredEnvPath = process.env.REFERENCE_CLIENT_LOOKUP_DATASET_PATH || process.env.REFERENCE_CLIENT_LOOKUP_SQLITE_PATH || '';
+  if (configuredEnvPath) return [configuredEnvPath];
   const fromMainModule = path.join(path.dirname(require.main?.filename || process.cwd()), REFERENCE_DATASET_RELATIVE_PATH);
-  const configured = [
-    process.env.REFERENCE_CLIENT_LOOKUP_DATASET_PATH,
-    process.env.REFERENCE_CLIENT_LOOKUP_SQLITE_PATH
-  ].filter(Boolean);
   return [
-    ...configured,
     DEFAULT_REFERENCE_DATASET_PATH,
     path.resolve(process.cwd(), REFERENCE_DATASET_RELATIVE_PATH),
     path.resolve(fromMainModule),
@@ -104,9 +101,11 @@ function resolveDatasetPath({ logger = console, explicitPath = '' } = {}) {
 
 function createReferenceClientLookup({ logger = console, datasetPath = '' } = {}) {
   const enabled = boolEnv('WEBAPP_EXISTING_CLIENT_LOOKUP_ENABLED', true);
+  const required = boolEnv('REFERENCE_LOOKUP_REQUIRED', false);
   const resolved = resolveDatasetPath({ logger, explicitPath: datasetPath });
   const state = {
     enabled,
+    required,
     lookupEnabled: enabled,
     exactPhoneMatchActive: enabled,
     configured: Boolean(resolved.configured),
@@ -126,6 +125,7 @@ function createReferenceClientLookup({ logger = console, datasetPath = '' } = {}
     lastLookupStatus: 'not_attempted',
     lastLookupAttemptedAt: null,
     lastLookupResult: null,
+    lastLookupRawPhone: null,
     lastLookupTargetPhone: null,
     lastLookupMatchCount: 0,
     lastLookupMatchedClientIds: [],
@@ -141,12 +141,16 @@ function createReferenceClientLookup({ logger = console, datasetPath = '' } = {}
     db: null,
     queryByPhone: null
   };
+  const toDiagnostics = () => ({
+    ...state,
+    criticalDegradation: Boolean(state.required && state.enabled && (!state.available || !state.phoneIndexBuilt))
+  });
 
   if (!enabled) {
     state.lastLookupStatus = 'disabled';
     state.loaderStatus = 'not_started';
     return {
-      getDiagnostics: () => ({ ...state }),
+      getDiagnostics: toDiagnostics,
       runLookupDiagnostics: ({ phone, fullName } = {}) => ({
         rawPhone: phone || null,
         normalizedPhone: normalizePhoneForLookup(phone),
@@ -192,7 +196,7 @@ function createReferenceClientLookup({ logger = console, datasetPath = '' } = {}
       state.loaderFailureReason = 'DATASET_FILE_MISSING';
       state.lastError = `Dataset file does not exist: ${state.datasetPath}`;
       return {
-        getDiagnostics: () => ({ ...state }),
+        getDiagnostics: toDiagnostics,
         runLookupDiagnostics: ({ phone, fullName } = {}) => ({
           rawPhone: phone || null,
           normalizedPhone: normalizePhoneForLookup(phone),
@@ -234,7 +238,7 @@ function createReferenceClientLookup({ logger = console, datasetPath = '' } = {}
       state.loaderFailureReason = 'DATASET_UNREADABLE';
       state.lastError = `Dataset file is not readable: ${state.datasetPath}`;
       return {
-        getDiagnostics: () => ({ ...state }),
+        getDiagnostics: toDiagnostics,
         runLookupDiagnostics: ({ phone, fullName } = {}) => ({
           rawPhone: phone || null,
           normalizedPhone: normalizePhoneForLookup(phone),
@@ -288,7 +292,7 @@ function createReferenceClientLookup({ logger = console, datasetPath = '' } = {}
       state.db.close();
       state.db = null;
       return {
-        getDiagnostics: () => ({ ...state }),
+        getDiagnostics: toDiagnostics,
         runLookupDiagnostics: ({ phone, fullName } = {}) => ({
           rawPhone: phone || null,
           normalizedPhone: normalizePhoneForLookup(phone),
@@ -365,6 +369,7 @@ function createReferenceClientLookup({ logger = console, datasetPath = '' } = {}
     state.lastLookupMatchedClientIds = [];
     state.lastLookupError = null;
 
+    state.lastLookupRawPhone = phone || null;
     state.lastLookupTargetPhone = normalizedPhone;
     logger.info?.('reference lookup phone normalization result', { inputPhone: phone || null, normalizedPhone });
     logger.info?.('reference lookup attempted', { datasetPath: state.datasetPath, available: state.available, normalizedPhone, normalizedFio });
@@ -533,6 +538,7 @@ function createReferenceClientLookup({ logger = console, datasetPath = '' } = {}
   return {
     getDiagnostics: () => ({
       enabled: state.enabled,
+      required: state.required,
       configured: state.configured,
       datasetPath: state.datasetPath,
       source: state.source,
@@ -554,13 +560,15 @@ function createReferenceClientLookup({ logger = console, datasetPath = '' } = {}
       lastLookupStatus: state.lastLookupStatus,
       lastLookupAttemptedAt: state.lastLookupAttemptedAt,
       lastLookupResult: state.lastLookupResult,
+      lastLookupRawPhone: state.lastLookupRawPhone,
       lastLookupTargetPhone: state.lastLookupTargetPhone,
       lastLookupMatchCount: state.lastLookupMatchCount,
       lastLookupMatchedClientIds: state.lastLookupMatchedClientIds,
       lastLookupError: state.lastLookupError,
       cacheStatus: 'sqlite_direct_no_cache',
       pathCandidates: state.pathCandidates,
-      lastError: state.lastError
+      lastError: state.lastError,
+      criticalDegradation: Boolean(state.required && state.enabled && (!state.available || !state.phoneIndexBuilt))
     }),
     runLookupDiagnostics,
     lookupByPhoneAndFio
