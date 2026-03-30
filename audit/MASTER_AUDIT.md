@@ -687,3 +687,33 @@ Root cause на случай деградации (гипотеза, не инц
 ### Бизнес-правило
 - Primary rule без изменений: exact phone match => `existing_client=true`, `client_match_basis=phone`.
 - `no_match` и `dataset_unavailable` остаются строго разделёнными состояниями.
+
+---
+
+## 25. Deploy mismatch remediation for reference SQLite (2026-03-30 UTC)
+
+### 25.1 Root cause
+- В деградировавшем runtime зафиксировано: resolved path указывал на `/app/data/reference/client_vehicle_bridge/lira_normalized_database.sqlite`, но директория/файл отсутствовали (`DATASET_FILE_MISSING`).
+- Файл присутствовал в git/repo, однако runtime `/app/data` в части deploy-сценариев не содержал reference dataset (пустой/перекрытый data-layer).
+
+### 25.2 Что исправлено
+1. **Deploy artifact hardening (Docker):**
+   - dataset копируется в immutable seed path: `/opt/reference-assets/client_vehicle_bridge/lira_normalized_database.sqlite`.
+2. **Startup self-check/repair:**
+   - на boot выполняется проверка expected runtime path;
+   - если missing/unreadable — создаётся `/app/data/reference/client_vehicle_bridge/` и выполняется copy-back из seed path;
+   - логируются expected path, exists/readable, size, source copy.
+3. **Lookup path consistency:**
+   - WebApp flow и master diagnostics по-прежнему используют один и тот же runtime lookup entrypoint/путь.
+
+### 25.3 Expected operational proof после deploy
+- `dataset configured=yes`
+- `dataset path resolved=yes`
+- `runtime dataset exists=yes`
+- `dataset readable=yes`
+- `dataset open=ok`
+- `total rows > 0`
+- `phone index built=yes`
+- probes:
+  - `9506275333` => `exact_match`
+  - `9200201890` => `exact_match`

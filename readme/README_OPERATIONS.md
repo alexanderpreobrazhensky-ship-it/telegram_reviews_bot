@@ -131,3 +131,23 @@ Safety mode:
 2. `Проверить lookup (9506275333)` и `Проверить lookup (9200201890)` — отдельные runtime-пробы тем же lookup path, что WebApp request creation flow.
 3. `Проверить номер` — ручной ввод телефона с нормализацией и детальным результатом (raw/normalized/match count/matched ids/result/error).
 4. `Логи базы` — операторский срез path resolution + file checks + loader/index status + last lookup + runtime cwd/main module + candidate paths.
+
+## Update 2026-03-30: Deploy mismatch fix for reference SQLite (variant A)
+Root cause деградации в контейнере: в части deploy-сценариев runtime слой `/app/data` оказывался пустым/перекрытым, из-за чего файл `lira_normalized_database.sqlite` отсутствовал по ожидаемому пути `/app/data/reference/client_vehicle_bridge/...` и lookup переходил в `DATASET_FILE_MISSING`.
+
+Что изменено в deploy chain:
+1. В Docker-образ добавлена immutable seed-копия SQLite вне runtime data-каталога: `/opt/reference-assets/client_vehicle_bridge/lira_normalized_database.sqlite`.
+2. На старте приложения выполняется self-check/repair:
+   - проверка expected runtime path;
+   - если файла нет/нечитаем — копирование из seed path в `/app/data/reference/client_vehicle_bridge/lira_normalized_database.sqlite`;
+   - повторная фиксация `exists/readable/size`.
+3. После этого запускается штатный loader `createReferenceClientLookup` с тем же runtime path.
+
+Operational expected result после deploy:
+- `dataset configured: yes`
+- `dataset path resolved: yes`
+- `runtime dataset exists: yes`
+- `dataset readable: yes`
+- `dataset open: ok`
+- `phone index built: yes`
+- `lookup enabled: yes`

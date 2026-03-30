@@ -121,3 +121,12 @@
   - `9200201890`
 - Для каждого probe возвращается отдельный lookup verdict (`exact_match` / `no_match` / `multiple_matches` / `dataset_unavailable` / `lookup_failed`) и диагностический статус (`LOOKUP_OK_*`, `DATASET_*`, `REFERENCE_DATASET_UNAVAILABLE`).
 - Диагностика и WebApp используют один и тот же runtime lookup entrypoint (`lookupByPhoneAndFio`), что исключает рассинхрон «диагностика проходит, а прод-flow не работает».
+
+## Update 2026-03-30: Runtime delivery guarantee for SQLite
+- Выявлен deploy mismatch: при части runtime-развёртываний файл отсутствовал в `/app/data/reference/client_vehicle_bridge/lira_normalized_database.sqlite`, хотя в git он есть.
+- Причина: runtime data directory мог быть пустым/перекрытым, и image-layer копия в `/app/data` была недоступна.
+- Исправление (без смены архитектуры хранения):
+  1. В image добавляется seed-артефакт SQLite в `/opt/reference-assets/client_vehicle_bridge/lira_normalized_database.sqlite`.
+  2. На старте приложения выполняется self-check и при необходимости copy-back в expected runtime path `/app/data/reference/client_vehicle_bridge/lira_normalized_database.sqlite`.
+  3. Lookup/diagnostics продолжают использовать тот же runtime path и тот же lookup entrypoint.
+- Бизнес-правило не изменено: `exact phone match => existing_client=true`, `client_match_basis=phone`.

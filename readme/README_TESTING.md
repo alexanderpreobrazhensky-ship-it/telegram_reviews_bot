@@ -110,3 +110,23 @@ npm test
 2. Probe-результат для `9506275333`: `exact_match`, `existing_client=true`, `client_match_basis=phone`.
 3. Probe-результат для `9200201890`: `exact_match`, `existing_client=true`, `client_match_basis=phone`.
 4. `Логи базы` показывают runtime path resolution, file checks, loader/index status, последний lookup и candidate paths.
+
+## Update 2026-03-30: Deploy delivery regression checks (mandatory)
+### A. File / deploy chain
+1. dataset exists in repo: `data/reference/client_vehicle_bridge/lira_normalized_database.sqlite`;
+2. dataset included in deploy artifact (build-step verify script passes);
+3. runtime dataset directory exists (`/app/data/reference/client_vehicle_bridge`);
+4. runtime dataset file exists;
+5. runtime dataset readable;
+6. sqlite opens and `totalClientRows > 0`.
+
+### B. Runtime self-check/repair
+1. startup logs include `reference dataset runtime presence check started`;
+2. if runtime file missing, startup logs include seed copy result from `/opt/reference-assets/...`;
+3. `reference dataset startup diagnostics` confirms final runtime state.
+
+### C. Lookup probes
+1. `9506275333` => `exact_match`, `existing_client=true`, `client_match_basis=phone`;
+2. `9200201890` => `exact_match`, `existing_client=true`, `client_match_basis=phone`;
+3. no_match scenario => `client_match_basis=no_match`;
+4. multiple scenario => `client_match_basis=multiple_phone_matches`, `needs_review=true`.
