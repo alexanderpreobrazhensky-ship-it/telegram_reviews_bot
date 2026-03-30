@@ -14,6 +14,9 @@ RUN npm ci --omit=dev
 
 COPY . .
 RUN node scripts/verifyReferenceDataset.js --strict
+RUN mkdir -p /opt/reference-assets/client_vehicle_bridge \
+  && cp data/reference/client_vehicle_bridge/lira_normalized_database.sqlite /opt/reference-assets/client_vehicle_bridge/lira_normalized_database.sqlite
 
 ENV NODE_ENV=production
+ENV REFERENCE_CLIENT_LOOKUP_EMBEDDED_DATASET_PATH=/opt/reference-assets/client_vehicle_bridge/lira_normalized_database.sqlite
 CMD ["node", "app.js"]

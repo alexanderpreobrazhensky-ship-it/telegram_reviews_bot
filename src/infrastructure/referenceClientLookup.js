@@ -231,6 +231,11 @@ function createReferenceClientLookup({ logger = console, datasetPath = '' } = {}
       runtimeDatasetDirExists: state.runtimeDatasetDirExists,
       runtimeDatasetDirListing: state.runtimeDatasetDirListing
     });
+    logger.info?.('reference dataset open started', {
+      datasetPath: state.datasetPath,
+      datasetExists: state.datasetExists,
+      datasetReadable: state.datasetReadable
+    });
 
     if (!state.datasetExists) {
       state.lastLookupStatus = 'dataset_missing';
@@ -319,6 +324,8 @@ function createReferenceClientLookup({ logger = console, datasetPath = '' } = {}
     state.db = new Database(state.datasetPath, { readonly: true, fileMustExist: true });
     state.datasetOpenOk = true;
     state.datasetOpenError = null;
+    logger.info?.('reference dataset open result', { datasetPath: state.datasetPath, datasetOpenOk: state.datasetOpenOk });
+    logger.info?.('reference dataset load started', { tableName: state.tableName, datasetPath: state.datasetPath });
     const columns = state.db.prepare('PRAGMA table_info(clients)').all().map((row) => row.name);
     state.clientIdColumn = findColumn(columns, ['client_code', 'client_external_id', 'id']);
     state.clientNameColumn = findColumn(columns, ['client_name', 'full_name', 'name']);
@@ -390,6 +397,11 @@ function createReferenceClientLookup({ logger = console, datasetPath = '' } = {}
       totalClientRows: state.totalClientRows,
       phoneIndexBuilt: state.phoneIndexBuilt
     });
+    logger.info?.('reference dataset load result', {
+      loaderStatus: state.loaderStatus,
+      totalClientRows: state.totalClientRows
+    });
+    logger.info?.('reference dataset phone index build result', { phoneIndexBuilt: state.phoneIndexBuilt });
   } catch (error) {
     state.lastLookupStatus = 'init_failed';
     state.loaderStatus = 'failed';
@@ -402,6 +414,11 @@ function createReferenceClientLookup({ logger = console, datasetPath = '' } = {}
     logger.error?.('reference dataset bootstrap failed', {
       datasetPath: state.datasetPath,
       error: state.lastError
+    });
+    logger.error?.('reference dataset open result', {
+      datasetPath: state.datasetPath,
+      datasetOpenOk: state.datasetOpenOk,
+      datasetOpenError: state.datasetOpenError
     });
   }
 
@@ -475,11 +492,12 @@ function createReferenceClientLookup({ logger = console, datasetPath = '' } = {}
     }
     state.lastLookupMatchCount = candidates.length;
     state.lastLookupMatchedClientIds = candidates.map((item) => item.client_id || null).filter(Boolean).slice(0, 10);
-    logger.info?.('reference lookup match count', { normalizedPhone, matchCount: candidates.length });
+    logger.info?.('reference lookup match count', { normalizedPhone, matchCount: candidates.length, matchedClientIds: state.lastLookupMatchedClientIds });
 
     if (!candidates.length) {
       state.lastLookupStatus = 'no_match';
       state.lastLookupResult = 'no_match';
+      logger.info?.('reference lookup final result', { normalizedPhone, result: 'no_match', matchCount: 0 });
       return {
         existingClient: false,
         needsReview: false,
@@ -496,6 +514,7 @@ function createReferenceClientLookup({ logger = console, datasetPath = '' } = {}
     if (candidates.length > 1) {
       state.lastLookupStatus = 'multiple_matches';
       state.lastLookupResult = 'multiple_phone_matches';
+      logger.warn?.('reference lookup final result', { normalizedPhone, result: 'multiple_matches', matchCount: candidates.length, matchedClientIds: state.lastLookupMatchedClientIds });
       return {
         existingClient: false,
         needsReview: true,
@@ -520,6 +539,7 @@ function createReferenceClientLookup({ logger = console, datasetPath = '' } = {}
     logger.info?.('reference lookup matched client', { normalizedPhone, matchedReferenceClientId: matched.client_id || null });
     state.lastLookupStatus = 'exact_match';
     state.lastLookupResult = 'exact_phone_match';
+    logger.info?.('reference lookup final result', { normalizedPhone, result: 'exact_match', matchCount: 1, matchedClientId: matched.client_id || null });
     return {
       existingClient: true,
       needsReview: false,

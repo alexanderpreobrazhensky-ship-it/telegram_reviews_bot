@@ -8,6 +8,7 @@ const { createScheduler } = require('../../src/infrastructure/scheduler');
 const { createServer, normalizePhone10, validateClientRequestPayload } = require('../../src/server');
 const { loadConfig } = require('../../src/infrastructure/config');
 const logger = require('../../src/infrastructure/logging/logger');
+const { ensureReferenceDatasetRuntime } = require('../../src/infrastructure/referenceDatasetRuntime');
 
 async function withServer(run) {
   db.resetStore();
@@ -139,5 +140,32 @@ test('db path follows env and initializes missing sqlite store explicitly', () =
     else process.env.DB_SQLITE_PATH = originalSqlite;
     if (originalFile === undefined) delete process.env.DB_FILE_PATH;
     else process.env.DB_FILE_PATH = originalFile;
+  }
+});
+
+test('reference dataset runtime self-check restores expected path from embedded seed', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'reference-runtime-seed-'));
+  const expectedPath = path.join(tmpDir, 'data', 'reference', 'client_vehicle_bridge', 'lira_normalized_database.sqlite');
+  const seedPath = path.join(tmpDir, 'seed', 'lira.sqlite');
+  fs.mkdirSync(path.dirname(seedPath), { recursive: true });
+  fs.writeFileSync(seedPath, Buffer.from('seed-reference-sqlite-payload'));
+
+  const prevSeedPath = process.env.REFERENCE_CLIENT_LOOKUP_EMBEDDED_DATASET_PATH;
+  process.env.REFERENCE_CLIENT_LOOKUP_EMBEDDED_DATASET_PATH = seedPath;
+  try {
+    const result = ensureReferenceDatasetRuntime({
+      logger: { info() {}, warn() {} },
+      expectedPath
+    });
+    assert.equal(result.datasetExists, true);
+    assert.equal(result.datasetReadable, true);
+    assert.equal(result.copied, true);
+    assert.equal(result.copiedFrom, seedPath);
+    assert.equal(fs.existsSync(expectedPath), true);
+    assert.equal(fs.readFileSync(expectedPath).toString('utf8'), 'seed-reference-sqlite-payload');
+  } finally {
+    if (prevSeedPath === undefined) delete process.env.REFERENCE_CLIENT_LOOKUP_EMBEDDED_DATASET_PATH;
+    else process.env.REFERENCE_CLIENT_LOOKUP_EMBEDDED_DATASET_PATH = prevSeedPath;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });

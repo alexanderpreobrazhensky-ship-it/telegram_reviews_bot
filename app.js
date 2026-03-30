@@ -8,6 +8,7 @@ const { reconcileMaxWebhookSubscriptions } = require('./src/infrastructure/max/s
 const { createEmailIntakePoller } = require('./src/integrations/email/intakePoller');
 const { integrationService } = require('./src/core/application');
 const { getBuildInfo } = require('./src/infrastructure/buildInfo');
+const { ensureReferenceDatasetRuntime } = require('./src/infrastructure/referenceDatasetRuntime');
 
 function bootstrap() {
   const config = loadConfig();
@@ -33,6 +34,8 @@ function bootstrap() {
     initStatus: initializedDb.initStatus,
     migration: initializedDb.migration
   });
+  const referenceDatasetRuntime = ensureReferenceDatasetRuntime({ logger });
+  logger.info('Reference dataset runtime self-check', referenceDatasetRuntime);
   const server = createServer({ config, logger });
   const aiInfrastructure = require('./src/infrastructure/ai').initializeAiInfrastructure({ config, db, logger });
   integrationService.configureIntegrationRuntime({
